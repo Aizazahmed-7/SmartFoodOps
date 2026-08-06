@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+infra/local/keys/
+
+# Local state
+deploy/compose/.volumes/
+*.sqlite
+*.db
+
+# OS / editor
+.DS_Store
+.idea/
