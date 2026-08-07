@@ -308,9 +308,9 @@ The canonical ports above are the design defaults. This laptop already runs its 
 
 | Component | Canonical | On this machine |
 |---|---|---|
-| Postgres (`sfo-aurora-main` stand-in) | 5432 | **15432** — point desktop pgAdmin here (`sfo`/`sfo`) |
-| Redis | 6379 | **16379** |
-| edge-bff direct | 8000 | **18000** — but always prefer the gateway :8080 |
+| Postgres | 5432 | **5432** — the Homebrew postgresql@14/@17 services were stopped (`brew services start postgresql@14` to bring yours back; then remap ours) |
+| Redis | 6379 | **16379** (local Redis still running) |
+| edge-bff direct | 8000 | **18000** (local caddy on 8000) — always prefer the gateway :8080 |
 
 ## 12. Troubleshooting
 

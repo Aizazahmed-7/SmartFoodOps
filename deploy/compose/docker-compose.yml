@@ -39,8 +39,7 @@ services:
   postgres:
     profiles: [core]
     image: postgres:15
-    # host 15432: the laptop runs its own Postgres on 5432
-    ports: ["15432:5432"]
+    ports: ["5432:5432"]
     environment:
       POSTGRES_USER: sfo
       POSTGRES_PASSWORD: sfo
