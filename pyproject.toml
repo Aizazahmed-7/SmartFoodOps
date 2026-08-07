@@ -25,6 +25,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "--import-mode=importlib"
 testpaths = ["libs", "services", "tools"]
 
 [tool.uv]

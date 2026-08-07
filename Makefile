@@ -38,7 +38,7 @@ dev: ## Run one service natively with reload: make dev SVC=order
 	uv run --package $(SVC) uvicorn $(subst -,_,$(SVC)).main:app --reload --port $(PORT)
 
 test: ## Unit tests (no infra needed)
-	uv run pytest -q
+	uv sync --all-packages -q && uv run --no-sync pytest -q
 
 seed:
 	uv run --package seed python -m seed.main
