@@ -302,15 +302,9 @@ Integration tests also assert the BFF's `Cache-Control`/`ETag`/`Vary` headers, s
 
 ---
 
-## 11.5 Port remaps on this machine
+## 11.5 Local port conflicts (resolved)
 
-The canonical ports above are the design defaults. This laptop already runs its own Postgres (5432), Redis (6379), and a caddy server (8000), so compose remaps the host side — container-internal ports and all service-to-service traffic are unchanged:
-
-| Component | Canonical | On this machine |
-|---|---|---|
-| Postgres | 5432 | **5432** — the Homebrew postgresql@14/@17 services were stopped (`brew services start postgresql@14` to bring yours back; then remap ours) |
-| Redis | 6379 | **16379** (local Redis still running) |
-| edge-bff direct | 8000 | **18000** (local caddy on 8000) — always prefer the gateway :8080 |
+Everything now runs on the canonical ports. Three things on this machine previously squatted on them and were stopped: Homebrew `postgresql@14`/`@17` (→ `brew services start postgresql@14` to revive), Homebrew `redis` (→ `brew services start redis`), a hand-run caddy proxy on 8000, and another Docker project's Redis (`docker start local-deployment-redis-1` to revive). If any of them comes back, our compose bring-up will fail with "port already allocated" — that's the tell.
 
 ## 12. Troubleshooting
 

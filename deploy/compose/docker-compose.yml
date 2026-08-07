@@ -56,8 +56,7 @@ services:
   redis:
     profiles: [core]
     image: redis:7
-    # host 16379: the laptop runs its own Redis on 6379
-    ports: ["16379:6379"]
+    ports: ["6379:6379"]
     command: ["redis-server", "--maxmemory-policy", "volatile-ttl"]
 
   rabbitmq:
@@ -199,8 +198,7 @@ services:
   edge-bff:
     <<: *app-base
     profiles: [apps]
-    # host 18000: the laptop runs caddy on 8000; canonical entry is the gateway :8080
-    ports: ["18000:8000"]
+    ports: ["8000:8000"]
     environment:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/edge-bff
