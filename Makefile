@@ -13,7 +13,10 @@ else
 	$(COMPOSE) --profile core --profile apps up -d --wait
 endif
 
-up-full: up up-apps
+up-ui: ## Start management consoles (Kafka console :8085, Redis UI :8086); Postgres → desktop pgAdmin on localhost:5432
+	$(COMPOSE) --profile core --profile ui up -d
+
+up-full: up up-apps up-ui
 
 down:
 	$(COMPOSE) --profile core --profile apps down

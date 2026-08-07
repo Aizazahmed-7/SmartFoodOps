@@ -39,7 +39,8 @@ services:
   postgres:
     profiles: [core]
     image: postgres:15
-    ports: ["5432:5432"]
+    # host 15432: the laptop runs its own Postgres on 5432
+    ports: ["15432:5432"]
     environment:
       POSTGRES_USER: sfo
       POSTGRES_PASSWORD: sfo
@@ -56,7 +57,8 @@ services:
   redis:
     profiles: [core]
     image: redis:7
-    ports: ["6379:6379"]
+    # host 16379: the laptop runs its own Redis on 6379
+    ports: ["16379:6379"]
     command: ["redis-server", "--maxmemory-policy", "volatile-ttl"]
 
   rabbitmq:
@@ -90,6 +92,7 @@ services:
   temporal:
     profiles: [core]
     image: temporalio/temporal:latest
+    user: root
     ports: ["7233:7233", "8233:8233"]
     entrypoint: ["temporal"]
     command:
@@ -197,12 +200,34 @@ services:
   edge-bff:
     <<: *app-base
     profiles: [apps]
-    ports: ["8000:8000"]
+    # host 18000: the laptop runs caddy on 8000; canonical entry is the gateway :8080
+    ports: ["18000:8000"]
     environment:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/edge-bff
     command: ["uv", "run", "--package", "edge-bff", "uvicorn", "edge_bff.main:app",
               "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # ── ui profile — management consoles ────────────────────────────
+  # Postgres has no container UI on purpose: connect your desktop pgAdmin
+  # to localhost:5432 (user sfo / password sfo, maintenance DB "sfo").
+  kafka-console:
+    profiles: [ui]
+    image: docker.redpanda.com/redpandadata/console:latest
+    ports: ["8085:8080"]
+    environment:
+      KAFKA_BROKERS: kafka:9092
+    depends_on:
+      kafka: { condition: service_healthy }
+
+  redis-commander:
+    profiles: [ui]
+    image: ghcr.io/joeferner/redis-commander:latest
+    ports: ["8086:8081"]
+    environment:
+      REDIS_HOSTS: global-redis:redis:6379
+    depends_on:
+      redis: { condition: service_started }
 
 volumes:
   pg-data:

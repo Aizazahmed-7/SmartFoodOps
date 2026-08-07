@@ -302,6 +302,16 @@ Integration tests also assert the BFF's `Cache-Control`/`ETag`/`Vary` headers, s
 
 ---
 
+## 11.5 Port remaps on this machine
+
+The canonical ports above are the design defaults. This laptop already runs its own Postgres (5432), Redis (6379), and a caddy server (8000), so compose remaps the host side — container-internal ports and all service-to-service traffic are unchanged:
+
+| Component | Canonical | On this machine |
+|---|---|---|
+| Postgres (`sfo-aurora-main` stand-in) | 5432 | **15432** — point desktop pgAdmin here (`sfo`/`sfo`) |
+| Redis | 6379 | **16379** |
+| edge-bff direct | 8000 | **18000** — but always prefer the gateway :8080 |
+
 ## 12. Troubleshooting
 
 | Symptom | Cause | Fix |
