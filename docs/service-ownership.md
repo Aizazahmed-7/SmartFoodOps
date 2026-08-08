@@ -13,7 +13,7 @@ Every datastore is named for its owner, so the name answers "whose is this?" wit
 | DynamoDB table | `sfo-<owner>-<entity>` | `sfo-dispatch-deliveries` |
 | Redis keyspace in `global-redis` | `<owner>:…` | `catalog:menu:…` |
 | Shared Redis key (three only) | `shared:…` | `shared:geo:…` — the prefix *is* the warning |
-| Kafka topic in `global-kafka` | `<domain>.events` | `orders.events` |
+| Kafka topic in `global-kafka` | `<cell>.<domain>.events` (cell-prefixed from day 1, one cell today) | `c1.orders.events` |
 
 **Placeholder notation**: `<name>` means substitute a value. Literal braces `{name}` mean a **Redis cluster hash tag** and are load-bearing — they force keys onto one shard. `catalog:menu:{rid}:<ver>` colocates a restaurant's blob and pointer on purpose; `shared:geo:<cell>:<gh4>` has no tag on purpose, so geo shards spread across nodes rather than collapsing onto one.
 
@@ -23,12 +23,20 @@ Every datastore is named for its owner, so the name answers "whose is this?" wit
 
 | Name | What | Notes |
 |---|---|---|
-| `sfo-aurora-main` | One Aurora PostgreSQL cluster, one logical DB per service, RDS Proxy in front | Schema ownership, **not** performance isolation — [ADR-0016](adr/0016-postgres-topology-one-cluster-database-per-service.md) |
+| `sfo-aurora-main` | One Aurora PostgreSQL cluster, one logical DB per service, per-service PgBouncer (transaction mode) in front — RDS Proxy for Lambdas only | Schema ownership, **not** performance isolation — [ADR-0016](adr/0016-postgres-topology-one-cluster-database-per-service.md) |
 | `sfo-aurora-analytics` | Dedicated cluster | Long analytical reads would pollute the OLTP buffer pool |
 | `sfo-aurora-temporal` | Dedicated cluster | Temporal persistence; correctness-critical, distinct write profile |
 | `global-redis` | One ElastiCache cluster, partitioned by keyspace prefix | `cache_client` refuses keys outside the service's namespace; Redis ACLs enforce it server-side |
 | `global-kafka` | MSK + Schema Registry | Topics owned per domain; **no service produces directly** except the telemetry exception below |
 | DynamoDB | Regional service — tables, not clusters | Owner encoded in the table name |
+
+**Redis cluster groups** (ADR-0018, D5 trigger): every keyspace prefix carries a **cluster-group** annotation — the cluster it lands on if the trigger-gated three-way split fires. One cluster today; the split is config, not code, because `cache_client` resolves the endpoint per namespace.
+
+| Group | Prefixes |
+|---|---|
+| **money** | `edge:rl:*`, `edge:adm:place:*`, `order:idem:*`, `payment:idem:*`, `shared:ticket:*` |
+| **realtime** | `shared:geo:*`, `shared:loc:*`, `shared:hb:*`, `shared:trk:*`, `inventory:adm:*` |
+| **catalog** | `catalog:menu:*` (blob + pointer), `catalog:browse:*`, `catalog:lock:*` |
 
 Compute legend: **MS** = ECS Fargate microservice · **GW** = ECS on EC2 connection gateway · **λ** = Lambda · **W** = worker (no inbound API).
 
@@ -51,7 +59,7 @@ The only service with no persistent data of its own. That emptiness is what lets
 
 | | |
 |---|---|
-| Postgres | **`identity_db`** — `users`, `roles`, `addresses`, `refresh_tokens` (family-tracked for reuse detection), `outbox` |
+| Postgres | **`identity_db`** — `users`, `roles`, `addresses` (**soft-delete only** — orders snapshot the delivery address and must survive an address deletion, ADR-0018), `refresh_tokens` (family-tracked for reuse detection), `outbox` |
 | Redis | none |
 | Kafka | **produces** `identity.events` (outbox → Debezium) |
 | Serves | `/.well-known/jwks.json` — the public keys edge-bff verifies with |
@@ -93,7 +101,7 @@ The state machine owner, and the only writer of order transitions.
 
 | | |
 |---|---|
-| Postgres | **`order_db`** — `orders` + `pricing_snapshot`, hour-partitioned `outbox` (partitions dropped ≤6h after publish confirmed), restaurant order feed index `(restaurant_id, status, placed_at)` |
+| Postgres | **`order_db`** — `orders` (with `delivery_address_snapshot`) + `order_items` (per-line name/price snapshots — an order survives menu edits; ADR-0018) + `pricing_snapshot`, hour-partitioned `outbox` (partitions dropped ≤6h after publish confirmed), restaurant order feed index `(restaurant_id, status, placed_at)` |
 | DynamoDB | none — it reads nothing from the tracking or history tables; those belong to the projectors |
 | Redis | `order:idem:<key>` — idempotency fast-path, 15 min (PG keeps 7d and remains the arbiter) |
 | Kafka | **produces** `orders.events` (outbox → Debezium) |
@@ -106,7 +114,7 @@ Expected first candidate for its own Aurora cluster under ADR-0016's split trigg
 
 | | |
 |---|---|
-| Postgres | **`payment_db`** — double-entry `ledger` (append-only, 7y), `idempotency` table (read-before-execute, money keys `<order_id>:<op>`), `outbox` |
+| Postgres | **`payment_db`** — double-entry `ledger` (append-only, 7y), `idempotency` table (read-before-execute, money keys `<order_id>:<op>`), forward-compat PSP columns `psp`/`payment_intent_id`/`capture_before` + webhook-dedupe table shape (mock-populated until a real PSP; ADR-0010 amendment), `outbox` |
 | Redis | `payment:idem:<key>` — fast-path only |
 | Kafka | **produces** `payments.events` (outbox → Debezium) |
 | External | mock PSP behind the `PaymentGateway` port ([ADR-0010](adr/0010-mock-psp-behind-payment-gateway-port.md)) |

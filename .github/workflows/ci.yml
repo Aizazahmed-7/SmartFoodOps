@@ -1,0 +1,31 @@
+# Minimal committed CI — honest to what exists today (no docker, no compose).
+# Staged growth per the build plan (repo-structure.md §5):
+#   W2: import-linter + pyright stages, Temporal replay + action-budget gates
+#   W3: integration/consumer chaos (duplicate/poison), custom lints, coverage gate
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync workspace
+        run: uv sync --all-packages
+
+      # `ruff format --check` joins this stage once the tree is formatted (`make fmt`);
+      # until then the format gate lives in `make lint` only.
+      - name: Lint
+        run: uv run --no-sync ruff check .
+
+      - name: Unit tests
+        run: uv run --no-sync pytest -q

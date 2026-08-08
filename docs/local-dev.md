@@ -62,7 +62,7 @@ $ ./tools/demo/place-order.sh
 ✔ order placed: order_id=c1-01J9GXA7... status=CONFIRMED total=$23.40
 ```
 
-**4. Watch the saga in Temporal UI.** Open http://localhost:8233 and search for workflow `ord::{order_id}`. You'll see the activity chain: `PriceOrder → ValidateAndReserve → AuthorizePayment → ConfirmOrder → NotifyRestaurant`, then the durable wait on the `restaurant_decision` signal.
+**4. Watch the saga in Temporal UI.** Open http://localhost:8233 and search for workflow `ord::{order_id}`. You'll see the activity chain: `PriceOrder (local) → ValidateAndReserve → AuthorizePayment → ConfirmOrder`, then the durable wait on the `restaurant_decision` signal — restaurant notification is not an activity; it flows via the Notification consumer of `OrderConfirmed` (action budget, ADR-0018).
 
 **5. Bring up observability and find the trace.**
 
@@ -287,8 +287,12 @@ The invariant this machinery exists to prove (and CI asserts): **N injected time
 | Target | Scope | Infra needed |
 |---|---|---|
 | `make test` | Unit tests, all packages (`uv run pytest` per workspace member) | none |
+| `make test` — workflow tier *(W2)* | Temporal `WorkflowEnvironment` **time-skipping** tests: every workflow branch exercised, timers skipped not slept — a 10-minute restaurant-decision timeout runs in milliseconds | none |
 | `make test-int` | Integration tests against compose (`core` + `cdc`, **`OUTBOX_MODE=debezium`** — same file CI runs) | compose |
+| `make test-int` — consumer scaffold *(W3)* | Per-consumer **duplicate-delivery + poison-message** tests, scaffolded by the `smartfood-kafka` test helpers; the scaffold ships with every new consumer, the asserts are yours | compose |
 | `make chaos` | The chaos suite, runnable locally; CI runs it nightly | compose |
+
+Two more tiers ride along with `make test`: **contract tests** — DTO/OpenAPI snapshot tests, so any changed response shape appears as a reviewed snapshot diff, never a silent client break — and the **coverage gate**: 85% on `libs/` and every service's `domain/` (activates W3; until then coverage is reported, not enforced).
 
 The chaos suite's three headline scenarios (plan §11):
 

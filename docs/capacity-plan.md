@@ -28,7 +28,7 @@ All downstream arithmetic traces to this table. Figures marked **[plan]** are fi
 | A12 | Customer-visible history writes per order | 8 | (derived — reconciles §13's 20k WCU) |
 | A13 | Cumulative live-tracking watch time per order (peak) | ~180 s | (derived — Little's law reconciles §13's 400–500k SSE conns) |
 | A14 | Notifications per order (avg) | 4 (confirmed, assigned, picked up, delivered) | (proposed) |
-| A15 | Temporal actions per order (both workflows) | ~40 | [plan] §13 |
+| A15 | Temporal actions per order (both workflows) | **~20 budgeted** — ≤12 activities + ≤3 timers + ≤4 signals + 2 workflow starts (was ~40; the three reductions per ADR-0018: `NotifyRestaurant` deleted as an activity — Notification consumes `OrderConfirmed` instead; `PriceOrder` runs as a local activity; status transitions fold into their owning activities, never standalone) | [plan] §13, amended by ADR-0018 |
 | A16 | OSRM `/table` calls per order | 1 (top-3 ETA at dispatch; scoring pre-filter uses haversine ÷ H3 speeds, no OSRM) | (derived — reconciles §13's 2.5k calls/s) |
 | A17 | Headroom rule / scale trigger | ≥2× at ceiling / runbook at 60% of budget | [plan] §13 |
 | A18 | Day-1 launch traffic planning figure | 50 orders/s peak | (proposed) |
@@ -43,10 +43,10 @@ Event throughput (2,500 orders/s, 30k riders):
 
 | Topic | Formula | msg/s | Partitions [plan] | msg/s per partition |
 |---|---|---|---|---|
-| `orders.events` | 2,500 × A5 (6) | 15,000 | 48 | ~310 |
-| `payments.events` | 2,500 × A6 (2) | 5,000 | 12 | ~420 |
-| `dispatch.events` | 2,500 × A7 (3.5) | 8,750 | 48 | ~180 |
-| `rider.locations` | 30,000 × A8 (÷5) | 6,000 | 12 | 500 |
+| `c1.orders.events` | 2,500 × A5 (6) | 15,000 | 48 | ~310 |
+| `c1.payments.events` | 2,500 × A6 (2) | 5,000 | 12 | ~420 |
+| `c1.dispatch.events` | 2,500 × A7 (3.5) | 8,750 | 48 | ~180 |
+| `c1.rider.locations` | 30,000 × A8 (÷5) | 6,000 | 12 | 500 |
 | `rider.status` + `catalog.changes` | background | ~300 | — | — |
 | **Total** | | **~35,000** | | |
 
@@ -75,7 +75,7 @@ Each section: arithmetic → provisioned size → unit budget → headroom → *
 
 The headline **~15k inserts/s** [plan §13] is the outbox stream — the dominant insert path. The outbox is hour-partitioned with partitions **dropped** ≤6h after publish confirmation; at a 20k rows/s burst bound (cancel storms add events), row-level `DELETE` is infeasible by design [plan §6].
 
-**Provisioned**: 2 hash shards (cell-prefixed ULIDs carry shard bits from day 1), each **writer + 2 readers**, writer class `db.r7g.4xlarge` (proposed), behind RDS Proxy. Per-shard load ≈ 16k row writes/s — roughly 50% of a load-tested ~32k row-writes/s unit budget → ~2× headroom.
+**Provisioned**: 2 hash shards (cell-prefixed ULIDs carry shard bits from day 1), each **writer + 2 readers**, writer class `db.r7g.4xlarge` (proposed), behind per-service PgBouncer (transaction mode; ADR-0016 as amended). Per-shard load ≈ 16k row writes/s — roughly 50% of a load-tested ~32k row-writes/s unit budget → ~2× headroom.
 
 **Unit budget**: 32k row writes/s per shard writer (validate in Phase 3 load test; adjust this line with the measured figure).
 
@@ -118,7 +118,7 @@ The headline **~15k inserts/s** [plan §13] is the outbox stream — the dominan
 
 **Unit budget**: 8k conns + 8k pings/s per node at <50% CPU (validate with `rider-sim` at scale).
 
-**60% trigger** (avg >4.8k conns/node, or CPU >30% absolute): **add a node to the ASG**. Gateways are stateless (conn state in Redis); new riders spread naturally, and the 30-min max connection lifetime rebalances existing ones within half an hour. Mass-reconnect storms are drilled in chaos tests (risk #4).
+**60% trigger** (avg >4.8k conns/node, or CPU >30% absolute): **add a node to the ASG**. Gateways are stateless (conn state in Redis); new riders spread naturally, and the jittered 15–30 min connection lifetime (ADR-0006 as amended) rebalances existing ones within half an hour. Mass-reconnect storms are drilled in chaos tests (risk #4).
 
 ### 3.5 Customer SSE gateways
 
@@ -130,7 +130,9 @@ The headline **~15k inserts/s** [plan §13] is the outbox stream — the dominan
 
 **Unit budget**: 45k conns/node, <60% memory, FD limits raised accordingly.
 
-**60% trigger** (avg >27k conns/node): **add nodes**; 30-min max lifetime + ticket-reconnect naturally redistributes. Degradation ladder (tracking cadence 2s→5s) buys ~2.5× per-conn slack before scaling if a spike outruns the ASG [plan §12].
+**ALB-rt cost check** (ADR-0018): ~450–500k concurrent connections on the dedicated realtime ALB ≈ **~160–176 LCUs ≈ ~$1k/mo** — a non-issue; the realtime plane's own ALB is bought for blast-radius isolation, not saved on.
+
+**60% trigger** (avg >27k conns/node): **add nodes**; the jittered 15–30 min lifetime (ADR-0006 as amended) + ticket-reconnect naturally redistributes. Degradation ladder (tracking cadence 2s→5s) buys ~2.5× per-conn slack before scaling if a spike outruns the ASG [plan §12].
 
 ### 3.6 DynamoDB
 
@@ -166,11 +168,11 @@ Reads: matching `BatchGet` on `rider_state` (~20 candidates × 2,500/s, eventual
 
 ### 3.8 Temporal
 
-**Arithmetic**: **2.5k OrderWorkflow starts/s** [plan §13]; each spawns one `DeliveryWorkflow` child on accept. A15 (~40 actions/order, both workflows: activities, timers, signals, child mgmt) → **~100k actions/s**. Activity work is I/O-bound (HTTP/JSON to Inventory/Payment/Dispatch; PriceOrder is in-process — ADR-0015); aggregate ~1.5 s of activity wall-time per order → ~3,750 concurrent activity executions.
+**Arithmetic**: **2.5k OrderWorkflow starts/s** [plan §13]; each spawns one `DeliveryWorkflow` child on accept. A15 (~20 actions/order budgeted, both workflows: activities, timers, signals, starts) → **~50k actions/s** at ceiling (was ~100k at the old ~40/order figure). The budget is CI-enforced — the replay suite counts commands, warns in W2, gates at Phase 3 (ADR-0018). Activity work is I/O-bound (HTTP/JSON to Inventory/Payment/Dispatch; PriceOrder is in-process — ADR-0015); aggregate ~1.5 s of activity wall-time per order → ~3,750 concurrent activity executions (wall-time barely moves with the budget — the deleted actions were cheap ones).
 
 **Provisioned**:
-- **Day 1: Temporal Cloud** [plan §10] — capacity is their problem; ours is the worker fleet and the **cost tripwire at ~200–300 sustained orders/s**, at which the pre-planned self-host migration (EKS) executes.
-- **Ceiling (self-hosted)**: **≥4,096 history shards** [plan §13] → ≤25 actions/s/shard, comfortably inside a ~50–100/s per-shard write budget (proposed). Persistence on its own Aurora cluster, sized by load test at 3× [plan risk #1].
+- **Day 1: Temporal Cloud** [plan §10] — capacity is their problem; ours is the worker fleet. The **self-host migration executes at Phase 3 production readiness, before sustained traffic** (ADR-0009 as amended by ADR-0018 — the old ~200–300 orders/s cost tripwire was arithmetic error; true crossover is ~10–30 orders/s sustained).
+- **Ceiling (self-hosted)**: **≥4,096 history shards** [plan §13] → ~12 actions/s/shard at the budgeted A15, comfortably inside a ~50–100/s per-shard write budget (proposed). Persistence on its own Aurora cluster, sized by load test at 3× [plan risk #1].
 - **Workers**: ~40 async worker pods × 100 concurrent activity slots (proposed) ≈ 4,000 slots vs 3,750 needed — plus **reserved compensation workers** on a dedicated task queue so saga rollback never starves behind happy-path load [plan §12].
 
 **Unit budget**: `activity_schedule_to_start_latency` p95 < 500 ms (proposed) — this, not CPU, is the worker-fleet scaling signal and HPA key [plan §12].
@@ -198,7 +200,7 @@ What we actually deploy on day 1 (A18: ~50 orders/s peak) versus the provisioned
 | `order_db` (in `sfo-aurora-main`) | 1 shard, `db.r7g.xlarge` writer + 1 reader (proposed) | 2 shards, `db.r7g.4xlarge` writer + 2 readers each; runbook to 4 | **Cell-prefixed ULIDs with reserved shard bits; hour-partitioned outbox schema** |
 | Kafka / MSK | 3 × `kafka.m7g.large`, RF=3 | 6 brokers, <30% util | **Partition counts 48/48/12/12; Avro envelope + Schema Registry; outbox-only publication** |
 | Redis | 3 shards × (primary+replica), `cache.r7g.large` — same as ceiling (cheap; keeps failover topology honest) | Same; reshard 3→4+ on trigger | **Key patterns, TTL discipline, `gh4` GEO sharding, cluster mode** |
-| Rider WS gateways | 2 nodes (N+1) (proposed) | 5 nodes (N+1) | **WS protocol, 30-min conn lifetime, Redis-held conn state** |
+| Rider WS gateways | 2 nodes (N+1) (proposed) | 5 nodes (N+1) | **WS protocol, jittered 15–30 min conn lifetime, Redis-held conn state** |
 | SSE gateways | 2–3 nodes [plan] | 10–12 nodes (N+2) | **SSE + ticket auth, snapshot-then-subscribe reconnect** |
 | DynamoDB | On-demand, no floors | On-demand + pre-warmed peak floors | **Table schemas, uniform-cardinality PKs, GSI set, TTLs** |
 | OSRM | 1 + 1 nodes (proposed) | 3 + 1 nodes | Map-release pipeline |
@@ -206,7 +208,7 @@ What we actually deploy on day 1 (A18: ~50 orders/s peak) versus the provisioned
 | `sfo-aurora-analytics` | `db.r7g.large` writer (proposed) | `db.r7g.xlarge` writer + reader | **Aggregate schemas; S3 lake layout** |
 | Edge / services (Fargate) | 2 tasks/service (N+1) | HPA-scaled; admission buckets at 1.5× tested capacity | **Service Connect names, `cell_id` parameterization** |
 
-Cost note: day-1 shape is a small fraction of ceiling cost; `svc`+`cell` tagging and CUR→Athena→Grafana cost-per-order dashboards run from day 1 [plan §10] — cost-per-order is the tripwire that schedules the Temporal and MSK revisits.
+Cost note: day-1 shape is a small fraction of ceiling cost; `svc`+`cell` tagging and CUR→Athena→Grafana cost-per-order dashboards run from day 1 [plan §10] — cost-per-order verifies the Temporal crossover math (migration now scheduled at Phase 3 per ADR-0009 as amended) and remains the tripwire for the MSK revisit.
 
 ---
 

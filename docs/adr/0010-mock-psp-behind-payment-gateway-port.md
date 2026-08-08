@@ -24,3 +24,15 @@ The correctness machinery around the port is real, not mock: double-entry ledger
 - No real PCI/compliance surface is exercised in Part A — deliberately out of scope.
 
 **Revisit trigger**: signing a real PSP → build the adapter against the same port and run the identical chaos suite against its sandbox; the mock stays forever as the CI failure-injection harness.
+
+## Amendment (ADR-0018) — money rules and forward compatibility
+
+**Money rules** (review-enforced, adapter-independent):
+
+- **PSP-adapter import isolation**: only Payment imports the PSP adapter (and, later, any real PSP SDK). Every other service knows only the `PaymentGateway` port's effects via Payment's API and events — a PSP import outside Payment fails review.
+- **Integer minor units end-to-end**: every amount is an integer of minor units (cents); a float anywhere near money is a defect, not a style issue.
+- **No client-asserted amounts**: authorize, capture, void, and refund amounts are computed server-side from the immutable pricing snapshot — a client-supplied amount is never trusted, on any path.
+
+**Forward-compat columns** (adopted now, exercised later): `payment_db` carries `psp`, `payment_intent_id`, and `capture_before` columns plus the webhook-dedupe table shape from day 1; the mock adapter populates them with mock values. Signing a real PSP (the trigger above) then means building an adapter, not running a schema migration.
+
+**`PAYMENT_CLEARED` compatibility**: the order machine's payment gate is `PAYMENT_CLEARED` (renamed from `PAYMENT_AUTHORIZED`) — deliberately method-agnostic (`orders.payment_method ∈ {CARD, COD}`); the mock PSP implements `CARD` synchronously, so in Part A the gate clears in-line with authorization and nothing else changes. Kafka event names are unchanged.

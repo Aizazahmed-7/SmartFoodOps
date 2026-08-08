@@ -23,3 +23,5 @@ Access patterns that *want* a restaurant key get a different store: the restaura
 - Discipline cost: every new table/GSI needs cardinality review, and PG carries query load DDB could have naively taken.
 
 **Revisit trigger**: an access pattern that genuinely cannot be served by PG or a projector at budget — then use write-sharded keys (`RESTAURANT#id#shardN`) with scatter-gather reads, as a reviewed exception, never a plain restaurant key.
+
+**Addendum (ADR-0018)**: `Scan` is **banned in any request path**, under the same enforcement as the key rules (design review + CI grep). A `Scan` that looks necessary is a missing read model or a wrong key shape in disguise; scans are tolerable only in offline tooling — backfills, audits, migrations.

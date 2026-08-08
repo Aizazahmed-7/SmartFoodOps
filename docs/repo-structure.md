@@ -34,7 +34,8 @@ smartfoodops/
 │  ├─ tracking-gateway/      # :8011  customer SSE fan-out
 │  └─ analytics/             # :8012  windowed aggregation, lake sink
 ├─ libs/                     # shared workspace packages (the ONLY cross-service code path)
-│  ├─ smartfood-kafka/       # Avro serde, typed producer/consumer, retry/DLQ, processed_events
+│  ├─ smartfood-kafka/       # Avro serde, typed consumer framework, retry/DLQ, per-sink dedupe
+│  │                         #   modes declared per consumer: PG_TX | VERSION_GUARD | NATURAL_KEY
 │  ├─ smartfood-outbox/      # outbox writer + dual-mode publisher (OUTBOX_MODE=poller|debezium)
 │  ├─ smartfood-idempotency/ # idempotency-key table + Redis fast-path helpers
 │  ├─ smartfood-auth/        # AuthContext middleware consuming X-Auth-* headers
@@ -61,7 +62,10 @@ Every service follows the `order/` shape shown above: `app/`, `workflows/` (only
 
 These are enforced in CI and code review; they are the repo-level expression of the architecture's invariants.
 
-1. **Services never import each other — only `libs/`.** There is no `from services.payment import …` anywhere. Cross-service interaction happens exclusively over the declared interfaces: HTTP/JSON calls, Temporal activities, Kafka topics. Directory imports would create compile-time coupling the architecture explicitly rejects, and would silently break the "any service runs alone in slim mode" property. Enforced by an import-linter contract in CI (proposed) plus review.
+1. **Services never import each other — only `libs/`.** There is no `from services.payment import …` anywhere. Cross-service interaction happens exclusively over the declared interfaces: HTTP/JSON calls, Temporal activities, Kafka topics. Directory imports would create compile-time coupling the architecture explicitly rejects, and would silently break the "any service runs alone in slim mode" property. Enforced by committed import-linter contracts (wired into CI as the lint stage grows — see §5) plus review. Three contracts, in order of blast radius:
+   - *services never import services* — the rule above, machine-checked;
+   - *`api/` must not import `adapters/`* — the API layer talks to the domain service only; routes that reach past it into repos/session code couple HTTP shapes to storage;
+   - *`domain/` must not import `fastapi`* — domain code stays framework-free so it is testable without an app and portable across transport changes (ADR-0004's gRPC trigger relies on this).
 
 2. **`libs/` are uv workspace packages, and the only shared code.** Each lib is a proper package (own `pyproject.toml`) that services depend on *by name*, exactly as they would an external dependency — except one `uv.lock` guarantees every service resolves the identical version at all times. The correctness-critical machinery (outbox, idempotency, Kafka serde/retry/DLQ, auth context, tracing) lives here *because* it is mandatory: services get exactly-once-by-construction behavior by importing it, not by re-implementing it. A new consumer that hand-rolls Kafka handling instead of using `smartfood-kafka` fails review by rule.
 
@@ -106,13 +110,18 @@ The trade-off (a large lockfile and shared CI) is acceptable at 13 services + 5 
 
 | Convention | Rule |
 |---|---|
-| **Migrations** | Per service: `services/<svc>/migrations/` (Alembic), applied only to that service's own database (one DB per service, locally created via `deploy/compose/initdb/`). No migration ever touches another service's schema — schema coupling is forbidden along with import coupling. |
+| **Migrations** | Per service: `services/<svc>/migrations/` (Alembic), applied only to that service's own database (one DB per service, locally created via `deploy/compose/initdb/`). No migration ever touches another service's schema — schema coupling is forbidden along with import coupling. **Expand/contract is law**: expand-only per release (nullable/defaulted columns, new tables); drops, renames, and re-types split across ≥2 releases with reads switched in between. Autogenerate output is reviewed line-by-line, never trusted blind. `CREATE INDEX CONCURRENTLY` goes in its own non-transactional migration. Any migration touching `outbox` or a CDC-captured table is flagged in the PR description for explicit review (ADR-0016). |
 | **Tests layout** | `services/<svc>/tests/unit/` (no infra, `make test`) and `tests/integration/` (against compose, `make test-int`). Libs carry their own `tests/`. Chaos scenarios live with the suite runner under `tools/` (proposed) and run via `make chaos`. Seed-ID constants are imported from the seed package — never hard-coded. |
-| **Lint/type config** | Single shared config at the workspace root — `ruff` (lint+format) and `mypy` strict on `libs/`, standard on `services/` (proposed tools). Services do not override rules; one repo, one style. The custom CI lints from the plan run alongside: Redis `SET`-without-`EX` rejection, alert-without-runbook rejection, Avro `BACKWARD_TRANSITIVE` compatibility gate. |
+| **Lint/type config** | Single shared config at the workspace root — `ruff` (lint+format) and `pyright` (strict on `libs/` and every service's `domain/`, standard elsewhere; strict-tier enforcement activates with Catalog). Services do not override rules; one repo, one style. The custom CI lints from the plan run alongside: Redis `SET`-without-`EX` rejection, alert-without-runbook rejection, Avro `BACKWARD_TRANSITIVE` compatibility gate. |
+| **Config discipline** | Typed `Settings` (pydantic-settings) is the only config surface; `os.environ` is read in `config.py` and nowhere else; every setting has a default that is safe for local dev. The `SFO_{SVC}_` env-prefix migration is a planned code follow-up — services currently read unprefixed envs (`DATABASE_URL`, …). |
+| **Transaction boundary** | Transactions are opened only in the domain layer — one `session.begin()` per use-case; repos never commit or roll back; API layers never open transactions. No external I/O (HTTP, Redis, PSP, Temporal, Schema Registry) inside an open transaction — the outbox row is written in the tx precisely so nothing else has to be. |
+| **Query hygiene** | Every list query carries a `LIMIT`. No `SELECT *` outside repository modules. `FOR UPDATE` requires a comment justifying it plus a `lock_timeout`. PRs touching hot-path queries paste `EXPLAIN` output from a seeded dataset. |
 | **Naming** | Service directories kebab-case matching the service catalog (`edge-bff`, `rider-gateway`); lib packages `smartfood-*`; Kafka topics per plan §8; Temporal workflow IDs `ord::{order_id}`. |
 | **Workflow code** | Temporal workflow + activity definitions live in the owning service's `workflows/` dir and are registered by that service's worker entrypoint. Workflow code follows determinism rules (no I/O, no time/random outside SDK APIs) — enforced by review + the replay tests in CI. |
 | **Containers** | One `Dockerfile` per service, layered on a shared Python base image (proposed); dev containers mount `app/` + `libs/` for hot reload, prod images copy the synced environment. |
-| **Docs discipline** | A PR that changes a port, topic, table, env knob, or make target updates `docs/` in the same PR. |
+| **Docs discipline** | A PR that changes a port, topic, table, env knob, or make target updates `docs/` in the same PR. A PR that adds a route adds its [api-standards.md](api-standards.md) inventory row in the same PR. |
+
+**CI.** A minimal committed workflow (`.github/workflows/ci.yml`) runs on every PR and push: `uv sync --all-packages` → `ruff check` → `pytest -q` — the same commands as `make lint`/`make test`, so "works in CI" and "works on my machine" stay the same claim. It grows in stages with the build plan rather than asserting checks the code can't satisfy yet: the `ruff format --check` gate joins once the tree is formatted, import-linter and pyright join as their subjects land, the Temporal replay + action-budget gates arrive with the saga (W2), and the per-consumer duplicate/poison chaos checks arrive with the event backbone (W3).
 
 ---
 

@@ -8,7 +8,7 @@ Events must be independent, traceable, recoverable, and never double-processed. 
 
 ## Decision
 
-**No service writes Kafka directly.** Every state change commits its event to a transactional `outbox` table in the same DB transaction as the state change; **Debezium (MSK Connect)** tails the outbox and publishes to Kafka. Dispatch, whose store is DynamoDB, publishes via **DDB Streams → a forwarder Lambda** emitting the identical envelope. Envelope: Avro via Schema Registry (`BACKWARD_TRANSITIVE`, CI compatibility gate) with `event_id` (UUIDv7 dedupe key), `event_type`, `aggregate_id`, `aggregate_version`, `occurred_at`, `cell_id`; `traceparent` stored as outbox columns and lifted into Kafka headers by a Debezium SMT, so the async hop stays trace-stitched.
+**No service writes Kafka directly.** Every state change commits its event to a transactional `outbox` table in the same DB transaction as the state change; **Debezium (MSK Connect)** tails the outbox and publishes to Kafka. Dispatch, whose store is DynamoDB, publishes via **DDB Streams → a forwarder Lambda** emitting the identical envelope. Envelope: Avro via Schema Registry (`BACKWARD_TRANSITIVE`, CI compatibility gate) with `event_id` (deterministic UUIDv5 of `aggregate:{id}:{version}:{type}` — a retried emit can never mint a second id for the same fact; amended per ADR-0018), `event_type`, `aggregate_id`, `aggregate_version`, `occurred_at`, `cell_id`; `traceparent` stored as outbox columns and lifted into Kafka headers by a Debezium SMT, so the async hop stays trace-stitched.
 
 Outbox tables are hour-partitioned; partitions are dropped ≤6h after publish is confirmed (never row-deletes at 20k rows/s).
 

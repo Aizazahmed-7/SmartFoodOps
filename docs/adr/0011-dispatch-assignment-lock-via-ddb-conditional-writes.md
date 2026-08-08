@@ -26,3 +26,15 @@ Redis GEO is only the candidate index; if it is cold or down, Dispatch falls bac
 - Cap and lock semantics live in condition expressions — reviewable but easy to get subtly wrong; changes require the mass-disconnect chaos drill.
 
 **Revisit trigger**: multi-region dispatch (lock must remain cell-local per ADR-0013), or offer-write throttling at scale → widen capacity floors before ever weakening conditions.
+
+## Canonical lock expression (ADR-0018)
+
+Quoted so reviews diff the code against a canonical form rather than prose. The reserve step is exactly this single-operation check-and-set:
+
+```text
+ConditionExpression: attribute_not_exists(offer_lock) AND size(active_deliveries) < :cap
+```
+
+One conditional `UpdateItem` sets `offer_lock` and checks capacity **in the same operation** — never a read followed by a write, never two operations.
+
+**No-second-lock rule**: no other lock, lease, semaphore, or Redis key may guard assignment anywhere in the system. A second lock reintroduces exactly the split-brain window this design removes; anything that appears to need one is redesigned to route through this conditional write instead.

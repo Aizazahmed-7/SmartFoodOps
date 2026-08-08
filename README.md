@@ -17,6 +17,8 @@ SmartFoodOps is QuickServe's greenfield backend for large-scale food ordering an
 | [docs/service-ownership.md](docs/service-ownership.md) | Per-service reference: what each service owns in Postgres, DynamoDB, Redis, and Kafka — plus the deliberate cross-service exceptions |
 | [docs/local-dev.md](docs/local-dev.md) | Onboarding guide: `make up && make seed`, compose profiles, slim mode, simulators, chaos suite |
 | [docs/repo-structure.md](docs/repo-structure.md) | Monorepo layout (uv workspaces: services/, libs/, deploy/, tools/) |
+| [docs/api-standards.md](docs/api-standards.md) | API rules: error envelope + code catalog, DTO strictness, idempotency-key semantics, pagination, rate-limit classes, and the API inventory (a new route = a new row, same PR) |
+| [docs/engineering-checklists.md](docs/engineering-checklists.md) | Definition-of-Done checklists per task type, the anti-pattern catalog, and per-developer security rules |
 | [docs/adr/](docs/adr/) | Architecture Decision Records — one per key decision, with alternatives and revisit triggers |
 
 ## Mandated tech stack

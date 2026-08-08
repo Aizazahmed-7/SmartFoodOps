@@ -26,7 +26,7 @@ And one division of labor, which decides where any new piece of work goes:
 
 ## 3. Anatomy: who talks to whom
 
-Four portals: the customer app, restaurant portal, and admin console enter through CloudFront (browse traffic is largely absorbed there); the rider app connects straight to the ALB, because a WebSocket upgrade cannot be cached. One ALB fans traffic out by listener rule: `/ws/rider/*` to rider-gateway, `/sse/track/*` to tracking-gateway, everything else to edge-bff.
+Four portals: the customer app, restaurant portal, and admin console enter through CloudFront (browse traffic is largely absorbed there); the realtime traffic — rider WebSockets and customer tracking SSE — enters through a dedicated ALB on its own subdomain (`rt.api`), never through CloudFront. Not because CloudFront couldn't proxy those connections — it can — but because a long-lived stream has nothing to cache, CloudFront's origin-timeout model adds friction against the 20-second heartbeats, and a separate ALB keeps a realtime incident and a REST incident from sharing a blast radius. Listener rules fan the realtime ALB out: `/ws/rider/*` to rider-gateway, `/sse/track/*` to tracking-gateway; everything else reaches edge-bff via CloudFront → the API ALB.
 
 | Tier | Compute | Why this compute |
 |---|---|---|
@@ -45,12 +45,12 @@ Pricing is deliberately **not** a service ([ADR-0015](adr/0015-pricing-is-a-libr
 `OrderWorkflow` (ID `ord::{order_id}`, duplicate starts rejected and attached) is the single writer of order state. Temporal records every step into a durable event history; if a worker dies mid-order, another replays the history and continues — timers included. The three-minute restaurant-acceptance window is a server-side durable timer, and the restaurant's accept arrives as a signal, not a blocking call.
 
 ```
-PLACED → VALIDATED → PAYMENT_AUTHORIZED → CONFIRMED → ACCEPTED
+PLACED → VALIDATED → PAYMENT_CLEARED → CONFIRMED → ACCEPTED
       → PREPARING → READY → PICKED_UP → DELIVERED → SETTLED
 any pre-PICKED_UP → CANCELLING → CANCELLED (→ REFUNDED if captured)
 ```
 
-The activities, in order: **PriceOrder** (in-process; writes the immutable pricing snapshot all money math derives from) → **ValidateAndReserve** (restaurant capacity + atomic conditional stock decrement) → **AuthorizePayment** (idempotency-table read-first, so an unknown-outcome retry can never double-charge) → **ConfirmOrder** (visible as confirmed only after everything succeeded) → **NotifyRestaurant** → durable wait. Accept spawns the `DeliveryWorkflow` child; delivery completion triggers **CapturePayment** → **Settle**. Money moves only at capture — cancel before pickup and there is only an authorization to void, nothing to refund.
+The activities, in order: **PriceOrder** (in-process local activity; writes the immutable pricing snapshot all money math derives from) → **ValidateAndReserve** (restaurant capacity + atomic conditional stock decrement) → **AuthorizePayment** (idempotency-table read-first, so an unknown-outcome retry can never double-charge; success is `PAYMENT_CLEARED` — the state name is method-agnostic, and the `PaymentAuthorized` event name is unchanged) → **ConfirmOrder** (visible as confirmed only after everything succeeded) → durable wait, with the restaurant alerted by the Notification consumer of `OrderConfirmed` rather than by a workflow activity. Accept spawns the `DeliveryWorkflow` child; delivery completion triggers **CapturePayment** → **Settle**. Money moves only at capture — cancel before pickup and there is only an authorization to void, nothing to refund.
 
 On failure, the saga unwinds in reverse: void authorization → release reservation → CANCELLED, with the cancellation event fanning out to notifications and analytics. Compensations retry indefinitely (5-minute backoff cap), alert at 10 attempts, and page a human at one hour — a compensation is never silently dropped. The mock PSP's failure injection (`DECLINE_RATE`, `TIMEOUT_RATE`, `UNKNOWN_OUTCOME_RATE`, magic card tokens) makes every one of these paths a CI test, not a hope.
 
@@ -64,7 +64,7 @@ The governing rule: **choose the store per workload, and one owner per piece of 
 
 A **cluster** is machines; a **database** is an isolated compartment inside one. Separate databases give schema ownership (Postgres physically cannot join across databases from one connection); only separate clusters give performance isolation. [ADR-0016](adr/0016-postgres-topology-one-cluster-database-per-service.md) chooses deliberately:
 
-**`sfo-aurora-main`** — one cluster, five logical databases, each with its own role and no cross-database grants, all behind RDS Proxy:
+**`sfo-aurora-main`** — one cluster, five logical databases, each with its own role and no cross-database grants, all behind PgBouncer transaction pooling (RDS Proxy only for Lambdas — ADR-0016):
 
 | Database | Owner | What lives there | Why Postgres |
 |---|---|---|---|
@@ -131,14 +131,14 @@ Topics in `global-kafka` (MSK + Confluent Schema Registry, Avro, `BACKWARD_TRANS
 
 | Topic | Key | Partitions | Carried events (the brief's eight, mapped) |
 |---|---|---|---|
-| `orders.events` | order_id | 48 | OrderPlaced, OrderConfirmed, OrderPickedUp, OrderDelivered, OrderCancelled |
-| `payments.events` | order_id | 12 | PaymentAuthorized, PaymentCaptured (the brief's "PaymentSuccessful"), RefundProcessed |
-| `dispatch.events` | delivery_id | 48 | RiderAssigned, offer/arrival markers |
-| `rider.locations` / `rider.status` | rider_id | 12 each | sampled GPS (0.2 Hz), shift status |
-| `catalog.changes` | restaurant-scoped, compacted | 6 | menu CDC — feeds the cache renderer and Part B embeddings |
-| `inventory.events` / `identity.events` | aggregate id | 12 / 6 | stock movements; account audit |
+| `c1.orders.events` | order_id | 48 | OrderPlaced, OrderConfirmed, OrderPickedUp, OrderDelivered, OrderCancelled |
+| `c1.payments.events` | order_id | 12 | PaymentAuthorized, PaymentCaptured (the brief's "PaymentSuccessful"), RefundProcessed |
+| `c1.dispatch.events` | delivery_id | 48 | RiderAssigned, offer/arrival markers |
+| `c1.rider.locations` / `c1.rider.status` | rider_id | 12 each | sampled GPS (0.2 Hz), shift status |
+| `c1.catalog.changes` | restaurant-scoped, compacted | 6 | menu CDC — feeds the cache renderer and Part B embeddings |
+| `c1.inventory.events` / `c1.identity.events` | aggregate id | 12 / 6 | stock movements; account audit |
 
-Every event carries `event_id` (UUIDv7 dedupe key), `aggregate_version` (projectors apply only if newer — a late `OrderConfirmed` after `OrderCancelled` no-ops), and W3C `traceparent` in headers so traces survive the async hop.
+Every event carries `event_id` (a deterministic UUIDv5 dedupe key derived from `aggregate:{id}:{version}:{type}` — a retried emit reproduces the same id instead of minting a new one), `aggregate_version` (projectors apply only if newer — a late `OrderConfirmed` after `OrderCancelled` no-ops), and W3C `traceparent` in headers so traces survive the async hop.
 
 Failure handling splits by consumer class: ordering-tolerant consumers (analytics, notifications, sinks) walk retry tiers (`retry.1m` → `retry.10m`) into a per-group DLQ; ordering-sensitive projectors instead **pause the partition** and page — a retry topic would reorder a key's events. Poison pills go straight to the DLQ with the error class, offsets, and trace context attached.
 
@@ -160,6 +160,8 @@ This is the "reliable background processing" the brief asked for, and it is deli
 - **`OrderWorkflow`** — one per order (§4). Owns every state transition, the acceptance timer, and the compensation stack.
 - **`DeliveryWorkflow`** — child of OrderWorkflow, started on restaurant accept. Runs candidate search (Redis GEO → `rider_state` filter → scoring), the offer protocol (DDB conditional-write lock, 15s/12s/12s cascade, widening radius → surge → ops escalation), arrival geofencing, pickup deadline, and the reassignment ladder (gateway disconnect signal → heartbeat-expiry sweeper → 60s reconciliation scan). Cancellation of the parent cancels the child.
 - **`PostDeliveryRefundWorkflow`** — post-pickup cancellations, which are support policy rather than automatic compensation (no inventory rollback once food left the restaurant).
+
+The saga's Temporal footprint is budgeted: **≤12 activities + ≤3 timers + ≤4 signals** across `OrderWorkflow` + `DeliveryWorkflow` on the happy path — `PriceOrder` runs as a local activity, restaurant notification is an `OrderConfirmed` consumer instead of an activity, and guarded transitions fold into their owning activities. The replay suite counts commands against the budget (warn-only from W2, a merge gate before Phase 3), because actions-per-order is the single biggest Temporal cost and throughput driver.
 
 Workers run on Fargate polling task queues, with **separate task queues per activity class and reserved compensation workers** — so a flood of new placements can never starve the unwinding of failed ones. `activity_schedule_to_start_latency` is the starvation early-warning metric and the autoscaling key.
 

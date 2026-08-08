@@ -92,11 +92,11 @@ Part B never appears inside Part A: it lands later as ordinary Kafka consumer gr
 
 ```mermaid
 flowchart LR
-  C[Clients] --> CF[CloudFront CDN] --> ALB[ALB] --> GW[edge-bff]
+  C[Clients] --> CF[CloudFront CDN] --> ALB[ALB-api] --> GW[edge-bff]
   GW --> ORD[Order] & CAT[Catalog] & IDN[Identity]
   C -->|SSE| SSEG[tracking-gateway]
   RD[Riders] -->|WS| TG[rider-gateway]
-  ALB --> SSEG & TG
+  ALBRT["ALB-rt (rt.api — no CloudFront)"] --> SSEG & TG
   ORD -->|"start ord::{id}"| T[Temporal]
   T -->|HTTP/JSON activities| INV[Inventory] & PAY["Payment (mock PSP)"] & DSP[Dispatch]
   T -.->|"in-process: smartfood-pricing lib"| PRC["PriceOrder activity"]
@@ -156,17 +156,17 @@ The edge never writes domain state; writes pass through unshaped to the owning s
 
 **Protocols**: REST outside, **HTTP/JSON inside — gRPC dropped for phase 1**. Python gRPC's wins don't pay for protoc codegen, `grpcio` asyncio quirks, LB complications, and worse debuggability; the latency budget is dominated by DB round-trips and Temporal scheduling, not JSON parsing. Contracts stay typed via shared Pydantic model packages + OpenAPI-generated clients. Hardening path: move Inventory (the hottest synchronous activity) to gRPC only if profiling shows serialization >10% of p99. Note that pricing needs no protocol at all — it is a library call (ADR-0015), which is the cheapest possible answer to "what protocol should we use."
 
-**Gateway routing** — WS/SSE are separate ECS services, not routed through edge-bff. Same ALB, split by listener rules:
+**Gateway routing** — WS/SSE are separate ECS services, not routed through edge-bff. The realtime plane lives on its **own subdomain**: `rt.api.smartfoodops.com` → a dedicated ALB (ALB-rt), split by listener rules:
 
 | Path | Target | Notes |
 |---|---|---|
-| `/ws/rider/*` | rider-gateway | WebSocket, rider only |
-| `/sse/track/*` | tracking-gateway | SSE, customer tracking |
-| default | edge-bff | All REST |
+| `/ws/rider/*` | rider-gateway | WebSocket, rider only (ALB-rt) |
+| `/sse/track/*` | tracking-gateway | SSE, customer tracking (ALB-rt) |
+| default | edge-bff | All REST — `api.smartfoodops.com` → CloudFront → ALB-api |
 
-One CloudFront distribution (`api.smartfoodops.com`); WS/SSE behaviors use `CachingDisabled` + `AllViewer`. ALB idle timeout 300s; heartbeats every 20s.
+CloudFront fronts REST only; **WS/SSE never traverse CloudFront** — not because CloudFront can't proxy them, but because a long-lived stream has zero caching value, CloudFront's origin-timeout model adds friction against the 20s heartbeats, and a dedicated ALB keeps the realtime and REST blast radii apart. ALB idle timeout 300s; heartbeats every 20s.
 
-**Discovery & deployment**: ECS Service Connect, namespace `sfo.local` (`http://order.sfo.local:8000`); service URLs env-injected. CloudFront → ALB (public subnets) → edge/gateways on ECS (private subnets); **domain services have no public routes** — this is load-bearing for the auth trust model. Health: ALB `GET /healthz`, ECS `GET /readyz`; SIGTERM drains. Locally, an nginx container emulates the ALB on `:8080` with identical path-split rules — zero code differs between compose and ECS ([local-dev.md](local-dev.md)).
+**Discovery & deployment**: ECS Service Connect, namespace `sfo.local` (`http://order.sfo.local:8000`); service URLs env-injected. CloudFront → ALB-api → edge-bff and Route53 → ALB-rt → gateways (ALBs in public subnets, ECS in private subnets); **domain services have no public routes** — this is load-bearing for the auth trust model. Health: ALB `GET /healthz`, ECS `GET /readyz`; SIGTERM drains. Locally, an nginx container emulates the ALB on `:8080` with identical path-split rules — zero code differs between compose and ECS ([local-dev.md](local-dev.md)).
 
 ### 5.2 Authentication & authorization
 
@@ -176,7 +176,7 @@ One CloudFront distribution (`api.smartfoodops.com`); WS/SSE behaviors use `Cach
 | Verification | **Once, at the edge** (JWKS cached in-process 10 min). Edge strips all inbound `X-Auth-*`, then stamps `X-Auth-Sub`, `X-Auth-Role`, `X-Auth-Restaurant-Id`, `X-Auth-Rider-Id`. Services consume via shared `smartfood-auth` middleware (`AuthContext` dependency) and never parse JWTs — one hardened verifier beats ten mediocre ones. Headers are trustworthy because domain services are network-unreachable except from edge/gateways/peers. Hardening path (documented, deferred): edge-minted short-lived internal JWT, then mTLS — the middleware hides the swap. |
 | Service-to-service & Temporal | Internal-network trust phase 1. Calls carry `X-Internal-Caller` (audit) and propagate the original actor's identity (stored in workflow input, restamped by activities); system-initiated work uses `role: system`, `sub: svc:order-worker`. |
 | WS auth | JWT in `Sec-WebSocket-Protocol: bearer,<jwt>` (never query strings — they leak into logs); connection bound to `rider_id`; GPS frames attributed from connection state, never payload. |
-| SSE auth | `EventSource` can't set headers → `POST /v1/track/ticket` (JWT-authed, ownership-checked) issues a single-use 60s Redis ticket (`GETDEL` on connect). Connections have a 30-min hard max lifetime, then reconnect with fresh credentials. |
+| SSE auth | `EventSource` can't set headers → `POST /v1/track/ticket` (JWT-authed, ownership-checked) issues a single-use 60s Redis ticket (`GETDEL` on connect). Connections have a uniform-random 15–30 min lifetime (jittered — a fixed lifetime turns one mass-disconnect into a recurring reconnect wave; ADR-0006), then reconnect with fresh credentials. |
 | Ownership | Enforced in the owning service, **in the query**: `UPDATE menu_items ... WHERE id=:id AND restaurant_id=:ctx.restaurant_id` (0 rows → 404, not 403 — no existence leaks). Same pattern for customers/riders. `system_admin` bypasses scoping; every admin mutation writes an audit row. |
 | Credentials & abuse | argon2id hashing (rehash-on-login when params change); login rate limits per-IP (10/min) and per-account (5 fails → 15-min lockout); uniform errors + success-shaped duplicate-register responses (enumeration resistance). |
 | Deferred | OAuth/social login, MFA (hexagonal `CredentialVerifier` seam exists), ABAC, instant `jti` denylist revocation, signed internal tokens/mTLS, partner API keys. |
@@ -185,7 +185,7 @@ One CloudFront distribution (`api.smartfoodops.com`); WS/SSE behaviors use `Cach
 
 ## 6. Order lifecycle
 
-`OrderWorkflow` (`workflow_id = ord::{order_id}`, `REJECT_DUPLICATE`/`USE_EXISTING` — duplicate submits attach to the running execution) is the **single writer** of order transitions. Every transition is guarded (`UPDATE … WHERE status='prev'`; 0 rows = no-op), making every retry safe.
+`OrderWorkflow` (`workflow_id = ord::{order_id}`, `REJECT_DUPLICATE`/`USE_EXISTING` — duplicate submits attach to the running execution) is the **single writer** of order transitions. Every transition is guarded (`UPDATE … WHERE status='prev'`; 0 rows → re-read: idempotent-replay no-op or `IllegalTransition`, §6.2), making every retry safe.
 
 ### 6.1 Happy path
 
@@ -211,17 +211,17 @@ sequenceDiagram
   O-->>C: 202 {order_id, status: PLACED}
   O--)K: OrderPlaced (via outbox/Debezium)
 
-  T->>PR: PriceOrder (no network hop)
+  T->>PR: PriceOrder (local activity, no network hop)
   PR-->>T: immutable pricing snapshot
   T->>I: ValidateAndReserve (capacity + atomic stock decrement)
   I-->>T: reserved → VALIDATED
   T->>P: AuthorizePayment (key {order_id}:auth)
   Note over P: idempotency table read-first —<br/>unknown-outcome retries never double-charge
-  P-->>T: authorized → PAYMENT_AUTHORIZED
-  P--)K: PaymentAuthorized
+  P-->>T: authorized → PAYMENT_CLEARED
+  P--)K: PaymentAuthorized (event name unchanged)
   T->>O: ConfirmOrder → CONFIRMED
   O--)K: OrderConfirmed
-  T->>R: NotifyRestaurant
+  K--)R: OrderConfirmed → Notification consumer<br/>alerts the restaurant (not a workflow activity)
   Note over T,R: durable wait: restaurant_decision<br/>signal vs 3-min timer
   R-->>T: accept → ACCEPTED
   T->>D: start DeliveryWorkflow child<br/>(ParentClosePolicy=REQUEST_CANCEL)
@@ -240,14 +240,20 @@ Key placement properties:
 - **ConfirmOrder** runs only after all validations — the order is visible as confirmed only after inventory + payment succeed (confirm-only-after-validation requirement).
 - SLO: p99 PLACED→CONFIRMED < 6s.
 
+**Action budget.** The happy path across `OrderWorkflow` + `DeliveryWorkflow` is budgeted at **≤12 activities + ≤3 timers + ≤4 signals** (≈20 Temporal actions per order, down from ~40 unbudgeted) — actions/order is the #1 Temporal cost and throughput driver. Concretely: `PriceOrder` runs as a **local activity**; `NotifyRestaurant` is not an activity at all — the Notification service consumes `OrderConfirmed` (same outcome, zero workflow actions); guarded status transitions fold into their owning activities (the guarded `UPDATE` lives inside `ConfirmOrder`, `Settle`, …), never standalone. The replay suite counts commands against the budget — warn-only from W2, a hard merge gate before Phase 3. Before adding an activity, ask: can an existing activity absorb it, or is it a fact (→ event + consumer) rather than a step?
+
+**Saga sweeper.** Placement commits the order + outbox row, then starts the workflow — if the process dies in that gap, an order exists with no saga. Closed structurally: a small consumer of our own `OrderPlaced` events (`order.saga-sweeper.v1`) calls `start_workflow(…, REJECT_DUPLICATE)` and swallows already-started — the outbox row written by the same transaction guarantees the sweeper always fires, and the duplicate policy makes it a no-op in the overwhelming case. Lands in W3; the interim exposure is accepted.
+
+**Money rules.** Only Payment imports the PSP adapter (the `PaymentGateway` port — no other service touches it); money is integer minor units end-to-end (a float anywhere near money fails lint); clients never assert amounts — requests carry item IDs + quantities, and every charge and refund derives from the immutable pricing snapshot.
+
 ### 6.2 Order state machine
 
 ```mermaid
 stateDiagram-v2
   [*] --> PLACED: POST /v1/orders (idempotent)
   PLACED --> VALIDATED: ValidateAndReserve ok
-  VALIDATED --> PAYMENT_AUTHORIZED: AuthorizePayment ok
-  PAYMENT_AUTHORIZED --> CONFIRMED: ConfirmOrder
+  VALIDATED --> PAYMENT_CLEARED: AuthorizePayment ok
+  PAYMENT_CLEARED --> CONFIRMED: ConfirmOrder
   CONFIRMED --> ACCEPTED: restaurant_decision = accept
   ACCEPTED --> PREPARING: restaurant starts prep
   PREPARING --> READY: food ready
@@ -258,7 +264,7 @@ stateDiagram-v2
 
   PLACED --> CANCELLING: validation/auth failure
   VALIDATED --> CANCELLING: auth failure / stock race
-  PAYMENT_AUTHORIZED --> CANCELLING: reject / timeout
+  PAYMENT_CLEARED --> CANCELLING: reject / timeout
   CONFIRMED --> CANCELLING: reject / timeout / customer cancel
   ACCEPTED --> CANCELLING: customer cancel (pre-pickup)
   PREPARING --> CANCELLING: customer cancel (pre-pickup)
@@ -280,7 +286,11 @@ stateDiagram-v2
   end note
 ```
 
-Every transition is written by the workflow via a guarded `UPDATE`; `illegal_transition_total` (§14) should sit at ~0 — a spike means an idempotency bug.
+**`PAYMENT_CLEARED`** (renamed from `PAYMENT_AUTHORIZED`) is deliberately **method-agnostic**: it means "the payment gate for this order's method passed". Part A: the mock-PSP authorization succeeded. Future methods redefine the gate, not the machine — real CARD (D3 trigger, ADR-0018): Stripe PaymentIntent in `requires_capture`; COD (D4 trigger): risk gate passed. `orders.payment_method` (`CHECK (payment_method IN ('CARD','COD'))`, Part A always `'CARD'`) is set at placement and immutable. The **Kafka event names `PaymentAuthorized`/`PaymentCaptured` stay unchanged** (brief-mandated) — the rename is order-state vocabulary only.
+
+**Payment waits are sub-states, not states.** A 3DS-analog `requires_action` or a PSP-outage queue-and-retry is recorded as a `payment_wait_reason` column on `VALIDATED` — never a new machine state. The state machine stays method-agnostic; read models surface the wait.
+
+Every transition is written by the workflow via the `transition()` helper wrapping the guarded `UPDATE` (`… SET status=:new, aggregate_version=aggregate_version+1 WHERE order_id=:id AND status=:expected`). **0 rows is ambiguous, so the helper re-reads**: already at the target status → idempotent-replay no-op (success); anything else → `IllegalTransition` (non-retryable), incrementing `illegal_transition_total` (§14), which should sit at ~0 — a spike means an idempotency bug. Raw `UPDATE … SET status` outside the helper is grep-banned in CI.
 
 ---
 
@@ -298,7 +308,7 @@ Saga stack unwinds in reverse order of successful steps. Compensations are Tempo
 | Customer cancels post-pickup | after PICKED_UP | **no state rollback** — routes to `PostDeliveryRefundWorkflow` (support policy, no inventory rollback) | DELIVERED/SETTLED + refund record | RefundProcessed |
 | Rider unreachable / no acceptance | dispatch | widen radius → surge payout → ops manual dispatch (§8); order state untouched | — | dispatch.events escalations |
 
-**Guarantee boundaries**: workflow decisions are effectively exactly-once (deterministic replay); activities/Kafka/Celery are at-least-once and idempotent by construction — money keys `{order_id}:{op}`, DDB conditional writes, guarded transitions, consumer `processed_events(group, event_id)` insert-first. The mock PSP's failure injection (`DECLINE_RATE`, `TIMEOUT_RATE`, `UNKNOWN_OUTCOME_RATE`) makes these paths CI-tested: N injected timeouts must still yield ≤1 authorization per order.
+**Guarantee boundaries**: workflow decisions are effectively exactly-once (deterministic replay); activities/Kafka/Celery are at-least-once and idempotent by construction — money keys `{order_id}:{op}`, DDB conditional writes, guarded transitions, per-sink consumer dedupe (§11). The mock PSP's failure injection (`DECLINE_RATE`, `TIMEOUT_RATE`, `UNKNOWN_OUTCOME_RATE`) makes these paths CI-tested: N injected timeouts must still yield ≤1 authorization per order.
 
 ---
 
@@ -366,6 +376,14 @@ sequenceDiagram
 
 Watches: geofence arrival, 60s progress monitor, pickup deadline. Liveness is layered — gateway disconnect >45s (primary signal), 90s heartbeat-expiry keyspace notifications → leader-elected sweeper, and a 60s SCAN reconciliation (the guarantee). Revoke = conditional delete (`rider_id=:expected AND state=ASSIGNED`) — a rider who already scanned pickup **wins the race**. Post-pickup failure = ops incident, never silent reassignment.
 
+Three time bounds close every otherwise-unbounded wait:
+
+| Bound | Trigger | Action |
+|---|---|---|
+| Arrive-by | `ASSIGNED` with no pickup arrival by `pickup_eta + 5 min` | auto-unassign + rider strike + re-offer |
+| Unassigned `READY` | no assignment >10 min (per-city config) | auto-cancel through the compensation path, with both-sides notification |
+| Post-pickup silence | heartbeat loss >5 min after `PICKED_UP` | `delivery_at_risk` ops queue + proactive customer notice — **never auto-cancel once food is with the rider** |
+
 ### 8.5 Customer tracking — SSE, not WS
 
 Unidirectional, LB-friendly, stateless gateways; WS is rider-only. Connect/reconnect: snapshot from the durable DDB `order_tracking` read model (TTL after terminal state), read-repair via workflow query if stale >60s, then subscribe to `shared:trk:<delivery_id>`. Cadence 2s en-route. Pub/sub loss can never strand a customer on stale state — the read model is always the floor.
@@ -387,7 +405,7 @@ Every datastore is named for its owner, so a name answers "whose is this?" witho
 | DynamoDB table | `sfo-<owner>-<entity>` | `sfo-order-tracking`, `sfo-dispatch-rider-state` |
 | Redis keyspace in `global-redis` | `<owner>:…` | `catalog:menu:…`, `edge:rl:…` |
 | Deliberately shared Redis key | `shared:…` | `shared:geo:…` — the prefix *is* the warning |
-| Kafka topic in `global-kafka` | `<domain>.events` | `orders.events`, `catalog.changes` |
+| Kafka topic in `global-kafka` | `<cell>.<domain>.<stream>` — cell-prefixed from day 1 | `c1.orders.events`, `c1.catalog.changes` |
 
 **Placeholder notation**: `<name>` means "substitute a value here." Literal braces `{name}` mean a **Redis cluster hash tag** and are load-bearing — they force keys onto the same shard. `catalog:menu:{rid}:<ver>` deliberately colocates a restaurant's blob and pointer; `shared:geo:<cell>:<gh4>` deliberately does **not** tag, so geo shards spread across nodes instead of collapsing onto one.
 
@@ -395,19 +413,21 @@ Every datastore is named for its owner, so a name answers "whose is this?" witho
 
 ### PostgreSQL (Aurora) — everything needing ACID
 
-**Topology** ([ADR-0016](adr/0016-postgres-topology-one-cluster-database-per-service.md)): one cluster `sfo-aurora-main` holding one logical database per service (`identity_db`, `catalog_db`, `inventory_db`, `order_db`, `payment_db`), each with its own role and no cross-database grants; applications connect via RDS Proxy. Analytics and Temporal persistence run on their own clusters. This buys **schema ownership, not performance isolation** — a service graduates to its own cluster at ~30% of the cluster write budget, or when its access pattern degrades neighbours. Any argument that depends on isolation must say *cluster*, not *database*.
+**Topology** ([ADR-0016](adr/0016-postgres-topology-one-cluster-database-per-service.md)): one cluster `sfo-aurora-main` holding one logical database per service (`identity_db`, `catalog_db`, `inventory_db`, `order_db`, `payment_db`), each with its own role and no cross-database grants; applications connect via PgBouncer in transaction mode (asyncpg `statement_cache_size=0`; RDS Proxy is kept only for Lambdas — it pins asyncpg sessions, ADR-0016). Analytics and Temporal persistence run on their own clusters. This buys **schema ownership, not performance isolation** — a service graduates to its own cluster at ~30% of the cluster write budget, or when its access pattern degrades neighbours. Any argument that depends on isolation must say *cluster*, not *database*.
 
 | Data | Notes |
 |---|---|
-| Orders + `pricing_snapshot` | Hour-partitioned outbox; partitions **dropped** ≤6h after publish confirmed — never row-deletes at 20k rows/s |
+| Orders + `pricing_snapshot` + `order_items` + `delivery_address_snapshot` | Order snapshots (below); hour-partitioned outbox; partitions **dropped** only when the publish-confirmed gate passes (§11) — never row-deletes at 20k rows/s |
 | Payment double-entry ledger | Append-only, 7-year retention; idempotency table alongside |
 | Inventory | `UPDATE stock SET available=available-q WHERE available>=q` + reservation ledger with expiry reaper; `restaurant_load` capacity counter (`UPDATE … SET active=active+1 WHERE active<capacity` — kitchen slots as stock), released by the same compensation/settlement paths |
 | Catalog | `menu_categories` → items → modifiers structure; `menu_versions` bumped in the same transaction as menu rows (category edits included) |
 | Analytics aggregates | 5s micro-batch upserts from Kafka consumers |
-| Identity | Users, roles, addresses, refresh-token families |
+| Identity | Users, roles, addresses (**soft-delete** — `deleted_at`, never row-deleted), refresh-token families |
 | Restaurant order feed | PG index `(restaurant_id, status, placed_at)` — deliberately **not** DDB (see key rule below) |
 
-### DynamoDB — high-volume key-access, every PK uniform-cardinality
+**Order snapshots** — an order must survive menu edits and address deletion with its contents intact. `order_items` (`order_id`, `line_no`, `menu_item_id`, `name_snapshot`, `unit_price_cents`, `qty` bounded 1..50) snapshots every line at placement and is **immutable after placement**; `delivery_address_snapshot` (jsonb: text, lat, lng, notes) is copied onto the order at placement; `addresses` in `identity_db` soft-delete (`deleted_at`) so a deleted address never invalidates order history.
+
+**Forward-compat payment columns** (forward-compat for the D3 real-PSP trigger, ADR-0018 — not used by the mock PSP): `payments` carries `psp`, `payment_intent_id`, `capture_before` from day 1 (NULL under the mock PSP), and the webhook-dedupe table shape (`event_id` PRIMARY KEY, `type`, `payload`, `received_at`) is fixed now — swapping in a real PSP adds an adapter and fills columns, never a schema migration.
 
 | Table | Owner | Key design | Notes |
 |---|---|---|---|
@@ -470,38 +490,48 @@ At 2,000 orders/s per cell: ElastiCache cluster-mode, 3 shards × (primary+repli
 
 ### Topics
 
-One topic per aggregate domain, keyed by uniform aggregate IDs (order-id, rider-id — never restaurant-id). Sanctioned exception: `catalog.changes` — low-volume (menu edits per day, not order-scale) and log-compacted, which requires the restaurant key; the never-restaurant-id rule targets order-volume topics.
+One topic per aggregate domain, keyed by uniform aggregate IDs (order-id, rider-id — never restaurant-id). Sanctioned exception: `c1.catalog.changes` — low-volume (menu edits per day, not order-scale) and log-compacted, which requires the restaurant key; the never-restaurant-id rule targets order-volume topics.
+
+Topics are **cell-prefixed from day 1** (`<cell>.<domain>.<stream>`; one value today: `c1`) — a second cell adds `c2.*` topics, never renames. Prose elsewhere may use the short name (`orders.events`); the deployed topic is the cell-prefixed one.
 
 | Topic | Key | Partitions | Retention | Producer (via) | Primary consumers |
 |---|---|---|---|---|---|
-| `orders.events` | order_id | 48 | 7d tiered → S3 90d | Order outbox → Debezium | Projectors, Notification, Analytics, Part B features |
-| `dispatch.events` | delivery_id | 48 | 7d tiered → S3 90d | Dispatch DDB Streams → forwarder | Projectors, Notification, Analytics |
-| `payments.events` | order_id | 12 | 7d tiered → S3 90d | Payment outbox → Debezium | Ledger consumers, Notification, Analytics |
-| `rider.locations` | rider_id | 12 | 24h | rider-gateway (0.2 Hz sample) | Analytics, breadcrumb sink |
-| `rider.status` | rider_id | 12 (proposed) | 7d | rider-gateway / Dispatch | Dispatch, Analytics |
-| `catalog.changes` | restaurant_id-scoped aggregate (compacted CDC) | 6 (proposed) | compacted | Catalog outbox → Debezium | Menu-blob renderer, Part B embeddings |
-| `inventory.events` | item aggregate id | 12 (proposed) | 7d | Inventory outbox → Debezium | Analytics, projectors |
-| `identity.events` | user_id | 6 (proposed) | 7d | Identity outbox → Debezium | Audit, Analytics |
+| `c1.orders.events` | order_id | 48 | 7d tiered → S3 90d | Order outbox → Debezium | Projectors, Notification, Analytics, Part B features |
+| `c1.dispatch.events` | delivery_id | 48 | 7d tiered → S3 90d | Dispatch DDB Streams → forwarder | Projectors, Notification, Analytics |
+| `c1.payments.events` | order_id | 12 | 7d tiered → S3 90d | Payment outbox → Debezium | Ledger consumers, Notification, Analytics |
+| `c1.rider.locations` | rider_id | 12 | 24h | rider-gateway (0.2 Hz sample) | Analytics, breadcrumb sink |
+| `c1.rider.status` | rider_id | 12 (proposed) | 7d | rider-gateway / Dispatch | Dispatch, Analytics |
+| `c1.catalog.changes` | restaurant_id-scoped aggregate (compacted CDC) | 6 (proposed) | compacted | Catalog outbox → Debezium | Menu-blob renderer, Part B embeddings |
+| `c1.inventory.events` | item aggregate id | 12 (proposed) | 7d | Inventory outbox → Debezium | Analytics, projectors |
+| `c1.identity.events` | user_id | 6 (proposed) | 7d | Identity outbox → Debezium | Audit, Analytics |
 
 Sizing rule: partitions = slowest consumer's parallelism × 2 headroom at the 2,500 orders/s ceiling. Aggregate ~35k msg/s, ~17 MB/s → 6-broker MSK at <30% ([capacity-plan.md](capacity-plan.md)).
 
 **Producers: Debezium-from-outbox only** (locally: dual-mode poller, `OUTBOX_MODE=poller|debezium` — byte-identical output, parity enforced by CI). Dispatch publishes via DDB Streams → forwarder, same envelope. **No service writes Kafka directly** — the dual-write gap stays closed.
 
+**Outbox partition drop — the gate is "CDC has published it", never consumer lag.** An hour partition is dropped only when *all* of: age >6h, **and** the DB's Debezium connector is healthy, **and** the slot's `confirmed_flush_lsn` has passed the WAL LSN recorded when the partition aged out of the write window, **and** no post-failover snapshot is in progress. Gating on downstream consumer lag would couple Postgres retention to the slowest Kafka consumer — Kafka's own retention covers late consumers.
+
+**Debezium failover runbook** (replication slots do not survive an Aurora failover — they live only on the old writer): automation detects slot absence / heartbeat stall → recreates the connector with an initial snapshot **scoped to the outbox tables only**. The snapshot re-emits every outbox row still present (≤6h window); consumer dedupe collapses the duplicates; the run is **gap-free by construction**, because rows are never partition-dropped until publish is confirmed (the rule above). Partition drops freeze until the snapshot completes. Alerts: slot WAL retention growth, and `confirmed_flush_lsn` stall pages at 5 min.
+
 The brief's required behaviors map onto these topics as event types: `OrderPlaced`, `OrderConfirmed`, `OrderCancelled` → `orders.events`; `PaymentAuthorized`/`PaymentCaptured` (together, the brief's umbrella term "PaymentSuccessful"), `RefundProcessed` → `payments.events`; `RiderAssigned`, `OrderPickedUp`, `OrderDelivered` → `dispatch.events`/`orders.events`.
 
 ### Envelope
 
-Avro, Confluent Schema Registry, `BACKWARD_TRANSITIVE` compatibility, CI compatibility gate.
+Avro, Confluent Schema Registry, `BACKWARD_TRANSITIVE` compatibility, CI compatibility gate. Subjects use **RecordNameStrategy** (subject = record FQN) — TopicRecordNameStrategy would fork every subject per cell prefix and turn cell activation into a registry migration.
 
 | Field | Purpose |
 |---|---|
-| `event_id` (UUIDv7) | Dedupe key for `processed_events` tables |
+| `event_id` — deterministic **UUIDv5** of `aggregate:{id}:{version}:{type}` | Dedupe key. Identity is derived, not minted: even a bug that double-emits produces an *identical* id that every dedupe layer collapses; random `uuid4()` event ids are banned |
 | `event_type` | e.g. `OrderConfirmed` |
 | `aggregate_id` | Partition key |
 | `aggregate_version` | Projectors apply only if `version > stored` — a late `OrderConfirmed` after `OrderCancelled` no-ops |
 | `occurred_at` | Event time |
 | `cell_id` | `c1` today; multi-cell routing later |
 | header: `traceparent` | W3C trace context — async hop stays stitched (§14) |
+
+Two emit rules keep that identity honest: (1) for transition-driven events, the outbox emit runs **only when the guarded transition actually applied** — on the idempotent-replay path the transition no-ops *and* the emit is skipped, otherwise every activity retry would mint a fresh event; (2) **no Schema Registry or network calls inside the transaction** — payloads are serialized to the SR wire format from a boot-time schema map (a schema missing from the map fails `/readyz`, never the transaction).
+
+Consumer groups are named `<service>.<purpose>.v<n>` (e.g. `projectors.order-history.v1`); bumping `.v{n}` is how a consumer re-reads from scratch — never by resetting a live group's offsets.
 
 ### Retry / DLQ policy
 
@@ -511,7 +541,7 @@ Avro, Confluent Schema Registry, `BACKWARD_TRANSITIVE` compatibility, CI compati
 | Ordering-sensitive (projectors) | **Pause the partition** (retry ≤5 min, page) — retry topics would reorder a key |
 | Poison pills | Straight to DLQ with `error.class`, offsets, `traceparent` |
 
-Effectively-once per sink: offsets-in-transaction (PG), conditional writes (DDB), processed-events table, deterministic file naming (S3) — all in the mandatory `smartfood-kafka` library, chaos-tested in CI by double-delivering every event.
+Effectively-once per sink: every consumer **declares its dedupe mode** to the mandatory `smartfood-kafka` library — `PG_TX` (a `processed_events` row + offsets in the same PG transaction; only for consumers whose effect lands in PG), `VERSION_GUARD` (DDB projectors — the `aggregate_version` conditional write *is* the dedupe), `NATURAL_KEY` (ledger `txn_id` uniqueness; workflow-start `REJECT_DUPLICATE`), deterministic file naming (S3). `processed_events` is one mode, not the mechanism — a universal `processed_events` write would be ~100k needless inserts/s at the ceiling. Chaos-tested in CI by double-delivering every event.
 
 ### Analytics pipeline
 
@@ -546,13 +576,16 @@ Cell-ceiling budgets (Aurora, Kafka, Redis, gateways, DDB, OSRM, Temporal) with 
 
 **Serverless rule**: request-shaped + bursty + loss-tolerant → Lambda; sustained-hot, stream-shaped, or connection-shaped → containers. Fargate before EKS.
 
+**Region rule**: the cell runs in the in-country AWS region if one exists, else the nearest — always 3 AZs, and **avoid us-east-1** (blast-radius hygiene: region-level control-plane incidents concentrate there).
+
 ```mermaid
 flowchart TB
-  U[Clients] --> R53[Route53] --> CF["CloudFront<br/>api.smartfoodops.com"]
+  U[Clients] --> R53[Route53] --> CF["CloudFront<br/>api.smartfoodops.com (REST only)"]
 
   subgraph REGION["AWS region — single cell c1 (multi-AZ)"]
     subgraph PUB["Public subnets"]
-      ALB["ALB + WAF<br/>listener rules: /ws/* /sse/* default"]
+      ALB["ALB-api + WAF<br/>(REST, behind CloudFront)"]
+      ALBRT["ALB-rt + WAF<br/>rt.api.smartfoodops.com<br/>(WS/SSE — no CloudFront)"]
       NAT["NAT gateway<br/>(egress only)"]
     end
     subgraph PRIV["Private subnets — ECS (no public routes)"]
@@ -570,7 +603,7 @@ flowchart TB
       end
     end
     subgraph DATA["Data plane (multi-AZ)"]
-      AUR[("sfo-aurora-main<br/>DB per service<br/>+ RDS Proxy")]
+      AUR[("sfo-aurora-main<br/>DB per service<br/>+ PgBouncer")]
       DDB[("DynamoDB<br/>+ Streams")]
       ECR[("ElastiCache Redis<br/>cluster mode")]
       MSK[("MSK 6 brokers<br/>+ MSK Connect / Debezium<br/>+ Schema Registry on ECS")]
@@ -586,8 +619,9 @@ flowchart TB
   TC["Temporal Cloud (phase 1)"]
 
   CF --> ALB
-  ALB -->|"/ws/rider/*"| RGW
-  ALB -->|"/sse/track/*"| TGW
+  R53 --> ALBRT
+  ALBRT -->|"/ws/rider/*"| RGW
+  ALBRT -->|"/sse/track/*"| TGW
   ALB -->|default| BFF
   BFF --> DOM
   DOM --> AUR & DDB & ECR
@@ -621,7 +655,20 @@ Reading the saga path on this diagram: `edge-bff → Order (in DOM) → Temporal
 | WS/SSE termination | **Not Lambda / not API GW** | API GW WebSocket pricing prohibitive at this volume — ALB for both |
 | Temporal | **Temporal Cloud phase 1** → self-hosted on EKS when sustained load exceeds ~200–300 orders/s (per-action pricing tripwire) |
 
-**Managed services**: Aurora PG + RDS Proxy; DynamoDB; ElastiCache; MSK + MSK Connect (Debezium) + Confluent Schema Registry on ECS; Amazon MQ (RabbitMQ); Amazon Managed Prometheus + Grafana; Route53 + CloudFront. **Cost governance day 1**: `svc`+`cell` tags, CUR → Athena → Grafana; cost-per-order is the tripwire for the Temporal and MSK revisits.
+**Managed services**: Aurora PG (PgBouncer pooling; RDS Proxy for Lambdas only); DynamoDB; ElastiCache; MSK + MSK Connect (Debezium) + Confluent Schema Registry on ECS; Amazon MQ (RabbitMQ); Amazon Managed Prometheus + Grafana; Route53 + CloudFront. **Cost governance day 1**: `svc`+`cell` tags, CUR → Athena → Grafana; cost-per-order is the tripwire for the Temporal and MSK revisits.
+
+### Backups & disaster recovery
+
+Targets: **RPO ≤5 min** (in-region, via PITR/streams) and **RTO ≤4 h** for a full-region rebuild. Mechanisms, all provisioned in CDK:
+
+| Store | Mechanism |
+|---|---|
+| Aurora — every cluster, **including `sfo-aurora-temporal`** | PITR (35-day window) + automated daily snapshot copies to a second region — a region loss without cross-region snapshots means restoring from nothing. Temporal is not backed up as workflow state; its Aurora persistence *is* the backup |
+| DynamoDB — every table | PITR |
+| S3 (lake + assets) | Versioning + lifecycle |
+| Schema Registry | `_schemas` topic RF=3 + weekly export to S3 — losing the registry orphans every Avro payload in the lake |
+
+**Quarterly restore game-day is a Phase-3 exit criterion**: restore order-db + temporal-db to a scratch cell from snapshots and replay the canary order. A backup that has never been restored is a hypothesis.
 
 ---
 
@@ -632,6 +679,8 @@ Reading the saga path on this diagram: `edge-bff → Order (in DOM) → Temporal
 OTel everywhere; `order_id`/`delivery_id` in W3C baggage. Outbox rows store `traceparent` as columns; a Debezium SMT (and the dev poller) lift them into Kafka headers — **the async hop stays stitched**. Temporal `TracingInterceptor` (replay-safe); `workflow_id=order_id` as a search attribute so Jaeger and Temporal Web cross-navigate on one key. Tail-based sampling keeps 100% of error/slow/payment/dispatch traces; no per-GPS-ping spans. Structured JSON logs with `trace_id` + `order_id` on every line; no PII.
 
 **Metrics backend**: Prometheus scrapes every service (`/metrics`, RED/USE); Grafana renders dashboards and alerts. On AWS: **Amazon Managed Prometheus + Amazon Managed Grafana** — same PromQL and dashboards as the local `obs` profile, zero rewrite between laptop and prod.
+
+**Metric naming**: `smartfood_{service}_{noun}_{unit}`; counters end `_total`; durations are histograms using the shared bucket sets from `smartfood-otel` (`BUCKETS_FAST`/`BUCKETS_SLOW`) — one bucket vocabulary, so latency panels compare like-for-like across services.
 
 ### Key signals
 
@@ -699,4 +748,8 @@ Degradation order (steps 1–4 automated, 5–6 ops-approved):
 | [capacity-plan.md](capacity-plan.md) | Cell-ceiling math with assumptions (Aurora, Kafka, Redis, DDB, gateways, OSRM, Temporal) |
 | [local-dev.md](local-dev.md) | Compose profiles, port map, slim mode, simulators, chaos suite, first-30-minutes tour |
 | [repo-structure.md](repo-structure.md) | Monorepo layout (uv workspaces, services/, libs/, deploy/, tools/) |
+| [architecture-walkthrough.md](architecture-walkthrough.md) | narrative guided tour of this architecture |
+| [service-ownership.md](service-ownership.md) | per-service datastore/topic ownership map |
+| [api-standards.md](api-standards.md) | error envelope, DTO rules, idempotency semantics, API inventory |
+| [engineering-checklists.md](engineering-checklists.md) | Definition-of-Done + anti-pattern catalog |
 | [adr/](adr/) | One ADR per decision: Temporal-owns-saga, outbox-only publication, custom edge, HTTP/JSON internal, edge-verifies-JWT, SSE-vs-WS split, DDB key rules, serverless verdicts, Temporal Cloud tripwire, mock-PSP port, dispatch lock in DDB, OUTBOX_MODE dual-mode, multi-region deferral, degradation ladder |

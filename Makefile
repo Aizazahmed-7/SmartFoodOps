@@ -1,6 +1,6 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: up up-apps up-full down nuke logs psql test test-int dev seed demo chaos fmt
+.PHONY: up up-apps up-full down nuke logs psql test test-int dev seed demo chaos fmt lint migrate
 
 up: ## Start core infrastructure (postgres, redis, kafka, temporal, localstack, mock-psp, gateway)
 	$(COMPOSE) --profile core up -d --wait
@@ -52,3 +52,14 @@ chaos: ## Raise mock-psp failure knobs and restart it
 
 fmt:
 	uv run ruff check --fix . && uv run ruff format .
+
+lint: ## Static checks — ruff gates now; pyright reports (enforcement activates with Catalog)
+	uv run ruff check . && uv run ruff format --check .
+	-@uv run --no-sync pyright || echo "pyright: informational until the Catalog milestone (repo-structure.md §5)"
+
+migrate: ## Apply one service's Alembic migrations: make migrate SVC=identity [DATABASE_URL=...]
+	uv run --package $(SVC) python -c "import os; from alembic import command; from alembic.config import Config; \
+	from $(subst -,_,$(SVC)).config import Settings; \
+	cfg = Config(); cfg.set_main_option('script_location', 'services/$(SVC)/migrations'); \
+	cfg.set_main_option('sqlalchemy.url', os.environ.get('DATABASE_URL') or Settings().database_url); \
+	command.upgrade(cfg, 'head')"
