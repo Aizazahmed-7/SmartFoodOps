@@ -9,10 +9,11 @@ from smartfood_otel import RequestContextMiddleware, setup_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from .api.routes import router
 from .config import Settings
 from .db import metadata
+from .domain.service import IdentityService
 from .keys import load_or_generate
-from .routes import router
 
 
 def _run_migrations(database_url: str) -> None:
@@ -51,15 +52,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RequestContextMiddleware)
 
     key = load_or_generate(settings.signing_key_path)
-    app.state.settings = settings
-    app.state.key = key
-    app.state.issuer = TokenIssuer(
+    issuer = TokenIssuer(
         key,
         issuer=settings.token_issuer,
         audience=settings.token_audience,
         ttl_seconds=settings.access_ttl_seconds,
     )
-    app.state.sessions = async_sessionmaker(engine, expire_on_commit=False)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    # Composition root: repo ← service ← routes. The API layer only ever
+    # sees app.state.service; the domain only sees the sessionmaker.
+    app.state.key = key
+    app.state.service = IdentityService(sessions, issuer, settings)
 
     app.include_router(router)
 
