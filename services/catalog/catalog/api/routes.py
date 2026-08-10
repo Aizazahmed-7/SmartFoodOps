@@ -8,14 +8,22 @@ bypass scoping (every admin mutation will gain an audit row with W3 logging).
 import re
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, Response
-from pydantic import Field, field_validator
+from fastapi import APIRouter, Depends, Query, Request, Response
+from pydantic import Field, field_validator, model_validator
 from smartfood_api import ApiError, StrictModel
 from smartfood_auth import AuthContext, require_role
 
 from ..domain.models import Restaurant
 from ..domain.ports import GrantRejected, GrantUnavailable
-from ..domain.service import CatalogService, NothingToUpdate, RestaurantNotFound
+from ..domain.service import (
+    CatalogService,
+    CategoryNotEmpty,
+    CategoryNotFound,
+    ItemNotFound,
+    NothingToUpdate,
+    RestaurantNotFound,
+    StaleMenuVersion,
+)
 
 router = APIRouter()
 
@@ -190,3 +198,303 @@ async def resume_restaurant(
     restaurant_id: str, ctx: RestaurantAdmin, request: Request
 ) -> RestaurantOut:
     return await _set_status(restaurant_id, "open", ctx, request)
+
+
+# ── menu: categories ───────────────────────────────────────────────
+
+
+class CategoryIn(StrictModel):
+    name: str = Field(min_length=1, max_length=80)
+    rank: int = Field(default=0, ge=0)
+
+
+class CategoryUpdate(StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    rank: int | None = Field(default=None, ge=0)
+
+
+@router.post("/v1/restaurants/{restaurant_id}/categories", status_code=201)
+async def add_category(
+    restaurant_id: str, body: CategoryIn, ctx: RestaurantAdmin, request: Request
+) -> dict:
+    _own(ctx, restaurant_id)
+    try:
+        return await _svc(request).add_category(restaurant_id, name=body.name, rank=body.rank)
+    except RestaurantNotFound:
+        raise ApiError("NOT_FOUND", "unknown restaurant", 404) from None
+
+
+@router.patch("/v1/restaurants/{restaurant_id}/categories/{category_id}")
+async def update_category(
+    restaurant_id: str, category_id: str, body: CategoryUpdate,
+    ctx: RestaurantAdmin, request: Request,
+) -> dict:
+    _own(ctx, restaurant_id)
+    try:
+        return await _svc(request).update_category(
+            restaurant_id, category_id, body.model_dump(exclude_none=True)
+        )
+    except NothingToUpdate:
+        raise ApiError(
+            "VALIDATION_FAILED", "nothing to update", 422,
+            details=[{"field": "body", "issue": "at least one field required"}],
+        ) from None
+    except CategoryNotFound:
+        raise ApiError("NOT_FOUND", "unknown category", 404) from None
+
+
+@router.delete("/v1/restaurants/{restaurant_id}/categories/{category_id}")
+async def delete_category(
+    restaurant_id: str, category_id: str, ctx: RestaurantAdmin, request: Request
+) -> dict:
+    _own(ctx, restaurant_id)
+    try:
+        return await _svc(request).delete_category(restaurant_id, category_id)
+    except CategoryNotFound:
+        raise ApiError("NOT_FOUND", "unknown category", 404) from None
+    except CategoryNotEmpty:
+        raise ApiError(
+            "CATEGORY_NOT_EMPTY", "category still contains items", 409
+        ) from None
+
+
+# ── menu: items ────────────────────────────────────────────────────
+
+
+class ModifierOptionIn(StrictModel):
+    name: str = Field(min_length=1, max_length=80)
+    price_delta_cents: int = Field(default=0, ge=-100_000, le=100_000)
+    rank: int = Field(default=0, ge=0)
+
+
+class ModifierGroupIn(StrictModel):
+    name: str = Field(min_length=1, max_length=80)
+    min_select: int = Field(default=0, ge=0)
+    max_select: int = Field(default=1, ge=1)
+    rank: int = Field(default=0, ge=0)
+    options: list[ModifierOptionIn] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def _satisfiable(self):
+        # An unsatisfiable group would make its item unorderable at pricing.
+        if self.min_select > self.max_select:
+            raise ValueError("min_select exceeds max_select")
+        if self.min_select > len(self.options):
+            raise ValueError("min_select exceeds the number of options")
+        return self
+
+
+class ItemIn(StrictModel):
+    category_id: str = Field(max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    price_cents: int = Field(ge=0, le=10_000_000)  # integer cents, never floats
+    currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
+    available: bool = True  # create 86'd (False) for the safe-launch pattern
+    rank: int = Field(default=0, ge=0)
+    tags: list[str] = Field(default_factory=list, max_length=10)
+    modifier_groups: list[ModifierGroupIn] = Field(default_factory=list, max_length=10)
+
+    @field_validator("tags")
+    @classmethod
+    def _normalize_tags(cls, v: list[str]) -> list[str]:
+        return _slugify(v)
+
+
+class ItemUpdate(StrictModel):
+    """Omitted field = untouched. tags/modifier_groups: sending a list
+    (even []) replaces the whole set — detected via model_fields_set."""
+
+    category_id: str | None = Field(default=None, max_length=64)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    price_cents: int | None = Field(default=None, ge=0, le=10_000_000)
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    available: bool | None = None  # the 86 toggle
+    rank: int | None = Field(default=None, ge=0)
+    tags: list[str] = Field(default_factory=list, max_length=10)
+    modifier_groups: list[ModifierGroupIn] = Field(default_factory=list, max_length=10)
+
+    @field_validator("tags")
+    @classmethod
+    def _normalize_tags(cls, v: list[str]) -> list[str]:
+        return _slugify(v)
+
+    @model_validator(mode="after")
+    def _no_explicit_nulls(self):
+        # exclude_unset semantics: omitted = untouched, so an EXPLICIT null
+        # is only meaningful for description (clearing it) — anywhere else
+        # it would reach SQL as a NOT NULL violation (a 500, not a 422).
+        for field in self.model_fields_set:
+            if field != "description" and getattr(self, field) is None:
+                raise ValueError(f"{field} cannot be null")
+        return self
+
+
+@router.post("/v1/restaurants/{restaurant_id}/items", status_code=201)
+async def add_item(
+    restaurant_id: str, body: ItemIn, ctx: RestaurantAdmin, request: Request
+) -> dict:
+    _own(ctx, restaurant_id)
+    fields = body.model_dump(exclude={"category_id", "tags", "modifier_groups"})
+    try:
+        return await _svc(request).add_item(
+            restaurant_id,
+            category_id=body.category_id,
+            fields=fields,
+            tags=body.tags,
+            modifier_groups=[g.model_dump() for g in body.modifier_groups],
+        )
+    except CategoryNotFound:
+        raise ApiError("NOT_FOUND", "unknown category", 404) from None
+
+
+@router.patch("/v1/restaurants/{restaurant_id}/items/{item_id}")
+async def update_item(
+    restaurant_id: str, item_id: str, body: ItemUpdate,
+    ctx: RestaurantAdmin, request: Request,
+) -> dict:
+    _own(ctx, restaurant_id)
+    sent = body.model_fields_set
+    changes = body.model_dump(
+        exclude_unset=True, exclude={"tags", "modifier_groups"}
+    )
+    try:
+        return await _svc(request).update_item(
+            restaurant_id,
+            item_id,
+            changes=changes,
+            tags=body.tags if "tags" in sent else None,
+            modifier_groups=(
+                [g.model_dump() for g in body.modifier_groups]
+                if "modifier_groups" in sent
+                else None
+            ),
+        )
+    except NothingToUpdate:
+        raise ApiError(
+            "VALIDATION_FAILED", "nothing to update", 422,
+            details=[{"field": "body", "issue": "at least one field required"}],
+        ) from None
+    except ItemNotFound:
+        raise ApiError("NOT_FOUND", "unknown item", 404) from None
+    except CategoryNotFound:
+        raise ApiError("NOT_FOUND", "unknown category", 404) from None
+
+
+@router.delete("/v1/restaurants/{restaurant_id}/items/{item_id}")
+async def delete_item(
+    restaurant_id: str, item_id: str, ctx: RestaurantAdmin, request: Request
+) -> dict:
+    _own(ctx, restaurant_id)
+    try:
+        return await _svc(request).delete_item(restaurant_id, item_id)
+    except ItemNotFound:
+        raise ApiError("NOT_FOUND", "unknown item", 404) from None
+
+
+# ── internal (never in the edge allowlist — unreachable from outside) ──
+
+# require_role() with no roles: ONLY role=system passes (service-to-service).
+SystemOnly = Annotated[AuthContext, Depends(require_role())]
+
+
+@router.get("/v1/internal/restaurants/{restaurant_id}/snapshot")
+async def pricing_read(
+    restaurant_id: str,
+    ctx: SystemOnly,
+    request: Request,
+    item_ids: Annotated[list[str], Query()],
+) -> dict:
+    """Authoritative pricing read for Order's pricing library (money path).
+    Computes a consistent view; persists NOTHING — the durable pricing
+    snapshot lives in order_db. Bypasses every cache by design."""
+    if not 1 <= len(item_ids) <= 50:
+        raise ApiError(
+            "VALIDATION_FAILED", "item_ids out of bounds", 422,
+            details=[{"field": "item_ids", "issue": "between 1 and 50 ids"}],
+        )
+    try:
+        return await _svc(request).pricing_read(restaurant_id, item_ids)
+    except RestaurantNotFound:
+        raise ApiError("NOT_FOUND", "unknown restaurant", 404) from None
+
+
+# ── public reads: menu (blob/pointer cached) + browse (60s pages) ──
+
+
+@router.get("/v1/menus/{restaurant_id}")
+async def get_menu(
+    restaurant_id: str,
+    request: Request,
+    response: Response,
+    v: Annotated[int | None, Query(ge=1)] = None,
+) -> dict:
+    """?v=N is version-addressed and immutable (CDN caches it forever); the
+    unversioned form resolves the pointer and must stay near-fresh."""
+    try:
+        menu = await _svc(request).get_menu(restaurant_id, version=v)
+    except RestaurantNotFound:
+        raise ApiError("NOT_FOUND", "unknown restaurant", 404) from None
+    except StaleMenuVersion:
+        raise ApiError(
+            "NOT_FOUND", "menu version no longer available — refetch the menu", 404
+        ) from None
+    response.headers["Cache-Control"] = (
+        "public, max-age=604800, immutable" if v is not None else "public, max-age=5"
+    )
+    return menu
+
+
+def _norm_filter(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    slug = "-".join(value.strip().lower().split())
+    if not _SLUG.match(slug):
+        raise ApiError(
+            "VALIDATION_FAILED", "invalid filter", 422,
+            details=[{"field": name, "issue": "not a valid tag"}],
+        )
+    return slug
+
+
+@router.get("/v1/search")
+async def search(
+    request: Request,
+    response: Response,
+    q: Annotated[str, Query(min_length=2, max_length=80)],
+    city: str | None = None,
+    cuisine: str | None = None,
+    tag: str | None = None,
+    page: Annotated[int, Query(ge=0)] = 0,
+) -> dict:
+    """Fuzzy search over restaurant and item names (ADR-0019). Deliberately
+    uncached: q is unbounded-cardinality, the GIN indexes are the answer."""
+    result = await _svc(request).search(
+        query=q.strip(),
+        city="-".join(city.strip().lower().split()) if city is not None else None,
+        cuisine=_norm_filter(cuisine, "cuisine"),
+        tag=_norm_filter(tag, "tag"),
+        page=page,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@router.get("/v1/restaurants")
+async def browse(
+    request: Request,
+    response: Response,
+    city: Annotated[str, Query(min_length=1, max_length=64)],
+    cuisine: str | None = None,
+    tag: str | None = None,
+    page: Annotated[int, Query(ge=0)] = 0,
+) -> dict:
+    result = await _svc(request).browse(
+        city="-".join(city.strip().lower().split()),
+        cuisine=_norm_filter(cuisine, "cuisine"),
+        tag=_norm_filter(tag, "tag"),
+        page=page,
+    )
+    response.headers["Cache-Control"] = "public, max-age=30"  # CDN tier (docs §7 row 4)
+    return result

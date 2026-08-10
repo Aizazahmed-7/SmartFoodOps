@@ -107,6 +107,15 @@ class IdentityRepo:
         )
         return address_id
 
+    async def count_addresses(self, user_id: str) -> int:
+        return (
+            await self._s.execute(
+                sa.select(sa.func.count())
+                .select_from(addresses)
+                .where(addresses.c.user_id == user_id)
+            )
+        ).scalar_one()
+
     async def list_addresses(self, user_id: str) -> list[Row]:
         return list(
             (

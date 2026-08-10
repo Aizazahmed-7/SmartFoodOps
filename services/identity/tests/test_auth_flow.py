@@ -148,6 +148,22 @@ def test_address_crud_and_ownership(client):
     assert client.get("/v1/me/addresses", headers=headers).json() == []
 
 
+def test_address_creation_is_capped(client):
+    """Creation cap (20) is what makes the unpaginated list endpoint correct
+    — the table can't grow unbounded per user (api-standards §pagination)."""
+    headers = _login_headers(client)
+    body = {"label": "spot", "line1": "1 Main St", "city": "Springfield"}
+    for _ in range(20):
+        assert client.post("/v1/me/addresses", json=body, headers=headers).status_code == 201
+    over = client.post("/v1/me/addresses", json=body, headers=headers)
+    assert over.status_code == 422
+    assert over.json()["error"]["details"][0]["field"] == "addresses"
+    # Deleting one frees a slot — the cap counts live rows, not history.
+    address_id = client.get("/v1/me/addresses", headers=headers).json()[0]["id"]
+    client.delete(f"/v1/me/addresses/{address_id}", headers=headers)
+    assert client.post("/v1/me/addresses", json=body, headers=headers).status_code == 201
+
+
 def test_refresh_reuse_returns_distinct_code(client):
     """The legitimate holder learns their token was stolen (AUTH_REFRESH_REUSED)."""
     client.post("/v1/auth/register", json=REG)

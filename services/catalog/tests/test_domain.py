@@ -10,14 +10,19 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 
-async def _service(grants):
+class _NullSearch:
+    async def search(self, **kwargs) -> list[dict]:
+        return []
+
+
+async def _service(grants, cache):
     engine = create_async_engine(
         "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
     async with engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    return CatalogService(sessions, grants), sessions
+    return CatalogService(sessions, grants, cache, _NullSearch()), sessions
 
 
 async def _create(svc, owner="usr_1", name="Biryani House"):
@@ -28,8 +33,8 @@ async def _create(svc, owner="usr_1", name="Biryani House"):
     return restaurant, created
 
 
-async def test_every_mutation_leaves_the_four_writes(grants):
-    svc, sessions = await _service(grants)
+async def test_every_mutation_leaves_the_four_writes(grants, cache):
+    svc, sessions = await _service(grants, cache)
     r, _ = await _create(svc)
     await svc.update_restaurant(r.id, {"name": "Biryani Palace"}, None)
     await svc.set_status(r.id, "paused")
@@ -58,10 +63,10 @@ async def test_every_mutation_leaves_the_four_writes(grants):
     assert events[2].payload["cuisines"] == ["bbq", "pakistani"]
 
 
-async def test_concurrent_onboarding_race_adopts_winner(grants, monkeypatch):
+async def test_concurrent_onboarding_race_adopts_winner(grants, cache, monkeypatch):
     """Two devices POST at once: both pre-checks miss, one INSERT wins the
     UNIQUE(owner_user_id) race, the loser rolls back and adopts the winner."""
-    svc, sessions = await _service(grants)
+    svc, sessions = await _service(grants, cache)
     first, created = await _create(svc)
     assert created
 
@@ -84,6 +89,156 @@ async def test_concurrent_onboarding_race_adopts_winner(grants, monkeypatch):
             await s.execute(sa.select(sa.func.count()).select_from(outbox))
         ).scalar_one()
     assert count == 1  # the losing attempt's writes all rolled back
+
+
+async def test_every_event_carries_full_state(grants, cache):
+    """Compaction safety: catalog.changes keeps only the LAST event per
+    restaurant, so even a profile event must carry the whole menu."""
+    svc, sessions = await _service(grants, cache)
+    r, _ = await _create(svc)
+    cat = await svc.add_category(r.id, name="Mains", rank=0)
+    await svc.add_item(
+        r.id, category_id=cat["id"],
+        fields={"name": "Biryani", "description": None, "price_cents": 1200,
+                "currency": "USD", "available": True, "rank": 0},
+        tags=["halal"],
+        modifier_groups=[{"name": "Size", "min_select": 1, "max_select": 1, "rank": 0,
+                          "options": [{"name": "Family", "price_delta_cents": 600,
+                                       "rank": 0}]}],
+    )
+    await svc.set_status(r.id, "paused")  # a PROFILE event, after menu edits
+
+    async with sessions() as s:
+        events = (
+            await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))
+        ).all()
+
+    assert [e.event_type for e in events] == [
+        "RestaurantCreated", "CategoryAdded", "ItemAdded", "RestaurantPaused",
+    ]
+    last = events[-1].payload  # the only event compaction guarantees survives
+    assert last["status"] == "paused"
+    item = last["menu"]["categories"][0]["items"][0]
+    assert item["name"] == "Biryani"
+    assert item["tags"] == ["halal"]
+    assert item["modifier_groups"][0]["options"][0]["price_delta_cents"] == 600
+    # And the snapshot inside each event matches its OWN moment: the create
+    # event has an empty menu — state as of that commit, not as of now.
+    assert events[0].payload["menu"] == {"categories": []}
+
+
+async def test_delete_item_leaves_no_orphan_rows(grants, cache):
+    from catalog.db import item_tags, modifier_groups, modifier_options
+
+    svc, sessions = await _service(grants, cache)
+    r, _ = await _create(svc)
+    cat = await svc.add_category(r.id, name="Mains", rank=0)
+    item = await svc.add_item(
+        r.id, category_id=cat["id"],
+        fields={"name": "Biryani", "description": None, "price_cents": 1200,
+                "currency": "USD", "available": True, "rank": 0},
+        tags=["halal", "spicy"],
+        modifier_groups=[{"name": "Size", "min_select": 0, "max_select": 1, "rank": 0,
+                          "options": [{"name": "A", "price_delta_cents": 0, "rank": 0},
+                                      {"name": "B", "price_delta_cents": 1, "rank": 1}]}],
+    )
+    await svc.delete_item(r.id, item["id"])
+
+    async with sessions() as s:
+        for table in (item_tags, modifier_groups, modifier_options):
+            count = (
+                await s.execute(sa.select(sa.func.count()).select_from(table))
+            ).scalar_one()
+            assert count == 0  # children die with the item — no orphans
+
+
+async def test_render_retries_on_torn_read(grants, cache, monkeypatch):
+    """READ COMMITTED can tear: version read at N, rows read at N+1. Caching
+    that under version N would poison an immutable key — the renderer must
+    detect the move and re-read."""
+    from catalog.db import restaurants
+
+    svc, sessions = await _service(grants, cache)
+    r, _ = await _create(svc)
+
+    real = CatalogRepo.get_menu_rows
+    calls = {"n": 0}
+
+    async def tearing(self, restaurant_id):
+        calls["n"] += 1
+        rows = await real(self, restaurant_id)
+        if calls["n"] == 1:  # a concurrent edit lands mid-read
+            await self._s.execute(
+                restaurants.update().values(version=restaurants.c.version + 1)
+            )
+        return rows
+
+    monkeypatch.setattr(CatalogRepo, "get_menu_rows", tearing)
+    menu = await svc.get_menu(r.id)
+    assert calls["n"] == 2  # first pass torn → re-rendered
+    assert menu["version"] == r.version + 1  # served (and cached) post-edit state
+
+
+async def test_pricing_read_retries_on_torn_read(grants, cache, monkeypatch):
+    """Same tear hazard as the renderer, higher stakes: a price edit landing
+    mid-read must not hand pricing a mixed-version view."""
+    from catalog.db import restaurants
+
+    svc, sessions = await _service(grants, cache)
+    r, _ = await _create(svc)
+    cat = await svc.add_category(r.id, name="Mains", rank=0)
+    item = await svc.add_item(
+        r.id, category_id=cat["id"],
+        fields={"name": "Biryani", "description": None, "price_cents": 1200,
+                "currency": "USD", "available": True, "rank": 0},
+        tags=[], modifier_groups=[],
+    )
+
+    real = CatalogRepo.get_pricing_rows
+    calls = {"n": 0}
+
+    async def tearing(self, restaurant_id, item_ids):
+        calls["n"] += 1
+        rows = await real(self, restaurant_id, item_ids)
+        if calls["n"] == 1:  # concurrent price edit mid-read
+            await self._s.execute(
+                restaurants.update().values(version=restaurants.c.version + 1)
+            )
+        return rows
+
+    monkeypatch.setattr(CatalogRepo, "get_pricing_rows", tearing)
+    body = await svc.pricing_read(r.id, [item["id"]])
+    assert calls["n"] == 2  # re-read after the version moved
+    assert body["restaurant"]["version"] == item["version"] + 1
+
+
+async def test_singleflight_loser_adopts_winners_blob(grants):
+    """Lock lost → wait a beat → the winner's pointer+blob appeared → serve
+    them, touching neither the DB nor the winner's lock."""
+    import json
+
+    doc = {"restaurant_id": "rst_x", "version": 3, "categories": []}
+
+    class WinnerAppears:
+        def __init__(self):
+            self.ptr_reads = 0
+
+        async def get(self, key: str) -> str | None:
+            if "ptr" in key:
+                self.ptr_reads += 1
+                return None if self.ptr_reads == 1 else "3"  # appears after the wait
+            return json.dumps(doc)
+
+        async def set(self, key, value, ttl_seconds): ...
+        async def delete(self, key): ...
+        async def acquire_lock(self, key, ttl_ms) -> bool:
+            return False  # someone else is rendering
+
+        async def release_lock(self, key): ...
+
+    # sessions=None proves the DB is never touched on this path.
+    svc = CatalogService(None, grants, WinnerAppears(), _NullSearch())
+    assert await svc.get_menu("rst_x") == doc
 
 
 async def test_event_ids_are_deterministic_and_distinct():

@@ -62,6 +62,14 @@ class AddressNotFound(IdentityError):
     pass
 
 
+class AddressLimitReached(IdentityError):
+    """Creation cap: the address list stays small enough that an unpaginated
+    read is correct — and a hostile client can't grow the table unbounded."""
+
+
+MAX_ADDRESSES = 20
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -215,9 +223,10 @@ class IdentityService:
 
     async def add_address(self, user_id: str, data: dict) -> Address:
         async with self._sessions() as session:
-            address_id = await IdentityRepo(session).insert_address(
-                user_id=user_id, data=data, now=_now()
-            )
+            repo = IdentityRepo(session)
+            if await repo.count_addresses(user_id) >= MAX_ADDRESSES:
+                raise AddressLimitReached
+            address_id = await repo.insert_address(user_id=user_id, data=data, now=_now())
             await session.commit()
             return Address(id=address_id, **data)
 

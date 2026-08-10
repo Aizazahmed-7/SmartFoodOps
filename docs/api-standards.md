@@ -29,6 +29,8 @@ Every non-2xx response, no exceptions:
 - `message` never contains SQL, stack traces, internal hostnames, or another user's data.
 - `code` values come from the catalog below. **Adding a code = a PR to this table, never an inline string.**
 
+**Pagination convention**: list endpoints take `page` (0-based, fixed page size ≤20) and return `{"…": [...], "page": N, "has_more": bool}` — `has_more` via the limit+1 read, never a `COUNT(*)`. Offset pagination is acceptable while page depth is shallow; any feed that grows without bound (orders) uses keyset/cursor pagination from day one. Unpaginated lists are only allowed when creation is capped (e.g. addresses ≤20) or the resource is a bounded document (a menu).
+
 Seed catalog (grows only via PR):
 
 | Code | HTTP | Meaning |
@@ -42,6 +44,7 @@ Seed catalog (grows only via PR):
 | `FORBIDDEN_ROLE` | 403 | Authenticated, wrong role for the route |
 | `NOT_FOUND` | 404 | Doesn't exist *or* isn't yours |
 | `GRANT_CONFLICT` | 409 | Role/scoping grant refused: user already scoped elsewhere or role ineligible (onboarding) |
+| `CATEGORY_NOT_EMPTY` | 409 | Deleting a menu category that still contains items — move or delete the items first |
 | `ORDER_NOT_CANCELLABLE` | 409 | Cancel after the cancellable window (e.g. post-pickup) |
 | `ORDER_ALREADY_DECIDED` | 409 | Restaurant decision repeated with a different verdict |
 | `ITEM_UNAVAILABLE` | 409 | Menu item 86'd or stock reservation failed |

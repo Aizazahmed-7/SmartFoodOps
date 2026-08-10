@@ -74,6 +74,7 @@ Owns what a restaurant sells, and the entire menu cache pipeline.
 | Calls | Identity — `POST /v1/internal/grants` on self-serve onboarding (grant `restaurant_admin` + `restaurant_id` to the creating user; idempotent, retried; never edge-routed). Onboarding is idempotent by owner — phase-1 claim model allows **one restaurant per user**, enforced by `UNIQUE(owner_user_id)`; a repeat POST returns the existing restaurant and re-attempts the grant (the repair path) |
 | Redis | `catalog:menu:{rid}:<ver>` — rendered blob, 24h<br>`catalog:menu:ptr:{rid}` — current-version pointer, 7d<br>`catalog:browse:<gh5>:<cuisine>:<page>` — browse pages, 60s<br>`catalog:lock:menu:{rid}` — singleflight on render miss |
 | Kafka | **produces** `catalog.changes` (compacted, outbox → Debezium) |
+| Internal | `GET /v1/internal/restaurants/{rid}/snapshot?item_ids=…` — authoritative pricing **read** for Order's pricing lib (system-only, never edge-routed, cache-bypassing, torn-read-safe; persists nothing — the durable pricing snapshot lives in `order_db`) |
 | CDN | menus (immutable per version), browse pages (30s), images |
 | λ | menu-cache version bump on publish |
 

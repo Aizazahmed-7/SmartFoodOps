@@ -170,4 +170,8 @@ def test_internal_paths_are_unroutable(client, upstream):
         headers=bearer(),
     )
     assert r.status_code == 404
+    snapshot = client.get(
+        "/v1/internal/restaurants/rst_1/snapshot?item_ids=itm_1", headers=bearer()
+    )
+    assert snapshot.status_code == 404  # the pricing read is internal too
     assert upstream.requests == []  # nothing was forwarded anywhere

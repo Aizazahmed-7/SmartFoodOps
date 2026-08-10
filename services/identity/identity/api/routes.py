@@ -9,6 +9,7 @@ from smartfood_api import ApiError, StrictModel
 from smartfood_auth import Auth, AuthContext, jwks, require_role
 
 from ..domain.service import (
+    AddressLimitReached,
     AddressNotFound,
     GrantConflict,
     IdentityService,
@@ -178,7 +179,13 @@ async def grant_role(body: GrantIn, ctx: SystemOnly, request: Request) -> dict:
 
 @router.post("/v1/me/addresses", status_code=201)
 async def add_address(body: AddressIn, ctx: Auth, request: Request) -> AddressOut:
-    address = await _svc(request).add_address(ctx.sub, body.model_dump())
+    try:
+        address = await _svc(request).add_address(ctx.sub, body.model_dump())
+    except AddressLimitReached:
+        raise ApiError(
+            "VALIDATION_FAILED", "address limit reached", 422,
+            details=[{"field": "addresses", "issue": "at most 20 saved addresses"}],
+        ) from None
     return AddressOut.model_validate(address)
 
 
