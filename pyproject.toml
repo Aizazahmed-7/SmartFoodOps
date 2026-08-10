@@ -22,7 +22,9 @@ dev = [
 include = ["libs", "services", "tools"]
 typeCheckingMode = "standard"
 # Strict tier: libs/ + every service's domain/ — enforcement activates with Catalog.
-strict = ["libs", "services/*/*/domain"]
+# Strict tier (libs source + domain) activates with the Catalog milestone once
+# the stubs strategy for structlog/SQLAlchemy Rows is decided (repo-structure §5).
+reportUnusedFunction = false  # false-positives on decorator-registered handlers
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"

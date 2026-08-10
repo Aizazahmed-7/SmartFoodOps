@@ -11,6 +11,7 @@ import httpx
 import jwt as pyjwt
 import structlog
 from fastapi import FastAPI, Request, Response
+from smartfood_api import ApiError, install_error_handlers
 from smartfood_auth import STRIP_HEADERS, JwksVerifier, context_from_claims, headers_for
 from smartfood_otel import RequestContextMiddleware, get_logger, setup_logging
 
@@ -56,6 +57,7 @@ def create_app(
 
     app = FastAPI(title="edge-bff", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
+    install_error_handlers(app)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -68,9 +70,7 @@ def create_app(
     async def proxy(path: str, request: Request) -> Response:
         rule = match("/" + path)
         if rule is None:
-            return Response(
-                content=b'{"detail":"not found"}', status_code=404, media_type="application/json"
-            )
+            raise ApiError("NOT_FOUND", "no such route", 404)
 
         # 1. Authenticate when the route demands it.
         stamped: dict[str, str] = {}
@@ -78,21 +78,22 @@ def create_app(
             auth_header = request.headers.get("authorization", "")
             scheme, _, token = auth_header.partition(" ")
             if scheme.lower() != "bearer" or not token:
-                return Response(
-                    content=b'{"detail":"missing bearer token"}',
-                    status_code=401,
-                    media_type="application/json",
+                raise ApiError(
+                    "AUTH_INVALID_CREDENTIALS", "missing bearer token", 401,
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             try:
                 claims = await token_verifier.verify(token)
-            except pyjwt.InvalidTokenError:
-                return Response(
-                    content=b'{"detail":"invalid token"}',
-                    status_code=401,
-                    media_type="application/json",
+            except pyjwt.ExpiredSignatureError:
+                raise ApiError(
+                    "AUTH_TOKEN_EXPIRED", "access token expired — refresh", 401,
                     headers={"WWW-Authenticate": "Bearer"},
-                )
+                ) from None
+            except pyjwt.InvalidTokenError:
+                raise ApiError(
+                    "AUTH_INVALID_CREDENTIALS", "invalid token", 401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                ) from None
             stamped = headers_for(context_from_claims(claims))
 
         # 2. Build forward headers: inbound minus identity/hop-by-hop, plus stamped.
@@ -120,11 +121,10 @@ def create_app(
             )
         except httpx.HTTPError:
             log.warning("upstream unavailable", upstream=rule.upstream, path=path)
-            return Response(
-                content=b'{"detail":"upstream unavailable"}',
-                status_code=502,
-                media_type="application/json",
-            )
+            raise ApiError(
+                "DEPENDENCY_UNAVAILABLE", "upstream unavailable", 503,
+                headers={"Retry-After": "1"},
+            ) from None
 
         return Response(
             content=upstream.content,

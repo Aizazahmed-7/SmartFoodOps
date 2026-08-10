@@ -7,7 +7,7 @@ ISS = "https://identity.test"
 AUD = "sfo-api"
 
 
-def make_verifier(jwks_docs: list[dict]) -> JwksVerifier:
+def make_verifier(jwks_docs: list[dict], min_refetch_interval: float = 5.0) -> JwksVerifier:
     """Verifier whose HTTP client serves each jwks doc in sequence (last one repeats)."""
     calls = {"n": 0}
 
@@ -17,7 +17,13 @@ def make_verifier(jwks_docs: list[dict]) -> JwksVerifier:
         return httpx.Response(200, json=doc)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return JwksVerifier("https://identity.test/jwks", issuer=ISS, audience=AUD, http=http)
+    return JwksVerifier(
+        "https://identity.test/jwks",
+        issuer=ISS,
+        audience=AUD,
+        min_refetch_interval=min_refetch_interval,
+        http=http,
+    )
 
 
 async def test_round_trip():
@@ -60,7 +66,9 @@ async def test_wrong_audience_rejected():
 async def test_unknown_kid_triggers_refetch():
     """Key rotation: first fetch serves old key; token signed by new key forces a refetch."""
     old, new = generate_rsa_key(), generate_rsa_key()
-    verifier = make_verifier([jwks([old]), jwks([old, new])])
+    # min_refetch_interval=0 simulates the clamp window having elapsed — in prod,
+    # a rotation token arriving within the ~5s clamp gets one retriable 401.
+    verifier = make_verifier([jwks([old]), jwks([old, new])], min_refetch_interval=0.0)
 
     old_token = TokenIssuer(old, issuer=ISS, audience=AUD).issue(sub="u1", role="customer")
     assert (await verifier.verify(old_token))["sub"] == "u1"  # primes cache with old only
@@ -79,6 +87,36 @@ async def test_forged_token_rejected():
 
 async def test_alg_none_rejected():
     key = generate_rsa_key()
-    evil = jwt.encode({"sub": "u1", "iss": ISS, "aud": AUD}, key=None, algorithm="none")
+    evil = jwt.encode(
+        {"sub": "u1", "iss": ISS, "aud": AUD},
+        key=None,  # type: ignore[arg-type]  # deliberately forging alg=none
+        algorithm="none",
+    )
     with pytest.raises(jwt.InvalidTokenError):
         await make_verifier([jwks([key])]).verify(evil)
+
+
+async def test_unknown_kid_spam_does_not_refetch_within_clamp():
+    """Forged-kid spam triggers at most one JWKS fetch per clamp interval."""
+    key = generate_rsa_key()
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json=jwks([key]))
+
+    verifier = JwksVerifier(
+        "https://identity.test/jwks",
+        issuer=ISS,
+        audience=AUD,
+        http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    good = TokenIssuer(key, issuer=ISS, audience=AUD).issue(sub="u1", role="customer")
+    await verifier.verify(good)  # primes the cache: fetch #1
+
+    attacker = generate_rsa_key()
+    forged = TokenIssuer(attacker, issuer=ISS, audience=AUD).issue(sub="u1", role="system_admin")
+    for _ in range(20):
+        with pytest.raises(jwt.InvalidTokenError):
+            await verifier.verify(forged)
+    assert calls["n"] == 1  # clamp held: no refetch storm

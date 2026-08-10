@@ -10,6 +10,7 @@ import hashlib
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from smartfood_auth import RsaKey, generate_rsa_key
 
 
@@ -27,6 +28,8 @@ def load_or_generate(path: str) -> RsaKey:
         return key
 
     private = serialization.load_pem_private_key(p.read_bytes(), password=None)
+    if not isinstance(private, rsa.RSAPrivateKey):
+        raise ValueError(f"{path} is not an RSA private key")
     numbers = private.public_key().public_numbers()
     n_bytes = numbers.n.to_bytes((numbers.n.bit_length() + 7) // 8, "big")
     kid = hashlib.sha256(n_bytes).hexdigest()[:16]

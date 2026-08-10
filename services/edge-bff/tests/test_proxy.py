@@ -129,13 +129,25 @@ def test_query_string_and_request_id_forwarded(client, upstream):
 
 
 def test_unknown_path_is_404(client):
-    assert client.get("/v1/nonsense").status_code == 404
+    r = client.get("/v1/nonsense")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "NOT_FOUND"
 
 
-def test_upstream_down_is_502(client):
+def test_expired_token_gets_distinct_code(client):
+    expired = TokenIssuer(KEY, issuer=ISS, audience=AUD, ttl_seconds=-10).issue(
+        sub="u1", role="customer"
+    )
+    r = client.get("/v1/auth/me", headers={"Authorization": f"Bearer {expired}"})
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "AUTH_TOKEN_EXPIRED"
+
+
+def test_upstream_down_is_503_with_retry_after(client):
     r = client.post("/v1/orders", json={}, headers=bearer())
-    assert r.status_code == 502
-    assert r.json() == {"detail": "upstream unavailable"}
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert r.headers["Retry-After"] == "1"
 
 
 def test_upstream_response_passes_through(client, upstream):

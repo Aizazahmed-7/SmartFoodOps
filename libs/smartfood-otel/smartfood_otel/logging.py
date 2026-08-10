@@ -8,6 +8,7 @@ against, so that swap changes no service code (docs §14).
 import logging
 
 import structlog
+from structlog.typing import Processor
 
 
 def setup_logging(service: str, *, level: int = logging.INFO) -> None:
@@ -18,18 +19,23 @@ def setup_logging(service: str, *, level: int = logging.INFO) -> None:
     that is what makes `grep order_id=... across services` work.
     """
 
-    def add_service(_logger, _method, event_dict: dict) -> dict:
+    def add_service(
+        _logger: structlog.typing.WrappedLogger,
+        _method: str,
+        event_dict: structlog.typing.EventDict,
+    ) -> structlog.typing.EventDict:
         event_dict["service"] = service
         return event_dict
 
+    processors: list[Processor] = [
+        structlog.contextvars.merge_contextvars,
+        add_service,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        structlog.processors.JSONRenderer(),
+    ]
     structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            add_service,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.JSONRenderer(),
-        ],
+        processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(level),
         cache_logger_on_first_use=True,
     )

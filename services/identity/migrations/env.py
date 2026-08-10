@@ -21,7 +21,10 @@ def _do_run_migrations(connection) -> None:
 
 
 async def _run_async() -> None:
-    engine = create_async_engine(config.get_main_option("sqlalchemy.url"))
+    url = config.get_main_option("sqlalchemy.url")
+    if url is None:
+        raise RuntimeError("sqlalchemy.url not configured")
+    engine = create_async_engine(url)
     async with engine.connect() as connection:
         await connection.run_sync(_do_run_migrations)
     await engine.dispose()

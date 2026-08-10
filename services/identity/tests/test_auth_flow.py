@@ -44,7 +44,10 @@ def test_wrong_password_is_uniform_401(client):
     r = client.post("/v1/auth/login", json={"email": REG["email"], "password": "wrong"})
     r2 = client.post("/v1/auth/login", json={"email": "ghost@example.com", "password": "x"})
     assert r.status_code == r2.status_code == 401
-    assert r.json() == r2.json()
+    # Uniform in everything an attacker can distinguish; request_id differs by design.
+    for resp in (r, r2):
+        assert resp.json()["error"]["code"] == "AUTH_INVALID_CREDENTIALS"
+    assert r.json()["error"]["message"] == r2.json()["error"]["message"]
 
 
 def test_refresh_rotates(client):
@@ -143,3 +146,24 @@ def test_address_crud_and_ownership(client):
 
     assert client.delete(f"/v1/me/addresses/{addr_id}", headers=headers).status_code == 204
     assert client.get("/v1/me/addresses", headers=headers).json() == []
+
+
+def test_refresh_reuse_returns_distinct_code(client):
+    """The legitimate holder learns their token was stolen (AUTH_REFRESH_REUSED)."""
+    client.post("/v1/auth/register", json=REG)
+    pair = client.post("/v1/auth/login", json=REG).json()
+    client.post("/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]})
+    reuse = client.post("/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]})
+    assert reuse.status_code == 401
+    assert reuse.json()["error"]["code"] == "AUTH_REFRESH_REUSED"
+
+
+def test_unknown_body_field_is_422(client):
+    r = client.post("/v1/auth/register", json={**REG, "role": "system_admin"})
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "VALIDATION_FAILED"
+
+
+def test_short_password_rejected(client):
+    r = client.post("/v1/auth/register", json={"email": "x@y.z", "password": "short"})
+    assert r.status_code == 422

@@ -50,10 +50,11 @@ Seed catalog (grows only via PR):
 | `RATE_LIMITED` | 429 | Per-class bucket exhausted (§6) |
 | `ADMISSION_SHED` | 429 | Edge admission control shed the request before any write (ADR-0014) |
 | `DEPENDENCY_UNAVAILABLE` | 503 | Downstream down; `Retry-After` set |
+| `INTERNAL_ERROR` | 500 | Unhandled failure — envelope never leaks internals; the log line carries the real error |
 
 COD- and real-PSP-specific codes (`COD_*`, `PHONE_NOT_VERIFIED`, `PAYMENT_ACTION_REQUIRED`) arrive with their ADR-0018 triggers (D4 / D3), not before.
 
-> Current code returns FastAPI's default `{"detail": …}` shapes. The shared exception handler that produces this envelope (domain errors subclass one `SmartFoodError(code, http_status)`) is a scheduled code follow-up — new endpoints from W2 on use it; existing identity routes migrate when next touched.
+> Implemented: `libs/smartfood-api` provides `ApiError(code, message, status)` + `install_error_handlers(app)`; identity and edge-bff emit this envelope for every non-2xx (validation errors included, with `details`). Domain layers stay HTTP-free — they raise domain exceptions; the API layer maps them to catalog codes.
 
 ---
 

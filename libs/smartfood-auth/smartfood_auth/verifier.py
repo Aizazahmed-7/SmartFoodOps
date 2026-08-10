@@ -6,9 +6,11 @@ import this: they consume identity headers via context.py (ADR-0005).
 
 import json
 import time
+from typing import Any
 
 import httpx
 import jwt
+from jwt.algorithms import RSAAlgorithm
 
 
 class JwksVerifier:
@@ -27,14 +29,16 @@ class JwksVerifier:
         issuer: str,
         audience: str,
         cache_ttl: float = 600.0,
+        min_refetch_interval: float = 5.0,
         http: httpx.AsyncClient | None = None,
     ):
         self._jwks_url = jwks_url
         self._issuer = issuer
         self._audience = audience
         self._cache_ttl = cache_ttl
+        self._min_refetch_interval = min_refetch_interval
         self._http = http or httpx.AsyncClient(timeout=5.0)
-        self._keys: dict[str, object] = {}
+        self._keys: dict[str, Any] = {}
         self._fetched_at: float = 0.0
 
     async def _refresh(self) -> None:
@@ -42,7 +46,7 @@ class JwksVerifier:
         resp.raise_for_status()
         doc = resp.json()
         self._keys = {
-            k["kid"]: jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(k))
+            k["kid"]: RSAAlgorithm.from_jwk(json.dumps(k))
             for k in doc.get("keys", [])
             if k.get("kty") == "RSA"
         }
@@ -62,7 +66,10 @@ class JwksVerifier:
             raise jwt.InvalidTokenError("missing kid")
 
         if kid not in self._keys or self._stale():
-            await self._refresh()
+            # Clamp: an attacker spraying unknown kids must not turn every bad
+            # token into a JWKS fetch against Identity (DoS lever).
+            if (time.monotonic() - self._fetched_at) >= self._min_refetch_interval:
+                await self._refresh()
         key = self._keys.get(kid)
         if key is None:
             raise jwt.InvalidTokenError("unknown kid")

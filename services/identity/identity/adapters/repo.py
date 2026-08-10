@@ -7,9 +7,10 @@ to the domain layer, which knows which writes must survive which errors.
 
 import uuid
 from datetime import datetime
+from typing import Any, cast
 
 import sqlalchemy as sa
-from sqlalchemy.engine import Row
+from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import addresses, refresh_tokens, users
@@ -57,7 +58,7 @@ class IdentityRepo:
         result = await self._s.execute(
             users.update().where(users.c.id == user_id).values(**changes)
         )
-        return result.rowcount
+        return cast(CursorResult[Any], result).rowcount
 
     # ── refresh tokens ─────────────────────────────────────────────
 
@@ -124,4 +125,4 @@ class IdentityRepo:
                 (addresses.c.id == address_id) & (addresses.c.user_id == user_id)
             )
         )
-        return result.rowcount
+        return cast(CursorResult[Any], result).rowcount

@@ -19,7 +19,8 @@ from smartfood_otel import (
 def test_make_traceparent_is_valid():
     tp = make_traceparent()
     assert extract_traceparent({"traceparent": tp}) == tp
-    assert len(trace_id_of(tp)) == 32
+    tid = trace_id_of(tp)
+    assert tid is not None and len(tid) == 32
 
 
 def test_extract_rejects_garbage():

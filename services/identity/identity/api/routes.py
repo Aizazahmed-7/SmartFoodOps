@@ -1,8 +1,9 @@
 """API layer — HTTP in, HTTP out. Parses requests, calls the domain service,
 maps domain exceptions to status codes. No SQL, no business rules."""
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, EmailStr
+from fastapi import APIRouter, Request
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from smartfood_api import ApiError, StrictModel
 from smartfood_auth import Auth, jwks
 
 from ..domain.service import (
@@ -11,6 +12,7 @@ from ..domain.service import (
     InvalidCredentials,
     InvalidRefreshToken,
     NothingToUpdate,
+    RefreshTokenReused,
     UnknownUser,
 )
 
@@ -21,19 +23,19 @@ def _svc(request: Request) -> IdentityService:
     return request.app.state.service
 
 
-class RegisterIn(BaseModel):
-    email: EmailStr
-    password: str
-    full_name: str | None = None
+class RegisterIn(StrictModel):
+    email: EmailStr = Field(max_length=254)
+    password: str = Field(min_length=10, max_length=128)
+    full_name: str | None = Field(default=None, max_length=120)
 
 
-class LoginIn(BaseModel):
-    email: EmailStr
-    password: str
+class LoginIn(StrictModel):
+    email: EmailStr = Field(max_length=254)
+    password: str = Field(max_length=128)
 
 
-class RefreshIn(BaseModel):
-    refresh_token: str
+class RefreshIn(StrictModel):
+    refresh_token: str = Field(max_length=256)
 
 
 class TokenPair(BaseModel):
@@ -66,17 +68,17 @@ class AddressOut(BaseModel):
     lon: float | None
 
 
-class ProfileUpdate(BaseModel):
-    full_name: str | None = None
-    phone: str | None = None
+class ProfileUpdate(StrictModel):
+    full_name: str | None = Field(default=None, max_length=120)
+    phone: str | None = Field(default=None, max_length=32)
 
 
-class AddressIn(BaseModel):
-    label: str
-    line1: str
-    city: str
-    lat: float | None = None
-    lon: float | None = None
+class AddressIn(StrictModel):
+    label: str = Field(max_length=40)
+    line1: str = Field(max_length=200)
+    city: str = Field(max_length=80)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
 
 
 @router.get("/.well-known/jwks.json")
@@ -97,7 +99,9 @@ async def login(body: LoginIn, request: Request) -> TokenPair:
     try:
         pair = await _svc(request).login(email=body.email, password=body.password)
     except InvalidCredentials:
-        raise HTTPException(status_code=401, detail="invalid credentials") from None
+        raise ApiError(
+            "AUTH_INVALID_CREDENTIALS", "invalid credentials", 401
+        ) from None
     return TokenPair.model_validate(pair)
 
 
@@ -105,8 +109,14 @@ async def login(body: LoginIn, request: Request) -> TokenPair:
 async def refresh(body: RefreshIn, request: Request) -> TokenPair:
     try:
         pair = await _svc(request).refresh(body.refresh_token)
+    except RefreshTokenReused:
+        raise ApiError(
+            "AUTH_REFRESH_REUSED", "refresh token reuse detected — all sessions revoked", 401
+        ) from None
     except InvalidRefreshToken:
-        raise HTTPException(status_code=401, detail="invalid refresh token") from None
+        raise ApiError(
+            "AUTH_INVALID_CREDENTIALS", "invalid refresh token", 401
+        ) from None
     return TokenPair.model_validate(pair)
 
 
@@ -115,7 +125,7 @@ async def me(ctx: Auth, request: Request) -> ProfileOut:
     try:
         profile = await _svc(request).get_profile(ctx.sub)
     except UnknownUser:
-        raise HTTPException(status_code=404, detail="unknown user") from None
+        raise ApiError("NOT_FOUND", "unknown user", 404) from None
     return ProfileOut.model_validate(profile)
 
 
@@ -125,9 +135,12 @@ async def update_me(body: ProfileUpdate, ctx: Auth, request: Request) -> dict:
     try:
         await _svc(request).update_profile(ctx.sub, changes)
     except NothingToUpdate:
-        raise HTTPException(status_code=400, detail="nothing to update") from None
+        raise ApiError(
+            "VALIDATION_FAILED", "nothing to update", 422,
+            details=[{"field": "body", "issue": "at least one field required"}],
+        ) from None
     except UnknownUser:
-        raise HTTPException(status_code=404, detail="unknown user") from None
+        raise ApiError("NOT_FOUND", "unknown user", 404) from None
     return {"status": "updated", **changes}
 
 
@@ -149,4 +162,4 @@ async def delete_address(address_id: str, ctx: Auth, request: Request) -> None:
     try:
         await _svc(request).delete_address(ctx.sub, address_id)
     except AddressNotFound:
-        raise HTTPException(status_code=404, detail="not found") from None
+        raise ApiError("NOT_FOUND", "not found", 404) from None

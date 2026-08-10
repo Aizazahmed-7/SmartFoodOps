@@ -7,6 +7,7 @@ reuse commits before its error propagates — the bug class we hit when
 these concerns were interleaved.
 """
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from smartfood_auth import TokenIssuer
@@ -36,6 +37,12 @@ class InvalidCredentials(IdentityError):
 
 class InvalidRefreshToken(IdentityError):
     pass
+
+
+class RefreshTokenReused(InvalidRefreshToken):
+    """Rotated/revoked token presented again — family has been revoked.
+    Distinct so the API can return AUTH_REFRESH_REUSED: the legitimate
+    holder learns their token was stolen."""
 
 
 class UnknownUser(IdentityError):
@@ -75,12 +82,15 @@ class IdentityService:
     async def register(self, *, email: str, password: str, full_name: str | None) -> None:
         """Idempotent: registering an existing email is a silent no-op —
         the caller must not be able to tell (enumeration resistance)."""
+        # argon2 costs ~100ms of CPU — do it BEFORE opening the session so no
+        # transaction is held during the hash (tx-boundary rule, checklists).
+        password_hash = hash_password(password)
         async with self._sessions() as session:
             repo = IdentityRepo(session)
             if await repo.get_user_by_email(email) is None:
                 await repo.insert_user(
                     email=email,
-                    password_hash=hash_password(password),
+                    password_hash=password_hash,
                     full_name=full_name,
                     role="customer",
                     now=_now(),
@@ -116,7 +126,7 @@ class IdentityService:
                 log.warning(
                     "refresh token reuse detected — family revoked", family=row.family_id
                 )
-                raise InvalidRefreshToken
+                raise RefreshTokenReused
 
             if _aware(row.expires_at) < _now():
                 raise InvalidRefreshToken
@@ -130,8 +140,6 @@ class IdentityService:
             return pair
 
     async def _issue_pair(self, repo: IdentityRepo, user, family_id: str | None) -> TokenPairData:
-        import uuid
-
         access = self._issuer.issue(
             sub=user.id,
             role=user.role,
