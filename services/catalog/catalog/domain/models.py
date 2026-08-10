@@ -5,6 +5,7 @@ the adapters build them from rows. Same convention as identity.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -16,5 +17,5 @@ class Restaurant:
     status: str  # open | paused
     lat: float | None
     lon: float | None
-    hours: dict | None
+    hours: dict[str, Any] | None
     version: int

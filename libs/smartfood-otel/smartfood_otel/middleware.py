@@ -8,6 +8,8 @@ response so clients can quote it in bug reports.
 """
 
 import uuid
+from collections.abc import Awaitable, Callable, MutableMapping
+from typing import Any
 
 import structlog
 
@@ -15,12 +17,19 @@ from .propagation import extract_traceparent, make_traceparent, trace_id_of
 
 REQUEST_ID_HEADER = "x-request-id"
 
+# Pure-ASGI protocol types (framework-free by design — see module docstring).
+Scope = MutableMapping[str, Any]
+Message = MutableMapping[str, Any]
+Receive = Callable[[], Awaitable[Message]]
+Send = Callable[[Message], Awaitable[None]]
+ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
+
 
 class RequestContextMiddleware:
-    def __init__(self, app):
+    def __init__(self, app: ASGIApp):
         self.app = app
 
-    async def __call__(self, scope, receive, send):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -37,7 +46,7 @@ class RequestContextMiddleware:
         scope.setdefault("state", {})
         scope["state"]["traceparent"] = traceparent
 
-        async def send_with_request_id(message):
+        async def send_with_request_id(message: Message) -> None:
             if message["type"] == "http.response.start":
                 message.setdefault("headers", []).append(
                     (REQUEST_ID_HEADER.encode(), request_id.encode())

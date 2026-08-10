@@ -237,7 +237,9 @@ async def test_singleflight_loser_adopts_winners_blob(grants):
         async def release_lock(self, key): ...
 
     # sessions=None proves the DB is never touched on this path.
-    svc = CatalogService(None, grants, WinnerAppears(), _NullSearch())
+    from typing import Any, cast
+
+    svc = CatalogService(cast(Any, None), grants, WinnerAppears(), _NullSearch())
     assert await svc.get_menu("rst_x") == doc
 
 

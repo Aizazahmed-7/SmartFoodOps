@@ -18,11 +18,15 @@ The menu tree is deliberately dicts, not dataclasses: it is a document
 import asyncio
 import json
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any
 
 from smartfood_otel import get_logger
+from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import CatalogRepo
 from .models import Restaurant
@@ -84,7 +88,13 @@ def _now() -> datetime:
 
 
 class CatalogService:
-    def __init__(self, sessions, grants: GrantsPort, cache: CachePort, search: SearchPort):
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        grants: GrantsPort,
+        cache: CachePort,
+        search: SearchPort,
+    ):
         self._sessions = sessions
         self._grants = grants
         self._cache = cache
@@ -104,7 +114,7 @@ class CatalogService:
         )
 
     @staticmethod
-    def _profile(restaurant: Restaurant) -> dict:
+    def _profile(restaurant: Restaurant) -> dict[str, Any]:
         return {
             "name": restaurant.name,
             "city": restaurant.city,
@@ -116,8 +126,13 @@ class CatalogService:
         }
 
     @staticmethod
-    def _item_dict(item, tags, groups, options) -> dict:
-        options_by_group: dict[str, list] = defaultdict(list)
+    def _item_dict(
+        item: Row[Any],
+        tags: Sequence[Row[Any]],
+        groups: Sequence[Row[Any]],
+        options: Sequence[Row[Any]],
+    ) -> dict[str, Any]:
+        options_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for option in options:
             options_by_group[option.group_id].append(
                 {
@@ -150,21 +165,21 @@ class CatalogService:
             ],
         }
 
-    async def _menu_snapshot(self, repo: CatalogRepo, restaurant_id: str) -> dict:
+    async def _menu_snapshot(self, repo: CatalogRepo, restaurant_id: str) -> dict[str, Any]:
         """The full menu tree — also the shape the slice-5 blob renderer
         serves. Set-based reads (5 queries total regardless of menu size)."""
         categories, items, tags, groups, options = await repo.get_menu_rows(restaurant_id)
-        tags_by_item: dict[str, list] = defaultdict(list)
+        tags_by_item: dict[str, list[Row[Any]]] = defaultdict(list)
         for tag in tags:
             tags_by_item[tag.item_id].append(tag)
-        groups_by_item: dict[str, list] = defaultdict(list)
+        groups_by_item: dict[str, list[Row[Any]]] = defaultdict(list)
         for group in groups:
             groups_by_item[group.item_id].append(group)
-        options_by_group: dict[str, list] = defaultdict(list)
+        options_by_group: dict[str, list[Row[Any]]] = defaultdict(list)
         for option in options:
             options_by_group[option.group_id].append(option)
 
-        items_by_category: dict[str, list] = defaultdict(list)
+        items_by_category: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for item in items:
             item_groups = groups_by_item[item.id]
             item_options = [
@@ -185,7 +200,9 @@ class CatalogService:
             ]
         }
 
-    async def _read_item(self, repo: CatalogRepo, restaurant_id: str, item_id: str) -> dict:
+    async def _read_item(
+        self, repo: CatalogRepo, restaurant_id: str, item_id: str
+    ) -> dict[str, Any]:
         rows = await repo.get_item_rows(restaurant_id, item_id)
         if rows is None:
             raise ItemNotFound
@@ -194,7 +211,11 @@ class CatalogService:
     # ── the four-write rule ────────────────────────────────────────
 
     async def _publish(
-        self, repo: CatalogRepo, restaurant_id: str, event_type: str, extra: dict | None = None
+        self,
+        repo: CatalogRepo,
+        restaurant_id: str,
+        event_type: str,
+        extra: dict[str, Any] | None = None,
     ) -> Restaurant:
         """Version bump + audit row + outbox event with a full-state payload.
         Runs inside the caller's tx, so the snapshot it reads is exactly the
@@ -224,7 +245,7 @@ class CatalogService:
         cuisines: list[str],
         lat: float | None,
         lon: float | None,
-        hours: dict | None,
+        hours: dict[str, Any] | None,
     ) -> tuple[Restaurant, bool]:
         """Self-serve onboarding, idempotent by owner (phase-1 claim model:
         one restaurant per user, enforced by UNIQUE(owner_user_id)).
@@ -275,7 +296,7 @@ class CatalogService:
             return await self._read(CatalogRepo(session), restaurant_id)
 
     async def update_restaurant(
-        self, restaurant_id: str, changes: dict, cuisines: list[str] | None
+        self, restaurant_id: str, changes: dict[str, Any], cuisines: list[str] | None
     ) -> Restaurant:
         if not changes and cuisines is None:
             raise NothingToUpdate
@@ -306,7 +327,9 @@ class CatalogService:
 
     # ── menu: categories ───────────────────────────────────────────
 
-    async def add_category(self, restaurant_id: str, *, name: str, rank: int) -> dict:
+    async def add_category(
+        self, restaurant_id: str, *, name: str, rank: int
+    ) -> dict[str, Any]:
         async with self._sessions() as session:
             repo = CatalogRepo(session)
             if await repo.get_restaurant(restaurant_id) is None:
@@ -318,8 +341,8 @@ class CatalogService:
         return {"id": category_id, "name": name, "rank": rank, "version": restaurant.version}
 
     async def update_category(
-        self, restaurant_id: str, category_id: str, changes: dict
-    ) -> dict:
+        self, restaurant_id: str, category_id: str, changes: dict[str, Any]
+    ) -> dict[str, Any]:
         if not changes:
             raise NothingToUpdate
         async with self._sessions() as session:
@@ -335,7 +358,7 @@ class CatalogService:
         return {"id": row.id, "name": row.name, "rank": row.rank,
                 "version": restaurant.version}
 
-    async def delete_category(self, restaurant_id: str, category_id: str) -> dict:
+    async def delete_category(self, restaurant_id: str, category_id: str) -> dict[str, Any]:
         async with self._sessions() as session:
             repo = CatalogRepo(session)
             if await repo.get_category(restaurant_id, category_id) is None:
@@ -355,10 +378,10 @@ class CatalogService:
         restaurant_id: str,
         *,
         category_id: str,
-        fields: dict,
+        fields: dict[str, Any],
         tags: list[str],
-        modifier_groups: list[dict],
-    ) -> dict:
+        modifier_groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         async with self._sessions() as session:
             repo = CatalogRepo(session)
             # Category ownership doubles as the restaurant existence check.
@@ -378,10 +401,10 @@ class CatalogService:
         restaurant_id: str,
         item_id: str,
         *,
-        changes: dict,
+        changes: dict[str, Any],
         tags: list[str] | None,
-        modifier_groups: list[dict] | None,
-    ) -> dict:
+        modifier_groups: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
         """`available: False` in changes is the 86 toggle. tags/modifier_groups
         are replace-the-set when given ([] clears), untouched when None."""
         if not changes and tags is None and modifier_groups is None:
@@ -405,7 +428,7 @@ class CatalogService:
         await self._cache.delete(_ptr_key(restaurant_id))
         return {**item, "version": restaurant.version}
 
-    async def delete_item(self, restaurant_id: str, item_id: str) -> dict:
+    async def delete_item(self, restaurant_id: str, item_id: str) -> dict[str, Any]:
         async with self._sessions() as session:
             repo = CatalogRepo(session)
             # Guard BEFORE deleting children — the children of someone else's
@@ -422,7 +445,7 @@ class CatalogService:
 
     # ── menu: the cached read path (docs §7 rows 3/5/6) ────────────
 
-    async def get_menu(self, restaurant_id: str, version: int | None = None) -> dict:
+    async def get_menu(self, restaurant_id: str, version: int | None = None) -> dict[str, Any]:
         """Pointer → blob → render. A blob is immutable per version, so a
         version-addressed hit never touches PG; only the current version can
         be rebuilt (old-version miss → StaleMenuVersion, client re-resolves)."""
@@ -444,7 +467,7 @@ class CatalogService:
                 return json.loads(blob)
         return await self._render_and_cache(restaurant_id)
 
-    async def _render_and_cache(self, restaurant_id: str) -> dict:
+    async def _render_and_cache(self, restaurant_id: str) -> dict[str, Any]:
         """Singleflight render: one renderer per restaurant per 3s window;
         losers wait a beat and re-check, then render anyway — a lock must
         never fail a user. Writes blob THEN pointer: a crash between the two
@@ -480,7 +503,7 @@ class CatalogService:
 
     async def _consistent_read(
         self, repo: CatalogRepo, restaurant_id: str
-    ) -> tuple[Restaurant, dict]:
+    ) -> tuple[Restaurant, dict[str, Any]]:
         """Version re-check: under READ COMMITTED our reads can tear (rows
         from v N+1 under version N). Caching torn content under an immutable
         version key would poison it forever — re-read the version and retry
@@ -500,7 +523,7 @@ class CatalogService:
 
     async def browse(
         self, *, city: str, cuisine: str | None, tag: str | None, page: int
-    ) -> dict:
+    ) -> dict[str, Any]:
         key = f"catalog:browse:{city}:{cuisine or '-'}:{tag or '-'}:{page}"
         cached = await self._cache.get(key)
         if cached is not None:
@@ -538,7 +561,7 @@ class CatalogService:
 
     # ── the authoritative pricing read (money path) ────────────────
 
-    async def pricing_read(self, restaurant_id: str, item_ids: list[str]) -> dict:
+    async def pricing_read(self, restaurant_id: str, item_ids: list[str]) -> dict[str, Any]:
         """Computes a consistent point-in-time view for Order's pricing
         library — it persists NOTHING; the durable pricing snapshot lives in
         order_db. Deliberately bypasses every cache (money math reads truth),
@@ -556,13 +579,13 @@ class CatalogService:
                 rows = await repo.get_pricing_rows(restaurant_id, item_ids)
         items, groups, options = rows
 
-        options_by_group: dict[str, list] = defaultdict(list)
+        options_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for option in options:
             options_by_group[option.group_id].append(
                 {"id": option.id, "name": option.name,
                  "price_delta_cents": option.price_delta_cents}
             )
-        groups_by_item: dict[str, list] = defaultdict(list)
+        groups_by_item: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for group in groups:
             groups_by_item[group.item_id].append(
                 {"id": group.id, "name": group.name,
@@ -597,8 +620,14 @@ class CatalogService:
     # ── search (ADR-0019: uncached — unbounded query cardinality) ──
 
     async def search(
-        self, *, query: str, city: str | None, cuisine: str | None, tag: str | None, page: int
-    ) -> dict:
+        self,
+        *,
+        query: str,
+        city: str | None,
+        cuisine: str | None,
+        tag: str | None,
+        page: int,
+    ) -> dict[str, Any]:
         hits = await self._search.search(
             query=query, city=city, cuisine=cuisine, tag=tag,
             limit=SEARCH_PAGE_SIZE + 1, offset=page * SEARCH_PAGE_SIZE,
@@ -614,7 +643,7 @@ class CatalogService:
         cuisines_by_restaurant: dict[str, list[str]] = defaultdict(list)
         for row in cuisine_rows:
             cuisines_by_restaurant[row.restaurant_id].append(row.cuisine)
-        results = []
+        results: list[dict[str, Any]] = []
         for hit in hits:  # hit order IS the ranking — preserve it
             row = by_id.get(hit["restaurant_id"])
             if row is None:

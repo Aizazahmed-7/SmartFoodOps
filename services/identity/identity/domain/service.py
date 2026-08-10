@@ -9,10 +9,12 @@ these concerns were interleaved.
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from smartfood_auth import TokenIssuer
 from smartfood_otel import get_logger
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.engine import Row
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import IdentityRepo
 from ..config import Settings
@@ -82,7 +84,7 @@ def _aware(dt: datetime) -> datetime:
 class IdentityService:
     def __init__(
         self,
-        sessions: async_sessionmaker,
+        sessions: async_sessionmaker[AsyncSession],
         issuer: TokenIssuer,
         settings: Settings,
     ):
@@ -152,7 +154,9 @@ class IdentityService:
             await session.commit()
             return pair
 
-    async def _issue_pair(self, repo: IdentityRepo, user, family_id: str | None) -> TokenPairData:
+    async def _issue_pair(
+        self, repo: IdentityRepo, user: Row[Any], family_id: str | None
+    ) -> TokenPairData:
         access = self._issuer.issue(
             sub=user.id,
             role=user.role,
@@ -210,7 +214,7 @@ class IdentityService:
                 phone=user.phone,
             )
 
-    async def update_profile(self, user_id: str, changes: dict) -> None:
+    async def update_profile(self, user_id: str, changes: dict[str, Any]) -> None:
         if not changes:
             raise NothingToUpdate
         async with self._sessions() as session:
@@ -221,7 +225,7 @@ class IdentityService:
 
     # ── addresses ──────────────────────────────────────────────────
 
-    async def add_address(self, user_id: str, data: dict) -> Address:
+    async def add_address(self, user_id: str, data: dict[str, Any]) -> Address:
         async with self._sessions() as session:
             repo = IdentityRepo(session)
             if await repo.count_addresses(user_id) >= MAX_ADDRESSES:

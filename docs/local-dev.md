@@ -47,7 +47,7 @@ $ make seed
 » cities: Springfield (SPR), Shelbyville (SHE)
 » 20 restaurants + menus/modifiers · 50 riders · demo users per role
 ✔ seed complete (idempotent — safe to re-run)
-   customer@demo.local / demo1234
+   customer@demo.smartfood.dev / demo1234demo
 ```
 
 Seeds exercise the real registration/auth/menu APIs — not SQL inserts — so auth, validation, and the outbox all fire during seeding.
@@ -56,7 +56,7 @@ Seeds exercise the real registration/auth/menu APIs — not SQL inserts — so a
 
 ```console
 $ ./tools/demo/place-order.sh
-» login customer@demo.local ........ ok (JWT)
+» login customer@demo.smartfood.dev  ok (JWT)
 » GET /v1/menus/{rid} .............. ok (v3)
 » cart + checkout .................. ok
 ✔ order placed: order_id=c1-01J9GXA7... status=CONFIRMED total=$23.40
@@ -224,8 +224,8 @@ No `cdklocal`, no CloudFormation emulation — both are slow and flaky, and the 
 
 | User | Password | Role | Scope |
 |---|---|---|---|
-| `customer@demo.local` | `demo1234` | customer | — |
-| `restaurant@demo.local` (proposed) | `demo1234` | restaurant_admin | first seeded SPR restaurant |
+| `customer@demo.smartfood.dev` | `demo1234demo` | customer | — |
+| `owner-<city>-<restaurant-slug>@demo.smartfood.dev` | `demo1234demo` | restaurant_admin (via self-serve grant) | their seeded restaurant |
 | `rider@demo.local` (proposed) | `demo1234` | rider | first seeded SPR rider |
 | `admin@demo.local` (proposed) | `demo1234` | system_admin | all (mutations audited) |
 

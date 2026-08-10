@@ -11,6 +11,7 @@ import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 import jwt
 from cryptography.hazmat.primitives import serialization
@@ -26,7 +27,7 @@ def _b64url_uint(n: int) -> str:
 class RsaKey:
     kid: str
     private_pem: str
-    public_jwk: dict = field(repr=False)
+    public_jwk: dict[str, str] = field(repr=False)
 
 
 def generate_rsa_key() -> RsaKey:
@@ -52,7 +53,7 @@ def generate_rsa_key() -> RsaKey:
     return RsaKey(kid=kid, private_pem=private_pem, public_jwk=public_jwk)
 
 
-def jwks(keys: list[RsaKey]) -> dict:
+def jwks(keys: list[RsaKey]) -> dict[str, Any]:
     """Render the public document served at /.well-known/jwks.json.
 
     Takes a list so rotation works out of the box: publish current + next,
@@ -79,7 +80,7 @@ class TokenIssuer:
         rider_id: str | None = None,
     ) -> str:
         now = int(time.time())
-        claims: dict = {
+        claims: dict[str, Any] = {
             "iss": self._issuer,
             "aud": self._audience,
             "sub": sub,

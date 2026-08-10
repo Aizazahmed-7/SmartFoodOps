@@ -22,10 +22,26 @@ dev = [
 [tool.pyright]
 include = ["libs", "services", "tools"]
 typeCheckingMode = "standard"
-# Strict tier: libs/ + every service's domain/ — enforcement activates with Catalog.
-# Strict tier (libs source + domain) activates with the Catalog milestone once
-# the stubs strategy for structlog/SQLAlchemy Rows is decided (repo-structure §5).
+# Strict tier (activated at the Catalog milestone, as promised): lib sources
+# and every service's domain/ — the code whose type errors propagate furthest.
+# Tests and adapters stay on standard.
+strict = [
+    "libs/smartfood-api/smartfood_api",
+    "libs/smartfood-auth/smartfood_auth",
+    "libs/smartfood-otel/smartfood_otel",
+    "libs/smartfood-outbox/smartfood_outbox",
+    "services/identity/identity/domain",
+    "services/catalog/catalog/domain",
+]
 reportUnusedFunction = false  # false-positives on decorator-registered handlers
+# Resolve workspace libs to their SOURCE (py.typed) rather than through the
+# editable-install indirection pyright can't see type markers through.
+extraPaths = [
+    "libs/smartfood-api",
+    "libs/smartfood-auth",
+    "libs/smartfood-otel",
+    "libs/smartfood-outbox",
+]
 pythonVersion = "3.12"
 venvPath = "."
 venv = ".venv"

@@ -4,7 +4,7 @@ Adapters implement these against real infrastructure; tests substitute
 fakes; the domain layer stays free of httpx/redis imports.
 """
 
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class GrantError(Exception):
@@ -39,7 +39,7 @@ class SearchPort(Protocol):
         tag: str | None,
         limit: int,
         offset: int,
-    ) -> list[dict]: ...
+    ) -> list[dict[str, Any]]: ...
 
 
 class CachePort(Protocol):

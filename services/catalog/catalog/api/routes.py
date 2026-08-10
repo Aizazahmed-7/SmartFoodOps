@@ -111,9 +111,13 @@ def _out(restaurant: Restaurant) -> RestaurantOut:
     return RestaurantOut.model_validate(restaurant, from_attributes=True)
 
 
-# Only customers onboard (riders/admins would be refused by Identity anyway —
-# fail at the gate, not after committing a restaurant). `system` passes for seeds.
-Onboarder = Annotated[AuthContext, Depends(require_role("customer"))]
+# Customers onboard; restaurant_admins must ALSO pass — a successfully
+# granted owner replaying the POST (the idempotent path) arrives with their
+# promoted role, and the service returns their existing restaurant. Riders
+# stay excluded (Identity would refuse the grant anyway — fail at the gate,
+# not after committing a restaurant). Found by the seed tool's real-chain
+# test; the unit tests' hand-stamped headers had hidden it.
+Onboarder = Annotated[AuthContext, Depends(require_role("customer", "restaurant_admin"))]
 
 
 @router.post("/v1/restaurants", status_code=201)

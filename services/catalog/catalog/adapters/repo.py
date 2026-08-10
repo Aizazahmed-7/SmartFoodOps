@@ -6,6 +6,7 @@ to the domain layer (same contract as identity's repo).
 """
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, cast
 
@@ -41,7 +42,7 @@ class CatalogRepo:
         city: str,
         lat: float | None,
         lon: float | None,
-        hours: dict | None,
+        hours: dict[str, Any] | None,
         now: datetime,
     ) -> str:
         restaurant_id = f"rst_{uuid.uuid4().hex}"
@@ -60,21 +61,21 @@ class CatalogRepo:
         )
         return restaurant_id
 
-    async def get_restaurant_by_owner(self, owner_user_id: str) -> Row | None:
+    async def get_restaurant_by_owner(self, owner_user_id: str) -> Row[Any] | None:
         return (
             await self._s.execute(
                 sa.select(restaurants).where(restaurants.c.owner_user_id == owner_user_id)
             )
         ).one_or_none()
 
-    async def get_restaurant(self, restaurant_id: str) -> Row | None:
+    async def get_restaurant(self, restaurant_id: str) -> Row[Any] | None:
         return (
             await self._s.execute(
                 sa.select(restaurants).where(restaurants.c.id == restaurant_id)
             )
         ).one_or_none()
 
-    async def update_restaurant(self, restaurant_id: str, changes: dict) -> int:
+    async def update_restaurant(self, restaurant_id: str, changes: dict[str, Any]) -> int:
         result = await self._s.execute(
             restaurants.update().where(restaurants.c.id == restaurant_id).values(**changes)
         )
@@ -104,7 +105,7 @@ class CatalogRepo:
 
     # ── menu: categories (ownership in every WHERE) ────────────────
 
-    async def get_category(self, restaurant_id: str, category_id: str) -> Row | None:
+    async def get_category(self, restaurant_id: str, category_id: str) -> Row[Any] | None:
         return (
             await self._s.execute(
                 sa.select(menu_categories).where(
@@ -124,7 +125,7 @@ class CatalogRepo:
         return category_id
 
     async def update_category(
-        self, restaurant_id: str, category_id: str, changes: dict
+        self, restaurant_id: str, category_id: str, changes: dict[str, Any]
     ) -> int:
         result = await self._s.execute(
             menu_categories.update()
@@ -159,7 +160,7 @@ class CatalogRepo:
 
     # ── menu: items ────────────────────────────────────────────────
 
-    async def get_item(self, restaurant_id: str, item_id: str) -> Row | None:
+    async def get_item(self, restaurant_id: str, item_id: str) -> Row[Any] | None:
         return (
             await self._s.execute(
                 sa.select(menu_items).where(
@@ -169,7 +170,9 @@ class CatalogRepo:
             )
         ).one_or_none()
 
-    async def insert_item(self, restaurant_id: str, category_id: str, fields: dict) -> str:
+    async def insert_item(
+        self, restaurant_id: str, category_id: str, fields: dict[str, Any]
+    ) -> str:
         item_id = f"itm_{uuid.uuid4().hex}"
         await self._s.execute(
             menu_items.insert().values(
@@ -178,7 +181,9 @@ class CatalogRepo:
         )
         return item_id
 
-    async def update_item(self, restaurant_id: str, item_id: str, changes: dict) -> int:
+    async def update_item(
+        self, restaurant_id: str, item_id: str, changes: dict[str, Any]
+    ) -> int:
         result = await self._s.execute(
             menu_items.update()
             .where(
@@ -201,11 +206,12 @@ class CatalogRepo:
                 item_tags.insert(), [{"item_id": item_id, "tag": t} for t in tags]
             )
 
-    async def insert_modifier_groups(self, item_id: str, groups: list[dict]) -> None:
+    async def insert_modifier_groups(self, item_id: str, groups: list[dict[str, Any]]) -> None:
         """Batch inserts: one executemany for groups, one for all options."""
         if not groups:
             return
-        group_rows, option_rows = [], []
+        group_rows: list[dict[str, Any]] = []
+        option_rows: list[dict[str, Any]] = []
         for group in groups:
             group_id = f"mg_{uuid.uuid4().hex}"
             group_rows.append(
@@ -255,7 +261,7 @@ class CatalogRepo:
         tag: str | None,
         limit: int,
         offset: int,
-    ) -> list[Row]:
+    ) -> list[Row[Any]]:
         query = sa.select(restaurants).where(restaurants.c.city == city)
         if cuisine is not None:
             query = query.where(
@@ -285,7 +291,7 @@ class CatalogRepo:
         query = query.order_by(restaurants.c.name, restaurants.c.id).limit(limit).offset(offset)
         return list((await self._s.execute(query)).all())
 
-    async def get_restaurants_by_ids(self, restaurant_ids: list[str]) -> list[Row]:
+    async def get_restaurants_by_ids(self, restaurant_ids: list[str]) -> list[Row[Any]]:
         if not restaurant_ids:
             return []
         return list(
@@ -296,7 +302,7 @@ class CatalogRepo:
             ).all()
         )
 
-    async def get_cuisines_for(self, restaurant_ids: list[str]) -> list[Row]:
+    async def get_cuisines_for(self, restaurant_ids: list[str]) -> list[Row[Any]]:
         if not restaurant_ids:
             return []
         return list(
@@ -311,7 +317,10 @@ class CatalogRepo:
 
     # ── menu: set-based reads (no per-row loops — repo contract) ───
 
-    async def get_menu_rows(self, restaurant_id: str):
+    async def get_menu_rows(self, restaurant_id: str) -> tuple[
+        Sequence[Row[Any]], Sequence[Row[Any]], Sequence[Row[Any]],
+        Sequence[Row[Any]], Sequence[Row[Any]],
+    ]:
         """(categories, items, tags, groups, options) for one restaurant —
         5 queries regardless of menu size."""
         categories = (
@@ -329,7 +338,9 @@ class CatalogRepo:
             )
         ).all()
         item_ids = [item.id for item in items]
-        tags = groups = options = []
+        tags: Sequence[Row[Any]] = []
+        groups: Sequence[Row[Any]] = []
+        options: Sequence[Row[Any]] = []
         if item_ids:
             tags = (
                 await self._s.execute(
@@ -356,7 +367,9 @@ class CatalogRepo:
                 ).all()
         return categories, items, tags, groups, options
 
-    async def get_pricing_rows(self, restaurant_id: str, item_ids: list[str]):
+    async def get_pricing_rows(
+        self, restaurant_id: str, item_ids: list[str]
+    ) -> tuple[Sequence[Row[Any]], Sequence[Row[Any]], Sequence[Row[Any]]]:
         """(items, groups, options) for the requested ids only — the money
         path's read: ownership in the WHERE (foreign ids simply don't come
         back), no tags/categories (pricing doesn't render menus)."""
@@ -369,7 +382,8 @@ class CatalogRepo:
             )
         ).all()
         found_ids = [item.id for item in items]
-        groups = options = []
+        groups: Sequence[Row[Any]] = []
+        options: Sequence[Row[Any]] = []
         if found_ids:
             groups = (
                 await self._s.execute(
@@ -389,7 +403,9 @@ class CatalogRepo:
                 ).all()
         return items, groups, options
 
-    async def get_item_rows(self, restaurant_id: str, item_id: str):
+    async def get_item_rows(
+        self, restaurant_id: str, item_id: str
+    ) -> tuple[Row[Any], Sequence[Row[Any]], Sequence[Row[Any]], Sequence[Row[Any]]] | None:
         """(item, tags, groups, options) or None — the single-item read."""
         item = await self.get_item(restaurant_id, item_id)
         if item is None:
@@ -409,7 +425,7 @@ class CatalogRepo:
             )
         ).all()
         group_ids = [group.id for group in groups]
-        options = []
+        options: Sequence[Row[Any]] = []
         if group_ids:
             options = (
                 await self._s.execute(
@@ -447,7 +463,7 @@ class CatalogRepo:
         restaurant_id: str,
         version: int,
         event_type: str,
-        payload: dict,
+        payload: dict[str, Any],
         now: datetime,
     ) -> None:
         await self._s.execute(

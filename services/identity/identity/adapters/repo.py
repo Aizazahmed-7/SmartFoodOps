@@ -22,12 +22,12 @@ class IdentityRepo:
 
     # ── users ──────────────────────────────────────────────────────
 
-    async def get_user_by_email(self, email: str) -> Row | None:
+    async def get_user_by_email(self, email: str) -> Row[Any] | None:
         return (
             await self._s.execute(sa.select(users).where(users.c.email == email))
         ).one_or_none()
 
-    async def get_user_by_id(self, user_id: str) -> Row | None:
+    async def get_user_by_id(self, user_id: str) -> Row[Any] | None:
         return (
             await self._s.execute(sa.select(users).where(users.c.id == user_id))
         ).one_or_none()
@@ -54,7 +54,7 @@ class IdentityRepo:
         )
         return user_id
 
-    async def update_user(self, user_id: str, changes: dict) -> int:
+    async def update_user(self, user_id: str, changes: dict[str, Any]) -> int:
         result = await self._s.execute(
             users.update().where(users.c.id == user_id).values(**changes)
         )
@@ -62,7 +62,7 @@ class IdentityRepo:
 
     # ── refresh tokens ─────────────────────────────────────────────
 
-    async def get_refresh_by_hash(self, token_sha256: str) -> Row | None:
+    async def get_refresh_by_hash(self, token_sha256: str) -> Row[Any] | None:
         return (
             await self._s.execute(
                 sa.select(refresh_tokens).where(refresh_tokens.c.token_sha256 == token_sha256)
@@ -100,7 +100,9 @@ class IdentityRepo:
 
     # ── addresses ──────────────────────────────────────────────────
 
-    async def insert_address(self, *, user_id: str, data: dict, now: datetime) -> str:
+    async def insert_address(
+        self, *, user_id: str, data: dict[str, Any], now: datetime
+    ) -> str:
         address_id = f"adr_{uuid.uuid4().hex}"
         await self._s.execute(
             addresses.insert().values(id=address_id, user_id=user_id, created_at=now, **data)
@@ -116,7 +118,7 @@ class IdentityRepo:
             )
         ).scalar_one()
 
-    async def list_addresses(self, user_id: str) -> list[Row]:
+    async def list_addresses(self, user_id: str) -> list[Row[Any]]:
         return list(
             (
                 await self._s.execute(

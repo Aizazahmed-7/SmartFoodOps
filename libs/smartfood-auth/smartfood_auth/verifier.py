@@ -55,7 +55,7 @@ class JwksVerifier:
     def _stale(self) -> bool:
         return (time.monotonic() - self._fetched_at) > self._cache_ttl
 
-    async def verify(self, token: str) -> dict:
+    async def verify(self, token: str) -> dict[str, Any]:
         """Return the verified claims, or raise jwt.InvalidTokenError (or a subclass)."""
         header = jwt.get_unverified_header(token)
         if header.get("alg") != "RS256":
