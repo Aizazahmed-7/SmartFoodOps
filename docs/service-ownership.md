@@ -71,7 +71,7 @@ Owns what a restaurant sells, and the entire menu cache pipeline.
 | | |
 |---|---|
 | Postgres | **`catalog_db`** — `restaurants`, `restaurant_cuisines` (many-to-many tag rows, lowercase slugs), `menu_categories` (name, sort order, item membership), `menu_items` (+ modifier groups/options, `item_tags` filter tags), `menu_versions` (bumped in the same tx as the rows, category edits included), promo rules, tax tables, `outbox`; search via `tsvector` + `pg_trgm` GIN indexes maintained in the same tx (ADR-0019) |
-| Calls | Identity — `POST /v1/internal/grants` on self-serve onboarding (grant `restaurant_admin` + `restaurant_id` to the creating user; idempotent, retried; never edge-routed) |
+| Calls | Identity — `POST /v1/internal/grants` on self-serve onboarding (grant `restaurant_admin` + `restaurant_id` to the creating user; idempotent, retried; never edge-routed). Onboarding is idempotent by owner — phase-1 claim model allows **one restaurant per user**, enforced by `UNIQUE(owner_user_id)`; a repeat POST returns the existing restaurant and re-attempts the grant (the repair path) |
 | Redis | `catalog:menu:{rid}:<ver>` — rendered blob, 24h<br>`catalog:menu:ptr:{rid}` — current-version pointer, 7d<br>`catalog:browse:<gh5>:<cuisine>:<page>` — browse pages, 60s<br>`catalog:lock:menu:{rid}` — singleflight on render miss |
 | Kafka | **produces** `catalog.changes` (compacted, outbox → Debezium) |
 | CDN | menus (immutable per version), browse pages (30s), images |

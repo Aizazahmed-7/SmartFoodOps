@@ -50,6 +50,13 @@ class CatalogRepo:
         )
         return restaurant_id
 
+    async def get_restaurant_by_owner(self, owner_user_id: str) -> Row | None:
+        return (
+            await self._s.execute(
+                sa.select(restaurants).where(restaurants.c.owner_user_id == owner_user_id)
+            )
+        ).one_or_none()
+
     async def get_restaurant(self, restaurant_id: str) -> Row | None:
         return (
             await self._s.execute(

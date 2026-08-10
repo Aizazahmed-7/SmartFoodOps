@@ -1,13 +1,16 @@
 """API layer — HTTP in, HTTP out. Parses requests, calls the domain service,
 maps domain exceptions to status codes. No SQL, no business rules."""
 
-from fastapi import APIRouter, Request
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from smartfood_api import ApiError, StrictModel
-from smartfood_auth import Auth, jwks
+from smartfood_auth import Auth, AuthContext, jwks, require_role
 
 from ..domain.service import (
     AddressNotFound,
+    GrantConflict,
     IdentityService,
     InvalidCredentials,
     InvalidRefreshToken,
@@ -142,6 +145,35 @@ async def update_me(body: ProfileUpdate, ctx: Auth, request: Request) -> dict:
     except UnknownUser:
         raise ApiError("NOT_FOUND", "unknown user", 404) from None
     return {"status": "updated", **changes}
+
+
+# ── internal (never in the edge allowlist — unreachable from outside) ──
+
+# require_role() with no roles: ONLY role=system passes (service-to-service).
+SystemOnly = Annotated[AuthContext, Depends(require_role())]
+
+
+class GrantIn(StrictModel):
+    user_id: str = Field(max_length=64)
+    role: Literal["restaurant_admin"]  # the only grantable role today
+    restaurant_id: str = Field(max_length=64)
+
+
+@router.post("/v1/internal/grants")
+async def grant_role(body: GrantIn, ctx: SystemOnly, request: Request) -> dict:
+    """Catalog calls this during self-serve onboarding.
+    Idempotent — replaying an applied grant succeeds silently."""
+    try:
+        await _svc(request).grant_restaurant_admin(
+            user_id=body.user_id, restaurant_id=body.restaurant_id
+        )
+    except UnknownUser:
+        raise ApiError("NOT_FOUND", "unknown user", 404) from None
+    except GrantConflict:
+        raise ApiError(
+            "GRANT_CONFLICT", "user cannot be granted this restaurant", 409
+        ) from None
+    return {"status": "granted", "user_id": body.user_id, "restaurant_id": body.restaurant_id}
 
 
 @router.post("/v1/me/addresses", status_code=201)

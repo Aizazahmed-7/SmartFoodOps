@@ -29,7 +29,9 @@ def upgrade() -> None:
         sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
     )
-    op.create_index("ix_restaurants_owner_user_id", "restaurants", ["owner_user_id"])
+    op.create_index(
+        "ix_restaurants_owner_user_id", "restaurants", ["owner_user_id"], unique=True
+    )
     op.create_index("ix_restaurants_city", "restaurants", ["city"])
 
     op.create_table(

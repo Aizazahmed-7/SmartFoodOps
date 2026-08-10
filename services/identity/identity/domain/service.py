@@ -53,6 +53,11 @@ class NothingToUpdate(IdentityError):
     pass
 
 
+class GrantConflict(IdentityError):
+    """User is already scoped to another restaurant, or their role is not
+    grantable (riders/admins can't own restaurants)."""
+
+
 class AddressNotFound(IdentityError):
     pass
 
@@ -159,6 +164,28 @@ class IdentityService:
             refresh_token=token,
             expires_in=self._settings.access_ttl_seconds,
         )
+
+    # ── internal grants ────────────────────────────────────────────
+
+    async def grant_restaurant_admin(self, *, user_id: str, restaurant_id: str) -> None:
+        """Idempotent: Catalog re-attempts the same grant while repairing a
+        half-finished onboarding, so a replay must be a silent success."""
+        async with self._sessions() as session:
+            repo = IdentityRepo(session)
+            user = await repo.get_user_by_id(user_id)
+            if user is None:
+                raise UnknownUser
+            if user.role == "restaurant_admin":
+                if user.restaurant_id == restaurant_id:
+                    return  # replay of an already-applied grant
+                raise GrantConflict  # scoped to a different restaurant
+            if user.role != "customer":
+                raise GrantConflict  # riders/admins can't own restaurants
+            await repo.update_user(
+                user_id, {"role": "restaurant_admin", "restaurant_id": restaurant_id}
+            )
+            await session.commit()
+            log.info("restaurant_admin granted", user=user_id, restaurant=restaurant_id)
 
     # ── profile ────────────────────────────────────────────────────
 

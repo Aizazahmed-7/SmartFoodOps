@@ -3,15 +3,18 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers
 from smartfood_otel import RequestContextMiddleware, setup_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from .adapters.identity_grants import IdentityGrantsClient
 from .api.routes import router
 from .config import Settings
 from .db import metadata
+from .domain.ports import GrantsPort
 from .domain.service import CatalogService
 
 
@@ -28,7 +31,7 @@ def _run_migrations(database_url: str) -> None:  # pragma: no cover — Postgres
     command.upgrade(cfg, "head")
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, *, grants: GrantsPort | None = None) -> FastAPI:
     settings = settings or Settings()
     setup_logging("catalog")
 
@@ -36,6 +39,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.database_url.startswith("sqlite"):
         engine_kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
     engine = create_async_engine(settings.database_url, **engine_kwargs)
+
+    # DI seam: tests inject a fake GrantsPort; production builds the HTTP
+    # adapter (and owns the client's lifecycle in the lifespan below).
+    own_http: httpx.AsyncClient | None = None
+    if grants is None:
+        own_http = httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0))
+        grants = IdentityGrantsClient(settings.identity_base_url, own_http)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -47,6 +57,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await asyncio.to_thread(_run_migrations, settings.database_url)  # pragma: no cover
         yield
         await engine.dispose()
+        if own_http is not None:
+            await own_http.aclose()
 
     app = FastAPI(title="catalog", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
@@ -55,7 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Composition root: repo ← service ← routes. The API layer only ever
     # sees app.state.service; the domain only sees the sessionmaker.
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    app.state.service = CatalogService(sessions)
+    app.state.service = CatalogService(sessions, grants)
 
     app.include_router(router)
 

@@ -8,12 +8,13 @@ bypass scoping (every admin mutation will gain an audit row with W3 logging).
 import re
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import Field, field_validator
 from smartfood_api import ApiError, StrictModel
-from smartfood_auth import Auth, AuthContext, require_role
+from smartfood_auth import AuthContext, require_role
 
 from ..domain.models import Restaurant
+from ..domain.ports import GrantRejected, GrantUnavailable
 from ..domain.service import CatalogService, NothingToUpdate, RestaurantNotFound
 
 router = APIRouter()
@@ -102,20 +103,39 @@ def _out(restaurant: Restaurant) -> RestaurantOut:
     return RestaurantOut.model_validate(restaurant, from_attributes=True)
 
 
+# Only customers onboard (riders/admins would be refused by Identity anyway —
+# fail at the gate, not after committing a restaurant). `system` passes for seeds.
+Onboarder = Annotated[AuthContext, Depends(require_role("customer"))]
+
+
 @router.post("/v1/restaurants", status_code=201)
-async def create_restaurant(body: RestaurantCreate, ctx: Auth, request: Request) -> RestaurantOut:
-    # Any authenticated user may onboard a restaurant (self-serve). The
-    # Identity restaurant_admin grant is slice 3; until then the creator
-    # manages it only via seeded/stamped claims.
-    restaurant = await _svc(request).create_restaurant(
-        owner_user_id=ctx.sub,
-        name=body.name,
-        city=body.city,
-        cuisines=body.cuisines,
-        lat=body.lat,
-        lon=body.lon,
-        hours=body.hours,
-    )
+async def create_restaurant(
+    body: RestaurantCreate, ctx: Onboarder, request: Request, response: Response
+) -> RestaurantOut:
+    """Self-serve onboarding. Idempotent by owner: a repeat POST returns the
+    existing restaurant (200, not 201) and re-attempts the Identity grant —
+    the repair path when a first attempt committed but the grant failed."""
+    try:
+        restaurant, created = await _svc(request).create_restaurant(
+            owner_user_id=ctx.sub,
+            name=body.name,
+            city=body.city,
+            cuisines=body.cuisines,
+            lat=body.lat,
+            lon=body.lon,
+            hours=body.hours,
+        )
+    except GrantRejected:
+        raise ApiError("GRANT_CONFLICT", "onboarding grant rejected", 409) from None
+    except GrantUnavailable:
+        raise ApiError(
+            "DEPENDENCY_UNAVAILABLE",
+            "could not finish onboarding — retry to complete it",
+            503,
+            headers={"Retry-After": "1"},
+        ) from None
+    if not created:
+        response.status_code = 200
     return _out(restaurant)
 
 

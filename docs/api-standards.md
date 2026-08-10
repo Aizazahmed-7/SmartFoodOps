@@ -41,6 +41,7 @@ Seed catalog (grows only via PR):
 | `AUTH_REFRESH_REUSED` | 401 | Refresh-token reuse detected — family revoked |
 | `FORBIDDEN_ROLE` | 403 | Authenticated, wrong role for the route |
 | `NOT_FOUND` | 404 | Doesn't exist *or* isn't yours |
+| `GRANT_CONFLICT` | 409 | Role/scoping grant refused: user already scoped elsewhere or role ineligible (onboarding) |
 | `ORDER_NOT_CANCELLABLE` | 409 | Cancel after the cancellable window (e.g. post-pickup) |
 | `ORDER_ALREADY_DECIDED` | 409 | Restaurant decision repeated with a different verdict |
 | `ITEM_UNAVAILABLE` | 409 | Menu item 86'd or stock reservation failed |

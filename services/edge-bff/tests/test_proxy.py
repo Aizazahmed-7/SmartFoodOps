@@ -159,3 +159,15 @@ def test_upstream_response_passes_through(client, upstream):
 
 def test_healthz(client):
     assert client.get("/healthz").json() == {"status": "ok", "service": "edge-bff"}
+
+
+def test_internal_paths_are_unroutable(client, upstream):
+    """/v1/internal/* is service-to-service only: no allowlist rule may ever
+    match it, even for a fully authenticated caller."""
+    r = client.post(
+        "/v1/internal/grants",
+        json={"user_id": "u", "role": "restaurant_admin", "restaurant_id": "r"},
+        headers=bearer(),
+    )
+    assert r.status_code == 404
+    assert upstream.requests == []  # nothing was forwarded anywhere

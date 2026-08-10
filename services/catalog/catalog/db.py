@@ -14,8 +14,11 @@ restaurants = sa.Table(
     "restaurants",
     metadata,
     sa.Column("id", sa.Text, primary_key=True),
-    # The user who created it — the target of the Identity restaurant_admin grant.
-    sa.Column("owner_user_id", sa.Text, nullable=False, index=True),
+    # The user who created it — the target of the Identity restaurant_admin
+    # grant. UNIQUE: one restaurant per owner (phase-1 claim model carries a
+    # single restaurant_id); also the backstop against a concurrent
+    # double-onboarding race.
+    sa.Column("owner_user_id", sa.Text, nullable=False, unique=True, index=True),
     sa.Column("name", sa.Text, nullable=False),
     sa.Column("city", sa.Text, nullable=False, index=True),
     sa.Column("lat", sa.Float, nullable=True),

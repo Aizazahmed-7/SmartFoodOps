@@ -7,12 +7,15 @@ The announcement commits WITH the change or not at all (ARCHITECTURE
 invariant 1); _mutate() is that rule as code.
 """
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from smartfood_otel import get_logger
+from sqlalchemy.exc import IntegrityError
 
 from ..adapters.repo import CatalogRepo
 from .models import Restaurant
+from .ports import GrantsPort
 
 log = get_logger("catalog.service")
 
@@ -34,8 +37,9 @@ def _now() -> datetime:
 
 
 class CatalogService:
-    def __init__(self, sessions):
+    def __init__(self, sessions, grants: GrantsPort):
         self._sessions = sessions
+        self._grants = grants
 
     # ── the four-write rule ────────────────────────────────────────
 
@@ -99,28 +103,51 @@ class CatalogService:
         lat: float | None,
         lon: float | None,
         hours: dict | None,
-    ) -> Restaurant:
+    ) -> tuple[Restaurant, bool]:
+        """Self-serve onboarding, idempotent by owner (phase-1 claim model:
+        one restaurant per user, enforced by UNIQUE(owner_user_id)).
+
+        The Identity grant runs AFTER the transaction commits — never a
+        network call inside an open tx — so a failed grant leaves a committed
+        restaurant, and replaying the POST lands in the repair path below.
+        Returns (restaurant, created)."""
         async with self._sessions() as session:
             repo = CatalogRepo(session)
-            restaurant_id = await repo.insert_restaurant(
-                owner_user_id=owner_user_id,
-                name=name,
-                city=city,
-                lat=lat,
-                lon=lon,
-                hours=hours,
-                now=_now(),
-            )
-            await repo.set_cuisines(restaurant_id, cuisines)
-            restaurant = await self._read(repo, restaurant_id)
-            version = await self._publish(
-                repo, restaurant_id, "RestaurantCreated",
-                {**self._snapshot(restaurant), "owner_user_id": owner_user_id},
-            )
-            await session.commit()
-            log.info("restaurant created", restaurant=restaurant_id)
-            # NOTE(slice 3): the Identity restaurant_admin grant call lands here.
-            return Restaurant(**{**restaurant.__dict__, "version": version})
+            existing = await repo.get_restaurant_by_owner(owner_user_id)
+            if existing is not None:
+                restaurant, created = await self._read(repo, existing.id), False
+            else:
+                try:
+                    restaurant_id = await repo.insert_restaurant(
+                        owner_user_id=owner_user_id, name=name, city=city,
+                        lat=lat, lon=lon, hours=hours, now=_now(),
+                    )
+                    await repo.set_cuisines(restaurant_id, cuisines)
+                    fresh = await self._read(repo, restaurant_id)
+                    version = await self._publish(
+                        repo, restaurant_id, "RestaurantCreated",
+                        {**self._snapshot(fresh), "owner_user_id": owner_user_id},
+                    )
+                    await session.commit()
+                    restaurant, created = replace(fresh, version=version), True
+                except IntegrityError:
+                    # Concurrent onboarding won the UNIQUE(owner_user_id) race:
+                    # roll back ours and adopt the winner.
+                    await session.rollback()
+                    winner = await repo.get_restaurant_by_owner(owner_user_id)
+                    assert winner is not None  # the row that beat us
+                    restaurant, created = await self._read(repo, winner.id), False
+
+        # Post-commit, post-session: idempotent on Identity's side, so the
+        # repair path may safely re-send it.
+        await self._grants.grant_restaurant_admin(
+            user_id=owner_user_id, restaurant_id=restaurant.id
+        )
+        log.info(
+            "restaurant onboarding" if created else "restaurant onboarding replay",
+            restaurant=restaurant.id,
+        )
+        return restaurant, created
 
     async def get_restaurant(self, restaurant_id: str) -> Restaurant:
         async with self._sessions() as session:
@@ -143,7 +170,7 @@ class CatalogService:
                 repo, restaurant_id, "RestaurantUpdated", self._snapshot(restaurant)
             )
             await session.commit()
-            return Restaurant(**{**restaurant.__dict__, "version": version})
+            return replace(restaurant, version=version)
 
     async def set_status(self, restaurant_id: str, status: str) -> Restaurant:
         async with self._sessions() as session:
@@ -156,4 +183,4 @@ class CatalogService:
             version = await self._publish(repo, restaurant_id, event, self._snapshot(restaurant))
             await session.commit()
             log.info("restaurant status changed", restaurant=restaurant_id, status=status)
-            return Restaurant(**{**restaurant.__dict__, "version": version})
+            return replace(restaurant, version=version)
