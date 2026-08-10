@@ -22,8 +22,10 @@ class RedisCache:
     async def get(self, key: str) -> str | None:
         try:
             value = await self._r.get(key)
-        except _ERRORS:
-            log.warning("cache get failed — treating as miss", key=key)
+        except _ERRORS as exc:
+            # Always log WHAT failed: a silent degrade with no cause cost us
+            # a live-debugging session (network-detached redis container).
+            log.warning("cache get failed — treating as miss", key=key, error=str(exc))
             return None
         # decode_responses=True gives str, but the client type can't promise
         # it — normalize so a misconfigured client can't leak bytes upward.
@@ -32,14 +34,17 @@ class RedisCache:
     async def set(self, key: str, value: str, ttl_seconds: int) -> None:
         try:
             await self._r.set(key, value, ex=ttl_seconds)
-        except _ERRORS:
-            log.warning("cache set failed — skipped", key=key)
+        except _ERRORS as exc:
+            log.warning("cache set failed — skipped", key=key, error=str(exc))
 
     async def delete(self, key: str) -> None:
         try:
             await self._r.delete(key)
-        except _ERRORS:
-            log.warning("cache delete failed — key may serve stale until TTL", key=key)
+        except _ERRORS as exc:
+            log.warning(
+                "cache delete failed — key may serve stale until TTL",
+                key=key, error=str(exc),
+            )
 
     async def acquire_lock(self, key: str, ttl_ms: int) -> bool:
         try:

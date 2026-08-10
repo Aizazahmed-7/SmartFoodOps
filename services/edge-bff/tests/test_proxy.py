@@ -161,6 +161,24 @@ def test_healthz(client):
     assert client.get("/healthz").json() == {"status": "ok", "service": "edge-bff"}
 
 
+def test_search_is_anonymous(client, upstream):
+    r = client.get("/v1/search?q=biryani")
+    assert r.status_code == 201  # canned upstream response — it was forwarded
+    assert upstream.last.url.host == "catalog.svc"
+    assert upstream.last.url.query == b"q=biryani"
+
+
+def test_public_read_write_needs_token(client, upstream):
+    """public_read: anonymous GET, but a write without a token dies AT THE
+    EDGE — catalog never sees it."""
+    r = client.post("/v1/restaurants", json={"name": "X"})
+    assert r.status_code == 401
+    assert upstream.requests == []
+    with_token = client.post("/v1/restaurants", json={"name": "X"}, headers=bearer())
+    assert with_token.status_code == 201  # forwarded
+    assert upstream.last.headers["x-auth-role"] == "customer"
+
+
 def test_internal_paths_are_unroutable(client, upstream):
     """/v1/internal/* is service-to-service only: no allowlist rule may ever
     match it, even for a fully authenticated caller."""

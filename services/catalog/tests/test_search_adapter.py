@@ -36,10 +36,10 @@ def test_build_queries_filter_permutations():
         assert "it.tag = :tag AND mi.available" in leg
 
     # Fuzzy + FTS present where they belong:
-    assert "similarity(r.name, :q)" in full["restaurants"]
+    assert "word_similarity(:q, r.name)" in full["restaurants"]
     assert "websearch_to_tsquery" in full["items"]
-    assert "rc2.cuisine % :q" in full["cuisines"]
-    assert "it2.tag % :q" in full["tags"]
+    assert ":q <% rc2.cuisine" in full["cuisines"]
+    assert ":q <% it2.tag" in full["tags"]
     # Alias-injected expressions still match the pinned index expressions:
     assert RESTAURANT_FTS.replace("name", "r.name") in full["restaurants"]
     assert (
@@ -117,9 +117,9 @@ class _StubSession:
 async def test_search_executes_all_legs_and_merges():
     session = _StubSession(
         {
-            "similarity(r.name": [_r("rst_a", 0.8)],
+            "word_similarity(:q, r.name": [_r("rst_a", 0.8)],
             "rc2.cuisine": [_r("rst_b", 0.4)],
-            "similarity(i.name": [_i("rst_a", "itm_1", 0.6, name="Biryani", price=1200)],
+            "word_similarity(:q, i.name": [_i("rst_a", "itm_1", 0.6, name="Biryani", price=1200)],
             "it2.tag": [_i("rst_c", "itm_2", 0.3, name="Salad", price=500)],
         }
     )
@@ -127,8 +127,9 @@ async def test_search_executes_all_legs_and_merges():
     hits = await adapter.search(
         query="biryani", city="springfield", cuisine=None, tag=None, limit=10, offset=0
     )
-    assert len(session.params_seen) == 4  # every leg ran
-    assert session.params_seen[0] == {"q": "biryani", "city": "springfield"}
+    assert len(session.params_seen) == 5  # threshold SET + every leg
+    assert session.params_seen[0] is None  # the SET carries no params
+    assert session.params_seen[1] == {"q": "biryani", "city": "springfield"}
     assert [h["restaurant_id"] for h in hits] == ["rst_a", "rst_b", "rst_c"]
     assert hits[0]["matched_items"][0]["name"] == "Biryani"
 
@@ -142,4 +143,4 @@ async def test_search_all_filters_bind_params():
         )
         == []
     )
-    assert session.params_seen[0] == {"q": "q!", "city": "c", "cuisine": "k", "tag": "t"}
+    assert session.params_seen[1] == {"q": "q!", "city": "c", "cuisine": "k", "tag": "t"}

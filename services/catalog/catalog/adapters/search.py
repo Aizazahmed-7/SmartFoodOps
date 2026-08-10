@@ -2,7 +2,9 @@
 
 Four ranked candidate legs — restaurant names, item names/descriptions,
 cuisine tags, item tags — each combining full-text (websearch_to_tsquery)
-with trigram fuzziness (`%` / similarity: "biriani" finds "Biryani"), then
+with per-word trigram fuzziness (`<%` / word_similarity — plain similarity
+dilutes across multi-word names and misses "biriani"→"Biryani House"; the
+live smoke caught exactly that), then
 merged, deduped, and paginated in-process.
 
 The FTS expression constants below MUST stay byte-identical to the
@@ -24,6 +26,13 @@ ITEM_FTS = "to_tsvector('simple', name || ' ' || coalesce(description, ''))"
 # Per-leg candidate cap before the merge. Far above any real page; if a query
 # ever legitimately exceeds it, ranking (not correctness) degrades.
 _CAP = 200
+
+# The <% operator's cutoff. Default 0.6 rejects honest typos — live-measured:
+# word_similarity('biriani', 'Biryani House') = 0.45. At 0.35 that matches
+# while unrelated words (~0.1-0.2) stay out. Set per-connection IN CODE so a
+# fresh environment can never silently run with the wrong default.
+WORD_SIMILARITY_THRESHOLD = 0.35
+_SET_THRESHOLD = f"SET pg_trgm.word_similarity_threshold = {WORD_SIMILARITY_THRESHOLD}"
 
 
 def _filters(city: str | None, cuisine: str | None, tag: str | None) -> str:
@@ -52,32 +61,32 @@ def build_queries(city: str | None, cuisine: str | None, tag: str | None) -> dic
         "restaurants": f"""
             SELECT r.id AS restaurant_id,
                    GREATEST(ts_rank({rest_fts}, websearch_to_tsquery('simple', :q)),
-                            similarity(r.name, :q)) AS score
+                            word_similarity(:q, r.name)) AS score
             FROM restaurants r
-            WHERE ({rest_fts} @@ websearch_to_tsquery('simple', :q) OR r.name % :q)
+            WHERE ({rest_fts} @@ websearch_to_tsquery('simple', :q) OR :q <% r.name)
             {f} ORDER BY score DESC LIMIT {_CAP}""",
         "cuisines": f"""
-            SELECT r.id AS restaurant_id, similarity(rc2.cuisine, :q) AS score
+            SELECT r.id AS restaurant_id, word_similarity(:q, rc2.cuisine) AS score
             FROM restaurants r
             JOIN restaurant_cuisines rc2 ON rc2.restaurant_id = r.id
-            WHERE rc2.cuisine % :q
+            WHERE :q <% rc2.cuisine
             {f} ORDER BY score DESC LIMIT {_CAP}""",
         "items": f"""
             SELECT i.restaurant_id, i.id, i.name, i.price_cents,
                    GREATEST(ts_rank({item_fts}, websearch_to_tsquery('simple', :q)),
-                            similarity(i.name, :q)) AS score
+                            word_similarity(:q, i.name)) AS score
             FROM menu_items i
             JOIN restaurants r ON r.id = i.restaurant_id
-            WHERE ({item_fts} @@ websearch_to_tsquery('simple', :q) OR i.name % :q)
+            WHERE ({item_fts} @@ websearch_to_tsquery('simple', :q) OR :q <% i.name)
               AND i.available
             {f} ORDER BY score DESC LIMIT {_CAP}""",
         "tags": f"""
             SELECT i.restaurant_id, i.id, i.name, i.price_cents,
-                   similarity(it2.tag, :q) AS score
+                   word_similarity(:q, it2.tag) AS score
             FROM item_tags it2
             JOIN menu_items i ON i.id = it2.item_id
             JOIN restaurants r ON r.id = i.restaurant_id
-            WHERE it2.tag % :q AND i.available
+            WHERE :q <% it2.tag AND i.available
             {f} ORDER BY score DESC LIMIT {_CAP}""",
     }
 
@@ -135,6 +144,7 @@ class PostgresSearch:
             params["tag"] = tag
         legs = build_queries(city, cuisine, tag)
         async with self._sessions() as session:
+            await session.execute(sa.text(_SET_THRESHOLD))
             restaurants = (await session.execute(sa.text(legs["restaurants"]), params)).all()
             cuisines = (await session.execute(sa.text(legs["cuisines"]), params)).all()
             items = (await session.execute(sa.text(legs["items"]), params)).all()

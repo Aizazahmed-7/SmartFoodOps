@@ -26,6 +26,7 @@ RULES = [
     Rule("/v1/me", "identity_base_url", "auth"),
     Rule("/v1/restaurants", "catalog_base_url", "public_read"),
     Rule("/v1/menus", "catalog_base_url", "public_read"),
+    Rule("/v1/search", "catalog_base_url", "public_read"),
     Rule("/v1/inventory", "inventory_base_url", "auth"),
     Rule("/v1/orders", "order_base_url", "auth"),
     Rule("/v1/quote", "order_base_url", "auth"),
