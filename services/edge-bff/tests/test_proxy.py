@@ -155,3 +155,7 @@ def test_upstream_response_passes_through(client, upstream):
     assert r.status_code == 201
     assert r.json() == {"from": "catalog.svc"}
     assert r.headers["x-upstream"] == "yes"
+
+
+def test_healthz(client):
+    assert client.get("/healthz").json() == {"status": "ok", "service": "edge-bff"}

@@ -40,6 +40,13 @@ dev: ## Run one service natively with reload: make dev SVC=order
 test: ## Unit tests (no infra needed)
 	uv sync --all-packages -q && uv run --no-sync pytest -q
 
+# Explicit package list: skeleton services (healthz stubs) would only add noise.
+# Add each service's package here when its first real code lands.
+cov: ## Unit tests + coverage report
+	uv sync --all-packages -q && uv run --no-sync pytest -q \
+		--cov=smartfood_api --cov=smartfood_auth --cov=smartfood_otel \
+		--cov=identity --cov=edge_bff --cov-report=term-missing
+
 seed:
 	uv run --package seed python -m seed.main
 

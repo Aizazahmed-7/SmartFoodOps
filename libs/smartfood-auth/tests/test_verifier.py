@@ -77,6 +77,47 @@ async def test_unknown_kid_triggers_refetch():
     assert (await verifier.verify(new_token))["sub"] == "u2"  # unknown kid → refetch → ok
 
 
+async def test_rider_scoping_claims_survive():
+    key = generate_rsa_key()
+    token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(
+        sub="u3", role="rider", rider_id="rid_7"
+    )
+    claims = await make_verifier([jwks([key])]).verify(token)
+    assert claims["rider_id"] == "rid_7"
+
+
+async def test_token_without_kid_rejected():
+    """A well-signed token missing the kid header is rejected before any decode."""
+    key = generate_rsa_key()
+    no_kid = jwt.encode({"sub": "u1", "iss": ISS, "aud": AUD}, key.private_pem, algorithm="RS256")
+    with pytest.raises(jwt.InvalidTokenError):
+        await make_verifier([jwks([key])]).verify(no_kid)
+
+
+async def test_stale_cache_refetches_on_next_verify():
+    """After cache_ttl elapses, the next verify refetches even for a KNOWN kid —
+    that is how a revoked/removed key eventually stops verifying."""
+    key = generate_rsa_key()
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json=jwks([key]))
+
+    verifier = JwksVerifier(
+        "https://identity.test/jwks",
+        issuer=ISS,
+        audience=AUD,
+        cache_ttl=0.0,  # everything is instantly stale
+        min_refetch_interval=0.0,
+        http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(sub="u1", role="customer")
+    await verifier.verify(token)
+    await verifier.verify(token)  # kid is cached, but stale → refetch
+    assert calls["n"] == 2
+
+
 async def test_forged_token_rejected():
     """A token signed by a key NOT in the JWKS must fail signature verification."""
     trusted, attacker = generate_rsa_key(), generate_rsa_key()

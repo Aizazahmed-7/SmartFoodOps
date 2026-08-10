@@ -167,3 +167,112 @@ def test_unknown_body_field_is_422(client):
 def test_short_password_rejected(client):
     r = client.post("/v1/auth/register", json={"email": "x@y.z", "password": "short"})
     assert r.status_code == 422
+
+
+def test_healthz(client):
+    assert client.get("/healthz").json() == {"status": "ok", "service": "identity"}
+
+
+def test_refresh_with_unknown_token_is_401(client):
+    r = client.post("/v1/auth/refresh", json={"refresh_token": "never-issued"})
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "AUTH_INVALID_CREDENTIALS"
+
+
+def test_me_for_unknown_user_is_404(client):
+    from smartfood_auth import AuthContext
+
+    ghost = headers_for(AuthContext(sub="usr_ghost", role="customer"))
+    assert client.get("/v1/auth/me", headers=ghost).status_code == 404
+
+
+def test_empty_profile_update_is_422(client):
+    headers = _login_headers(client)
+    r = client.patch("/v1/auth/me", json={}, headers=headers)
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "VALIDATION_FAILED"
+
+
+def test_profile_update_for_unknown_user_is_404(client):
+    from smartfood_auth import AuthContext
+
+    ghost = headers_for(AuthContext(sub="usr_ghost", role="customer"))
+    r = client.patch("/v1/auth/me", json={"full_name": "X"}, headers=ghost)
+    assert r.status_code == 404
+
+
+def test_non_rsa_key_file_rejected(tmp_path):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from identity.keys import load_or_generate
+
+    path = tmp_path / "ec.pem"
+    path.write_bytes(
+        ec.generate_private_key(ec.SECP256R1()).private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    with pytest.raises(ValueError, match="not an RSA private key"):
+        load_or_generate(str(path))
+
+
+# ── domain-level tests ─────────────────────────────────────────────
+# Paths the HTTP surface cannot reach (no delete-user endpoint; TTLs are
+# server-side). The layering pays off here: IdentityService runs bare.
+
+
+async def _domain_service(tmp_path, **overrides):
+    from identity.db import metadata
+    from identity.domain.service import IdentityService
+    from identity.keys import load_or_generate
+    from smartfood_auth import TokenIssuer
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+
+    settings = Settings(
+        database_url="sqlite+aiosqlite://",
+        signing_key_path=str(tmp_path / "key.pem"),
+        token_issuer="http://identity.test",
+        **overrides,
+    )
+    engine = create_async_engine(
+        settings.database_url, poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    key = load_or_generate(settings.signing_key_path)
+    issuer = TokenIssuer(
+        key,
+        issuer=settings.token_issuer,
+        audience=settings.token_audience,
+        ttl_seconds=settings.access_ttl_seconds,
+    )
+    return IdentityService(sessions, issuer, settings), sessions
+
+
+async def test_expired_refresh_token_rejected(tmp_path):
+    from identity.domain.service import InvalidRefreshToken
+
+    svc, _ = await _domain_service(tmp_path, refresh_ttl_days=-1)  # tokens born expired
+    await svc.register(email=REG["email"], password=REG["password"], full_name=None)
+    pair = await svc.login(email=REG["email"], password=REG["password"])
+    with pytest.raises(InvalidRefreshToken):
+        await svc.refresh(pair.refresh_token)
+
+
+async def test_refresh_for_vanished_user_rejected(tmp_path):
+    """Defensive guard: the refresh row survives but the user row is gone."""
+    from identity.db import users
+    from identity.domain.service import InvalidRefreshToken
+
+    svc, sessions = await _domain_service(tmp_path)
+    await svc.register(email=REG["email"], password=REG["password"], full_name=None)
+    pair = await svc.login(email=REG["email"], password=REG["password"])
+    async with sessions() as s:
+        await s.execute(users.delete())
+        await s.commit()
+    with pytest.raises(InvalidRefreshToken):
+        await svc.refresh(pair.refresh_token)

@@ -17,7 +17,8 @@ from .domain.service import IdentityService
 from .keys import load_or_generate
 
 
-def _run_migrations(database_url: str) -> None:
+def _run_migrations(database_url: str) -> None:  # pragma: no cover — Postgres-only path,
+    # exercised by the compose stack, not the sqlite unit suite.
     from pathlib import Path
 
     from alembic import command
@@ -45,7 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await conn.run_sync(metadata.create_all)
         else:
             # Alembic manages its own (sync) connection; run it off the event loop.
-            await asyncio.to_thread(_run_migrations, settings.database_url)
+            await asyncio.to_thread(_run_migrations, settings.database_url)  # pragma: no cover
         yield
         await engine.dispose()
 

@@ -49,6 +49,11 @@ def test_scoped_role_passes_with_claim():
     assert r.json() == {"restaurant_id": "rest_1"}
 
 
+def test_rider_claim_is_stamped():
+    ctx = AuthContext(sub="u3", role="rider", rider_id="rid_7")
+    assert headers_for(ctx)["X-Auth-Rider-Id"] == "rid_7"
+
+
 def test_system_bypasses_role_gate():
     r = client.get(
         "/admin-only", headers={"X-Auth-Sub": "svc:order-worker", "X-Auth-Role": "system"}
