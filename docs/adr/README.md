@@ -22,5 +22,6 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0016](0016-postgres-topology-one-cluster-database-per-service.md) | Postgres topology: one cluster, one database per service | Accepted |
 | [0017](0017-cart-is-client-side.md) | Cart lives on the client, not the backend | Accepted |
 | [0018](0018-v2-review-register.md) | v2 review register: adoptions, triggers, rejections | Accepted |
+| [0019](0019-search-postgres-fts-first-opensearch-behind-port.md) | Search: Postgres FTS + trigram first, OpenSearch behind a port later | Accepted |
 
 **Conventions**: files are `NNNN-kebab-title.md`; numbers are never reused. Superseding an ADR = new ADR + status change here, never editing the old decision.

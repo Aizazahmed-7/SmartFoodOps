@@ -45,7 +45,8 @@ test: ## Unit tests (no infra needed)
 cov: ## Unit tests + coverage report
 	uv sync --all-packages -q && uv run --no-sync pytest -q \
 		--cov=smartfood_api --cov=smartfood_auth --cov=smartfood_otel \
-		--cov=identity --cov=edge_bff --cov-report=term-missing
+		--cov=smartfood_outbox --cov=identity --cov=edge_bff --cov=catalog \
+		--cov-report=term-missing
 
 seed:
 	uv run --package seed python -m seed.main

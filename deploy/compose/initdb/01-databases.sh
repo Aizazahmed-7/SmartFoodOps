@@ -15,6 +15,11 @@ SQL
 
 create_db identity_db identity_svc
 create_db catalog_db catalog_svc
+
+# pg_trgm needs superuser; pre-create it here so catalog's migration
+# (CREATE EXTENSION IF NOT EXISTS) no-ops as catalog_svc. ADR-0019.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -d catalog_db \
+  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
 create_db inventory_db inventory_svc
 create_db order_db order_svc
 create_db payment_db payment_svc

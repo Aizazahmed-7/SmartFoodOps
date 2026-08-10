@@ -157,9 +157,13 @@ name = "catalog"
 version = "0.1.0"
 source = { editable = "services/catalog" }
 dependencies = [
+    { name = "alembic" },
     { name = "asyncpg" },
     { name = "fastapi" },
+    { name = "httpx" },
+    { name = "pydantic-settings" },
     { name = "redis" },
+    { name = "smartfood-api" },
     { name = "smartfood-auth" },
     { name = "smartfood-otel" },
     { name = "smartfood-outbox" },
@@ -169,9 +173,13 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pydantic-settings", specifier = ">=2.5" },
     { name = "redis", specifier = ">=5.1" },
+    { name = "smartfood-api", editable = "libs/smartfood-api" },
     { name = "smartfood-auth", editable = "libs/smartfood-auth" },
     { name = "smartfood-otel", editable = "libs/smartfood-otel" },
     { name = "smartfood-outbox", editable = "libs/smartfood-outbox" },

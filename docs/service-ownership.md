@@ -62,7 +62,7 @@ The only service with no persistent data of its own. That emptiness is what lets
 | Postgres | **`identity_db`** — `users`, `roles`, `addresses` (**soft-delete only** — orders snapshot the delivery address and must survive an address deletion, ADR-0018), `refresh_tokens` (family-tracked for reuse detection), `outbox` |
 | Redis | none |
 | Kafka | **produces** `identity.events` (outbox → Debezium) |
-| Serves | `/.well-known/jwks.json` — the public keys edge-bff verifies with |
+| Serves | `/.well-known/jwks.json` — the public keys edge-bff verifies with<br>`/v1/internal/grants` — role/scoping grant for self-serve restaurant onboarding (system-role callers only; not in the edge allowlist) |
 
 ## Catalog — MS, :8002
 
@@ -70,7 +70,8 @@ Owns what a restaurant sells, and the entire menu cache pipeline.
 
 | | |
 |---|---|
-| Postgres | **`catalog_db`** — `restaurants`, `menus`, `menu_categories` (name, sort order, item membership), `menu_items`, `menu_versions` (bumped in the same tx as the rows, category edits included), promo rules, tax tables, `outbox` |
+| Postgres | **`catalog_db`** — `restaurants`, `restaurant_cuisines` (many-to-many tag rows, lowercase slugs), `menu_categories` (name, sort order, item membership), `menu_items` (+ modifier groups/options, `item_tags` filter tags), `menu_versions` (bumped in the same tx as the rows, category edits included), promo rules, tax tables, `outbox`; search via `tsvector` + `pg_trgm` GIN indexes maintained in the same tx (ADR-0019) |
+| Calls | Identity — `POST /v1/internal/grants` on self-serve onboarding (grant `restaurant_admin` + `restaurant_id` to the creating user; idempotent, retried; never edge-routed) |
 | Redis | `catalog:menu:{rid}:<ver>` — rendered blob, 24h<br>`catalog:menu:ptr:{rid}` — current-version pointer, 7d<br>`catalog:browse:<gh5>:<cuisine>:<page>` — browse pages, 60s<br>`catalog:lock:menu:{rid}` — singleflight on render miss |
 | Kafka | **produces** `catalog.changes` (compacted, outbox → Debezium) |
 | CDN | menus (immutable per version), browse pages (30s), images |

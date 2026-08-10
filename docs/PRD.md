@@ -107,7 +107,7 @@ Priorities: **P0** = required for Part A acceptance; **P1** = required for Part 
 | FR-8 | Menu CRUD with **categories** and versioning | P0 | Menus are structured as categories → items → modifiers (`menu_categories` table in `catalog_db`: name, sort order, item membership); category CRUD versions like any menu edit — bump `menu_versions` in the same PG transaction; rendered menu blob and `catalog.changes` payload carry the category structure; menu GET is version-addressed, immutable per version |
 | FR-9 | Availability control: item out-of-stock, restaurant pause, capacity gating | P0 | Paused restaurant/item is rejected at placement with `RESTAURANT_CLOSED`/validation error even if caches are stale |
 | FR-10 | Pricing rules, discounts, promotions | P1 | Pricing activity computes discounts from Catalog promotion rules; result recorded in immutable pricing snapshot |
-| FR-11 | Browse/search by location and cuisine | P1 | Geohash-keyed pages (`catalog:browse:<gh5>:<cuisine>:<page>`); staleness ≤60s; Redis-down falls through to PG with local limiter |
+| FR-11 | Browse by location/cuisine + production fuzzy search over restaurant **and item** names, with filters (cuisine, item tags) | P0 | `GET /v1/search`: typo-tolerant matching (`pg_trgm` + `tsvector`, ADR-0019) on restaurant and menu-item names; filters: city, cuisine (`restaurant_cuisines`), item tags (`item_tags` — "vegetarian", "halal", …); ranked + paginated. Browse pages cached ≤60s; Redis-down falls through to PG with local limiter. OpenSearch swap is trigger-gated behind `SearchPort` (ADR-0019) |
 | FR-12 | Menu change feed (CDC) | P0 | Every menu/availability change appears on `catalog.changes` via outbox/CDC — this is the Part B embeddings hook |
 
 ### 3.3 Cart & ordering
