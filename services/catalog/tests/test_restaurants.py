@@ -35,13 +35,9 @@ def test_create_requires_auth(client):
 
 
 def test_create_rejects_bad_input(client):
-    no_cuisines = client.post(
-        "/v1/restaurants", json={**BODY, "cuisines": []}, headers=CUSTOMER
-    )
+    no_cuisines = client.post("/v1/restaurants", json={**BODY, "cuisines": []}, headers=CUSTOMER)
     assert no_cuisines.status_code == 422
-    bad_slug = client.post(
-        "/v1/restaurants", json={**BODY, "cuisines": ["b/bq"]}, headers=CUSTOMER
-    )
+    bad_slug = client.post("/v1/restaurants", json={**BODY, "cuisines": ["b/bq"]}, headers=CUSTOMER)
     assert bad_slug.status_code == 422
     unknown_field = client.post(
         "/v1/restaurants", json={**BODY, "status": "open"}, headers=CUSTOMER
@@ -103,14 +99,10 @@ def test_patch_vanished_restaurant_is_404(client):
 
 def test_pause_resume_cycle(client):
     restaurant_id = _create(client)["id"]
-    paused = client.post(
-        f"/v1/restaurants/{restaurant_id}/pause", headers=_admin(restaurant_id)
-    )
+    paused = client.post(f"/v1/restaurants/{restaurant_id}/pause", headers=_admin(restaurant_id))
     assert paused.json()["status"] == "paused"
     assert client.get(f"/v1/restaurants/{restaurant_id}").json()["status"] == "paused"
-    resumed = client.post(
-        f"/v1/restaurants/{restaurant_id}/resume", headers=_admin(restaurant_id)
-    )
+    resumed = client.post(f"/v1/restaurants/{restaurant_id}/resume", headers=_admin(restaurant_id))
     assert resumed.json()["status"] == "open"
     assert resumed.json()["version"] == 3  # create, pause, resume
 

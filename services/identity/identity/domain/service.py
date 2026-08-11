@@ -138,9 +138,7 @@ class IdentityService:
                 # and COMMIT the kill before the error propagates.
                 await repo.revoke_family(row.family_id)
                 await session.commit()
-                log.warning(
-                    "refresh token reuse detected — family revoked", family=row.family_id
-                )
+                log.warning("refresh token reuse detected — family revoked", family=row.family_id)
                 raise RefreshTokenReused
 
             if _aware(row.expires_at) < _now():
@@ -238,8 +236,7 @@ class IdentityService:
         async with self._sessions() as session:
             rows = await IdentityRepo(session).list_addresses(user_id)
             return [
-                Address(id=r.id, label=r.label, line1=r.line1, city=r.city,
-                        lat=r.lat, lon=r.lon)
+                Address(id=r.id, label=r.label, line1=r.line1, city=r.city, lat=r.lat, lon=r.lon)
                 for r in rows
             ]
 

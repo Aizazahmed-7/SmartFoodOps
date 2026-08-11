@@ -92,9 +92,7 @@ async def jwks_doc(request: Request) -> dict:
 
 @router.post("/v1/auth/register", status_code=202)
 async def register(body: RegisterIn, request: Request) -> dict:
-    await _svc(request).register(
-        email=body.email, password=body.password, full_name=body.full_name
-    )
+    await _svc(request).register(email=body.email, password=body.password, full_name=body.full_name)
     return {"status": "accepted"}
 
 
@@ -103,9 +101,7 @@ async def login(body: LoginIn, request: Request) -> TokenPair:
     try:
         pair = await _svc(request).login(email=body.email, password=body.password)
     except InvalidCredentials:
-        raise ApiError(
-            "AUTH_INVALID_CREDENTIALS", "invalid credentials", 401
-        ) from None
+        raise ApiError("AUTH_INVALID_CREDENTIALS", "invalid credentials", 401) from None
     return TokenPair.model_validate(pair)
 
 
@@ -118,9 +114,7 @@ async def refresh(body: RefreshIn, request: Request) -> TokenPair:
             "AUTH_REFRESH_REUSED", "refresh token reuse detected — all sessions revoked", 401
         ) from None
     except InvalidRefreshToken:
-        raise ApiError(
-            "AUTH_INVALID_CREDENTIALS", "invalid refresh token", 401
-        ) from None
+        raise ApiError("AUTH_INVALID_CREDENTIALS", "invalid refresh token", 401) from None
     return TokenPair.model_validate(pair)
 
 
@@ -140,7 +134,9 @@ async def update_me(body: ProfileUpdate, ctx: Auth, request: Request) -> dict:
         await _svc(request).update_profile(ctx.sub, changes)
     except NothingToUpdate:
         raise ApiError(
-            "VALIDATION_FAILED", "nothing to update", 422,
+            "VALIDATION_FAILED",
+            "nothing to update",
+            422,
             details=[{"field": "body", "issue": "at least one field required"}],
         ) from None
     except UnknownUser:
@@ -171,9 +167,7 @@ async def grant_role(body: GrantIn, ctx: SystemOnly, request: Request) -> dict:
     except UnknownUser:
         raise ApiError("NOT_FOUND", "unknown user", 404) from None
     except GrantConflict:
-        raise ApiError(
-            "GRANT_CONFLICT", "user cannot be granted this restaurant", 409
-        ) from None
+        raise ApiError("GRANT_CONFLICT", "user cannot be granted this restaurant", 409) from None
     return {"status": "granted", "user_id": body.user_id, "restaurant_id": body.restaurant_id}
 
 
@@ -183,7 +177,9 @@ async def add_address(body: AddressIn, ctx: Auth, request: Request) -> AddressOu
         address = await _svc(request).add_address(ctx.sub, body.model_dump())
     except AddressLimitReached:
         raise ApiError(
-            "VALIDATION_FAILED", "address limit reached", 422,
+            "VALIDATION_FAILED",
+            "address limit reached",
+            422,
             details=[{"field": "addresses", "issue": "at most 20 saved addresses"}],
         ) from None
     return AddressOut.model_validate(address)
@@ -191,9 +187,7 @@ async def add_address(body: AddressIn, ctx: Auth, request: Request) -> AddressOu
 
 @router.get("/v1/me/addresses")
 async def list_addresses(ctx: Auth, request: Request) -> list[AddressOut]:
-    return [
-        AddressOut.model_validate(a) for a in await _svc(request).list_addresses(ctx.sub)
-    ]
+    return [AddressOut.model_validate(a) for a in await _svc(request).list_addresses(ctx.sub)]
 
 
 @router.delete("/v1/me/addresses/{address_id}", status_code=204)

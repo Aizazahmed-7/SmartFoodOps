@@ -23,14 +23,10 @@ class IdentityRepo:
     # ── users ──────────────────────────────────────────────────────
 
     async def get_user_by_email(self, email: str) -> Row[Any] | None:
-        return (
-            await self._s.execute(sa.select(users).where(users.c.email == email))
-        ).one_or_none()
+        return (await self._s.execute(sa.select(users).where(users.c.email == email))).one_or_none()
 
     async def get_user_by_id(self, user_id: str) -> Row[Any] | None:
-        return (
-            await self._s.execute(sa.select(users).where(users.c.id == user_id))
-        ).one_or_none()
+        return (await self._s.execute(sa.select(users).where(users.c.id == user_id))).one_or_none()
 
     async def insert_user(
         self,
@@ -70,8 +66,13 @@ class IdentityRepo:
         ).one_or_none()
 
     async def insert_refresh(
-        self, *, family_id: str, user_id: str, token_sha256: str,
-        expires_at: datetime, now: datetime,
+        self,
+        *,
+        family_id: str,
+        user_id: str,
+        token_sha256: str,
+        expires_at: datetime,
+        now: datetime,
     ) -> None:
         await self._s.execute(
             refresh_tokens.insert().values(
@@ -86,9 +87,7 @@ class IdentityRepo:
 
     async def mark_rotated(self, token_id: str, now: datetime) -> None:
         await self._s.execute(
-            refresh_tokens.update()
-            .where(refresh_tokens.c.id == token_id)
-            .values(rotated_at=now)
+            refresh_tokens.update().where(refresh_tokens.c.id == token_id).values(rotated_at=now)
         )
 
     async def revoke_family(self, family_id: str) -> None:
@@ -100,9 +99,7 @@ class IdentityRepo:
 
     # ── addresses ──────────────────────────────────────────────────
 
-    async def insert_address(
-        self, *, user_id: str, data: dict[str, Any], now: datetime
-    ) -> str:
+    async def insert_address(self, *, user_id: str, data: dict[str, Any], now: datetime) -> str:
         address_id = f"adr_{uuid.uuid4().hex}"
         await self._s.execute(
             addresses.insert().values(id=address_id, user_id=user_id, created_at=now, **data)

@@ -44,7 +44,11 @@ def test_lifespan_runs_and_cancels_injected_poller(grants, cache, search_port):
     fake = FakePoller()
     settings = Settings(database_url="sqlite+aiosqlite://", create_all=True)
     app = create_app(
-        settings, grants=grants, cache=cache, search=search_port, poller=fake  # type: ignore[arg-type]
+        settings,
+        grants=grants,
+        cache=cache,
+        search=search_port,
+        poller=fake,  # type: ignore[arg-type]
     )
     with TestClient(app):
         pass

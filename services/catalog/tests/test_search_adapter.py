@@ -137,10 +137,5 @@ async def test_search_executes_all_legs_and_merges():
 async def test_search_all_filters_bind_params():
     session = _StubSession({})
     adapter = PostgresSearch(lambda: session)
-    assert (
-        await adapter.search(
-            query="q!", city="c", cuisine="k", tag="t", limit=5, offset=5
-        )
-        == []
-    )
+    assert await adapter.search(query="q!", city="c", cuisine="k", tag="t", limit=5, offset=5) == []
     assert session.params_seen[1] == {"q": "q!", "city": "c", "cuisine": "k", "tag": "t"}

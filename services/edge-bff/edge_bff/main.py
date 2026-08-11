@@ -62,8 +62,11 @@ def create_app(
     # Default docs disabled: they would describe the edge itself (a catch-all
     # proxy — useless). /docs + /openapi.json below serve the MERGED spec.
     app = FastAPI(
-        title="edge-bff", lifespan=lifespan,
-        openapi_url=None, docs_url=None, redoc_url=None,
+        title="edge-bff",
+        lifespan=lifespan,
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
     )
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
@@ -120,28 +123,32 @@ def create_app(
             scheme, _, token = auth_header.partition(" ")
             if scheme.lower() != "bearer" or not token:
                 raise ApiError(
-                    "AUTH_INVALID_CREDENTIALS", "missing bearer token", 401,
+                    "AUTH_INVALID_CREDENTIALS",
+                    "missing bearer token",
+                    401,
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             try:
                 claims = await token_verifier.verify(token)
             except pyjwt.ExpiredSignatureError:
                 raise ApiError(
-                    "AUTH_TOKEN_EXPIRED", "access token expired — refresh", 401,
+                    "AUTH_TOKEN_EXPIRED",
+                    "access token expired — refresh",
+                    401,
                     headers={"WWW-Authenticate": "Bearer"},
                 ) from None
             except pyjwt.InvalidTokenError:
                 raise ApiError(
-                    "AUTH_INVALID_CREDENTIALS", "invalid token", 401,
+                    "AUTH_INVALID_CREDENTIALS",
+                    "invalid token",
+                    401,
                     headers={"WWW-Authenticate": "Bearer"},
                 ) from None
             stamped = headers_for(context_from_claims(claims))
 
         # 2. Build forward headers: inbound minus identity/hop-by-hop, plus stamped.
         #    Client-supplied X-Auth-* dies here, verified or not (ADR-0005).
-        forward = {
-            k: v for k, v in request.headers.items() if k.lower() not in _DROP_INBOUND
-        }
+        forward = {k: v for k, v in request.headers.items() if k.lower() not in _DROP_INBOUND}
         forward.update(stamped)
         ctx = structlog.contextvars.get_contextvars()
         if request_id := ctx.get("request_id"):
@@ -163,16 +170,16 @@ def create_app(
         except httpx.HTTPError:
             log.warning("upstream unavailable", upstream=rule.upstream, path=path)
             raise ApiError(
-                "DEPENDENCY_UNAVAILABLE", "upstream unavailable", 503,
+                "DEPENDENCY_UNAVAILABLE",
+                "upstream unavailable",
+                503,
                 headers={"Retry-After": "1"},
             ) from None
 
         return Response(
             content=upstream.content,
             status_code=upstream.status_code,
-            headers={
-                k: v for k, v in upstream.headers.items() if k.lower() not in _DROP_OUTBOUND
-            },
+            headers={k: v for k, v in upstream.headers.items() if k.lower() not in _DROP_OUTBOUND},
         )
 
     return app

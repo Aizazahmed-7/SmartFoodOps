@@ -105,8 +105,10 @@ def merge(restaurant_hits, item_hits, limit: int, offset: int) -> list[dict]:
         best = matched[row.restaurant_id].get(row.id)
         if best is None or best["score"] < score:
             matched[row.restaurant_id][row.id] = {
-                "id": row.id, "name": row.name,
-                "price_cents": row.price_cents, "score": score,
+                "id": row.id,
+                "name": row.name,
+                "price_cents": row.price_cents,
+                "score": score,
             }
     ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
     return [

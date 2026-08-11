@@ -39,7 +39,9 @@ async def test_success_stamps_system_identity():
     assert request.headers["x-auth-role"] == "system"
     assert request.headers["x-internal-caller"] == "catalog"
     assert json.loads(request.content) == {
-        "user_id": "usr_1", "role": "restaurant_admin", "restaurant_id": "rst_1",
+        "user_id": "usr_1",
+        "role": "restaurant_admin",
+        "restaurant_id": "rst_1",
     }
 
 

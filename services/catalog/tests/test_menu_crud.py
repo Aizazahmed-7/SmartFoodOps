@@ -11,14 +11,20 @@ ITEM = {
     "tags": ["Spicy ", "halal"],
     "modifier_groups": [
         {
-            "name": "Size", "min_select": 1, "max_select": 1, "rank": 0,
+            "name": "Size",
+            "min_select": 1,
+            "max_select": 1,
+            "rank": 0,
             "options": [
                 {"name": "Regular", "price_delta_cents": 0, "rank": 0},
                 {"name": "Family", "price_delta_cents": 600, "rank": 1},
             ],
         },
         {
-            "name": "Add-ons", "min_select": 0, "max_select": 3, "rank": 1,
+            "name": "Add-ons",
+            "min_select": 0,
+            "max_select": 3,
+            "rank": 1,
             "options": [{"name": "Raita", "price_delta_cents": 100}],
         },
     ],
@@ -90,9 +96,7 @@ def test_add_category_rejects_bad_input(client):
         client.post(f"/v1/restaurants/{rid}/categories", json={"name": ""}, headers=admin)
     ).status_code == 422
     assert (
-        client.post(
-            f"/v1/restaurants/{rid}/categories", json={"name": "M", "x": 1}, headers=admin
-        )
+        client.post(f"/v1/restaurants/{rid}/categories", json={"name": "M", "x": 1}, headers=admin)
     ).status_code == 422
 
 
@@ -112,9 +116,7 @@ def test_update_category(client):
 def test_update_category_error_branches(client):
     rid, admin = onboard(client)
     cat = add_category(client, rid, admin)
-    empty = client.patch(
-        f"/v1/restaurants/{rid}/categories/{cat['id']}", json={}, headers=admin
-    )
+    empty = client.patch(f"/v1/restaurants/{rid}/categories/{cat['id']}", json={}, headers=admin)
     assert empty.status_code == 422
     unknown = client.patch(
         f"/v1/restaurants/{rid}/categories/cat_ghost", json={"name": "X"}, headers=admin
@@ -166,7 +168,8 @@ def test_add_item_full_shape(client):
     assert item["tags"] == ["halal", "spicy"]  # slugged + sorted read order
     assert [g["name"] for g in item["modifier_groups"]] == ["Size", "Add-ons"]  # rank order
     assert [o["name"] for o in item["modifier_groups"][0]["options"]] == [
-        "Regular", "Family",
+        "Regular",
+        "Family",
     ]
     assert item["modifier_groups"][0]["options"][1]["price_delta_cents"] == 600
     assert item["available"] is True
@@ -189,10 +192,21 @@ def test_add_item_validation_branches(client):
         {"price_cents": -1},
         {"currency": "usd"},
         {"tags": ["not/ok"]},
-        {"modifier_groups": [{"name": "G", "min_select": 2, "max_select": 1,
-                              "options": [{"name": "A"}, {"name": "B"}]}]},
-        {"modifier_groups": [{"name": "G", "min_select": 2, "max_select": 2,
-                              "options": [{"name": "A"}]}]},
+        {
+            "modifier_groups": [
+                {
+                    "name": "G",
+                    "min_select": 2,
+                    "max_select": 1,
+                    "options": [{"name": "A"}, {"name": "B"}],
+                }
+            ]
+        },
+        {
+            "modifier_groups": [
+                {"name": "G", "min_select": 2, "max_select": 2, "options": [{"name": "A"}]}
+            ]
+        },
         {"modifier_groups": [{"name": "G", "options": []}]},
         {"unknown_field": 1},
     ]
@@ -253,8 +267,16 @@ def test_item_modifiers_replace_and_clear(client):
     old_group_ids = {g["id"] for g in created["modifier_groups"]}
     replaced = client.patch(
         f"/v1/restaurants/{rid}/items/{created['id']}",
-        json={"modifier_groups": [{"name": "Spice", "min_select": 1, "max_select": 1,
-                                   "options": [{"name": "Mild"}, {"name": "Hot"}]}]},
+        json={
+            "modifier_groups": [
+                {
+                    "name": "Spice",
+                    "min_select": 1,
+                    "max_select": 1,
+                    "options": [{"name": "Mild"}, {"name": "Hot"}],
+                }
+            ]
+        },
         headers=admin,
     ).json()
     assert [g["name"] for g in replaced["modifier_groups"]] == ["Spice"]
@@ -299,9 +321,7 @@ def test_item_cross_tenant_is_404(client):
     rid2, admin2 = onboard(client, sub="usr_b", name="B")
     cat2 = add_category(client, rid2, admin2)
     item2 = add_item(client, rid2, admin2, cat2["id"]).json()["id"]
-    r = client.patch(
-        f"/v1/restaurants/{rid1}/items/{item2}", json={"name": "X"}, headers=admin1
-    )
+    r = client.patch(f"/v1/restaurants/{rid1}/items/{item2}", json={"name": "X"}, headers=admin1)
     assert r.status_code == 404
     assert (
         client.delete(f"/v1/restaurants/{rid1}/items/{item2}", headers=admin1)
@@ -327,10 +347,8 @@ def test_menu_nested_and_ordered(client):
     rid, admin = onboard(client)
     mains = add_category(client, rid, admin, name="Mains", rank=1)
     add_category(client, rid, admin, name="Starters", rank=0)
-    add_item(client, rid, admin, mains["id"], name="Karahi", rank=1,
-             tags=[], modifier_groups=[])
-    add_item(client, rid, admin, mains["id"], name="Biryani", rank=0,
-             tags=[], modifier_groups=[])
+    add_item(client, rid, admin, mains["id"], name="Karahi", rank=1, tags=[], modifier_groups=[])
+    add_item(client, rid, admin, mains["id"], name="Biryani", rank=0, tags=[], modifier_groups=[])
     menu = client.get(f"/v1/menus/{rid}").json()
     assert menu["name"] == "Biryani House"
     assert menu["status"] == "open"

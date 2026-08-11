@@ -108,8 +108,14 @@ class CatalogService:
             raise RestaurantNotFound
         cuisines = await repo.get_cuisines(restaurant_id)
         return Restaurant(
-            id=row.id, name=row.name, city=row.city, cuisines=cuisines,
-            status=row.status, lat=row.lat, lon=row.lon, hours=row.hours,
+            id=row.id,
+            name=row.name,
+            city=row.city,
+            cuisines=cuisines,
+            status=row.status,
+            lat=row.lat,
+            lon=row.lon,
+            hours=row.hours,
             version=row.version,
         )
 
@@ -182,9 +188,7 @@ class CatalogService:
         items_by_category: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for item in items:
             item_groups = groups_by_item[item.id]
-            item_options = [
-                o for g in item_groups for o in options_by_group[g.id]
-            ]
+            item_options = [o for g in item_groups for o in options_by_group[g.id]]
             items_by_category[item.category_id].append(
                 self._item_dict(item, tags_by_item[item.id], item_groups, item_options)
             )
@@ -262,12 +266,19 @@ class CatalogService:
             else:
                 try:
                     restaurant_id = await repo.insert_restaurant(
-                        owner_user_id=owner_user_id, name=name, city=city,
-                        lat=lat, lon=lon, hours=hours, now=_now(),
+                        owner_user_id=owner_user_id,
+                        name=name,
+                        city=city,
+                        lat=lat,
+                        lon=lon,
+                        hours=hours,
+                        now=_now(),
                     )
                     await repo.set_cuisines(restaurant_id, cuisines)
                     restaurant = await self._publish(
-                        repo, restaurant_id, "RestaurantCreated",
+                        repo,
+                        restaurant_id,
+                        "RestaurantCreated",
                         {"owner_user_id": owner_user_id},
                     )
                     await session.commit()
@@ -327,9 +338,7 @@ class CatalogService:
 
     # ── menu: categories ───────────────────────────────────────────
 
-    async def add_category(
-        self, restaurant_id: str, *, name: str, rank: int
-    ) -> dict[str, Any]:
+    async def add_category(self, restaurant_id: str, *, name: str, rank: int) -> dict[str, Any]:
         async with self._sessions() as session:
             repo = CatalogRepo(session)
             if await repo.get_restaurant(restaurant_id) is None:
@@ -355,8 +364,7 @@ class CatalogService:
             restaurant = await self._publish(repo, restaurant_id, "CategoryUpdated")
             await session.commit()
         await self._cache.delete(_ptr_key(restaurant_id))
-        return {"id": row.id, "name": row.name, "rank": row.rank,
-                "version": restaurant.version}
+        return {"id": row.id, "name": row.name, "rank": row.rank, "version": restaurant.version}
 
     async def delete_category(self, restaurant_id: str, category_id: str) -> dict[str, Any]:
         async with self._sessions() as session:
@@ -483,9 +491,7 @@ class CatalogService:
                     return json.loads(blob)
         try:
             async with self._sessions() as session:
-                restaurant, menu = await self._consistent_read(
-                    CatalogRepo(session), restaurant_id
-                )
+                restaurant, menu = await self._consistent_read(CatalogRepo(session), restaurant_id)
             doc = {
                 "restaurant_id": restaurant.id,
                 "name": restaurant.name,
@@ -532,8 +538,11 @@ class CatalogService:
             repo = CatalogRepo(session)
             # limit+1 trick: the extra row answers has_more without a COUNT.
             rows = await repo.browse(
-                city=city, cuisine=cuisine, tag=tag,
-                limit=BROWSE_PAGE_SIZE + 1, offset=page * BROWSE_PAGE_SIZE,
+                city=city,
+                cuisine=cuisine,
+                tag=tag,
+                limit=BROWSE_PAGE_SIZE + 1,
+                offset=page * BROWSE_PAGE_SIZE,
             )
             has_more = len(rows) > BROWSE_PAGE_SIZE
             rows = rows[:BROWSE_PAGE_SIZE]
@@ -582,15 +591,22 @@ class CatalogService:
         options_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for option in options:
             options_by_group[option.group_id].append(
-                {"id": option.id, "name": option.name,
-                 "price_delta_cents": option.price_delta_cents}
+                {
+                    "id": option.id,
+                    "name": option.name,
+                    "price_delta_cents": option.price_delta_cents,
+                }
             )
         groups_by_item: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for group in groups:
             groups_by_item[group.item_id].append(
-                {"id": group.id, "name": group.name,
-                 "min_select": group.min_select, "max_select": group.max_select,
-                 "options": options_by_group[group.id]}
+                {
+                    "id": group.id,
+                    "name": group.name,
+                    "min_select": group.min_select,
+                    "max_select": group.max_select,
+                    "options": options_by_group[group.id],
+                }
             )
         by_id = {item.id: item for item in items}
         return {
@@ -629,8 +645,12 @@ class CatalogService:
         page: int,
     ) -> dict[str, Any]:
         hits = await self._search.search(
-            query=query, city=city, cuisine=cuisine, tag=tag,
-            limit=SEARCH_PAGE_SIZE + 1, offset=page * SEARCH_PAGE_SIZE,
+            query=query,
+            city=city,
+            cuisine=cuisine,
+            tag=tag,
+            limit=SEARCH_PAGE_SIZE + 1,
+            offset=page * SEARCH_PAGE_SIZE,
         )
         has_more = len(hits) > SEARCH_PAGE_SIZE
         hits = hits[:SEARCH_PAGE_SIZE]

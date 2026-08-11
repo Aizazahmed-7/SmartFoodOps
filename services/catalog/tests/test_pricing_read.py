@@ -13,21 +13,27 @@ def _seed(client):
         json={"name": "Biryani House", "city": "springfield", "cuisines": ["pakistani"]},
         headers=customer,
     ).json()["id"]
-    admin = headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=rid)
-    )
+    admin = headers_for(AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=rid))
     cat = client.post(
         f"/v1/restaurants/{rid}/categories", json={"name": "Mains"}, headers=admin
     ).json()
     biryani = client.post(
         f"/v1/restaurants/{rid}/items",
         json={
-            "category_id": cat["id"], "name": "Biryani", "price_cents": 1200,
-            "modifier_groups": [{
-                "name": "Size", "min_select": 1, "max_select": 1,
-                "options": [{"name": "Regular", "rank": 0},
-                            {"name": "Family", "price_delta_cents": 600, "rank": 1}],
-            }],
+            "category_id": cat["id"],
+            "name": "Biryani",
+            "price_cents": 1200,
+            "modifier_groups": [
+                {
+                    "name": "Size",
+                    "min_select": 1,
+                    "max_select": 1,
+                    "options": [
+                        {"name": "Regular", "rank": 0},
+                        {"name": "Family", "price_delta_cents": 600, "rank": 1},
+                    ],
+                }
+            ],
         },
         headers=admin,
     ).json()
@@ -65,9 +71,7 @@ def test_pricing_read_shape(client, cache):
 
 def test_pricing_read_reports_86_and_paused(client):
     rid, admin, biryani, _ = _seed(client)
-    client.patch(
-        f"/v1/restaurants/{rid}/items/{biryani}", json={"available": False}, headers=admin
-    )
+    client.patch(f"/v1/restaurants/{rid}/items/{biryani}", json={"available": False}, headers=admin)
     client.post(f"/v1/restaurants/{rid}/pause", headers=admin)
     body = _read(client, rid, [biryani]).json()
     # The read reports truth; the pricing library decides the rejection.
@@ -104,9 +108,7 @@ def test_pricing_read_unknown_restaurant_is_404(client):
 
 def test_pricing_read_bounds(client):
     rid, _, biryani, _ = _seed(client)
-    no_ids = client.get(
-        f"/v1/internal/restaurants/{rid}/snapshot", headers=SYSTEM
-    )
+    no_ids = client.get(f"/v1/internal/restaurants/{rid}/snapshot", headers=SYSTEM)
     assert no_ids.status_code == 422  # item_ids required
     too_many = _read(client, rid, [f"itm_{n}" for n in range(51)])
     assert too_many.status_code == 422

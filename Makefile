@@ -14,7 +14,7 @@ else
 endif
 
 up-ui: ## Start management consoles (Kafka console :8085, Redis UI :8087); Postgres → desktop pgAdmin on localhost:5432
-	$(COMPOSE) --profile core --profile ui up -d
+	$(COMPOSE) --profile core --profile ui up -d kafka-console redis-commander
 
 up-lean: ## W1 working set (~4 GB) — skips temporal/localstack/rabbitmq/mock-psp until W2 needs them
 	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry gateway identity catalog edge-bff
@@ -23,10 +23,10 @@ up-lean: ## W1 working set (~4 GB) — skips temporal/localstack/rabbitmq/mock-p
 up-full: up up-apps up-ui
 
 down:
-	$(COMPOSE) --profile core --profile apps down
+	$(COMPOSE) --profile core --profile apps --profile ui down
 
 nuke: ## Down + delete all volumes (fresh start)
-	$(COMPOSE) --profile core --profile apps down -v
+	$(COMPOSE) --profile core --profile apps --profile ui down -v
 
 # Profile flags are required even for logs: compose can't resolve a
 # profile-gated service (or its depends_on chain) without them.

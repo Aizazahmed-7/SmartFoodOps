@@ -117,8 +117,9 @@ def _login_headers(client) -> dict:
 
 def test_profile_update(client):
     headers = _login_headers(client)
-    r = client.patch("/v1/auth/me", json={"full_name": "Ali Khan", "phone": "+92300123"},
-                     headers=headers)
+    r = client.patch(
+        "/v1/auth/me", json={"full_name": "Ali Khan", "phone": "+92300123"}, headers=headers
+    )
     assert r.status_code == 200
     me = client.get("/v1/auth/me", headers=headers).json()
     assert me["full_name"] == "Ali Khan"

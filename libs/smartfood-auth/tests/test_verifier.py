@@ -28,9 +28,7 @@ def make_verifier(jwks_docs: list[dict], min_refetch_interval: float = 5.0) -> J
 
 async def test_round_trip():
     key = generate_rsa_key()
-    token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(
-        sub="u1", role="customer"
-    )
+    token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(sub="u1", role="customer")
     claims = await make_verifier([jwks([key])]).verify(token)
     assert claims["sub"] == "u1"
     assert claims["role"] == "customer"
@@ -56,9 +54,7 @@ async def test_expired_token_rejected():
 
 async def test_wrong_audience_rejected():
     key = generate_rsa_key()
-    token = TokenIssuer(key, issuer=ISS, audience="someone-else").issue(
-        sub="u1", role="customer"
-    )
+    token = TokenIssuer(key, issuer=ISS, audience="someone-else").issue(sub="u1", role="customer")
     with pytest.raises(jwt.InvalidAudienceError):
         await make_verifier([jwks([key])]).verify(token)
 

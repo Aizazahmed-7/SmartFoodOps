@@ -129,7 +129,9 @@ async def test_grant_to_non_customer_role_conflicts(tmp_path):
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     key = load_or_generate(settings.signing_key_path)
     issuer = TokenIssuer(
-        key, issuer=settings.token_issuer, audience=settings.token_audience,
+        key,
+        issuer=settings.token_issuer,
+        audience=settings.token_audience,
         ttl_seconds=settings.access_ttl_seconds,
     )
     svc = IdentityService(sessions, issuer, settings)

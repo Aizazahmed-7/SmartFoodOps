@@ -27,8 +27,13 @@ async def _service(grants, cache):
 
 async def _create(svc, owner="usr_1", name="Biryani House"):
     restaurant, created = await svc.create_restaurant(
-        owner_user_id=owner, name=name, city="springfield",
-        cuisines=["bbq", "pakistani"], lat=None, lon=None, hours=None,
+        owner_user_id=owner,
+        name=name,
+        city="springfield",
+        cuisines=["bbq", "pakistani"],
+        lat=None,
+        lon=None,
+        hours=None,
     )
     return restaurant, created
 
@@ -41,17 +46,17 @@ async def test_every_mutation_leaves_the_four_writes(grants, cache):
 
     async with sessions() as s:
         versions = (
-            await s.execute(
-                sa.select(menu_versions.c.version).order_by(menu_versions.c.version)
-            )
-        ).scalars().all()
-        events = (
-            await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))
-        ).all()
+            (await s.execute(sa.select(menu_versions.c.version).order_by(menu_versions.c.version)))
+            .scalars()
+            .all()
+        )
+        events = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
 
     assert versions == [1, 2, 3]  # audit row per mutation, no gaps
     assert [e.event_type for e in events] == [
-        "RestaurantCreated", "RestaurantUpdated", "RestaurantPaused",
+        "RestaurantCreated",
+        "RestaurantUpdated",
+        "RestaurantPaused",
     ]
     # Deterministic identity: anyone can recompute the id of a fact.
     assert events[0].id == event_id("restaurant", r.id, 1, "RestaurantCreated")
@@ -85,9 +90,7 @@ async def test_concurrent_onboarding_race_adopts_winner(grants, cache, monkeypat
     assert created2 is False
     assert second.id == first.id  # adopted, not duplicated
     async with sessions() as s:
-        count = (
-            await s.execute(sa.select(sa.func.count()).select_from(outbox))
-        ).scalar_one()
+        count = (await s.execute(sa.select(sa.func.count()).select_from(outbox))).scalar_one()
     assert count == 1  # the losing attempt's writes all rolled back
 
 
@@ -98,23 +101,37 @@ async def test_every_event_carries_full_state(grants, cache):
     r, _ = await _create(svc)
     cat = await svc.add_category(r.id, name="Mains", rank=0)
     await svc.add_item(
-        r.id, category_id=cat["id"],
-        fields={"name": "Biryani", "description": None, "price_cents": 1200,
-                "currency": "USD", "available": True, "rank": 0},
+        r.id,
+        category_id=cat["id"],
+        fields={
+            "name": "Biryani",
+            "description": None,
+            "price_cents": 1200,
+            "currency": "USD",
+            "available": True,
+            "rank": 0,
+        },
         tags=["halal"],
-        modifier_groups=[{"name": "Size", "min_select": 1, "max_select": 1, "rank": 0,
-                          "options": [{"name": "Family", "price_delta_cents": 600,
-                                       "rank": 0}]}],
+        modifier_groups=[
+            {
+                "name": "Size",
+                "min_select": 1,
+                "max_select": 1,
+                "rank": 0,
+                "options": [{"name": "Family", "price_delta_cents": 600, "rank": 0}],
+            }
+        ],
     )
     await svc.set_status(r.id, "paused")  # a PROFILE event, after menu edits
 
     async with sessions() as s:
-        events = (
-            await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))
-        ).all()
+        events = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
 
     assert [e.event_type for e in events] == [
-        "RestaurantCreated", "CategoryAdded", "ItemAdded", "RestaurantPaused",
+        "RestaurantCreated",
+        "CategoryAdded",
+        "ItemAdded",
+        "RestaurantPaused",
     ]
     last = events[-1].payload  # the only event compaction guarantees survives
     assert last["status"] == "paused"
@@ -134,21 +151,35 @@ async def test_delete_item_leaves_no_orphan_rows(grants, cache):
     r, _ = await _create(svc)
     cat = await svc.add_category(r.id, name="Mains", rank=0)
     item = await svc.add_item(
-        r.id, category_id=cat["id"],
-        fields={"name": "Biryani", "description": None, "price_cents": 1200,
-                "currency": "USD", "available": True, "rank": 0},
+        r.id,
+        category_id=cat["id"],
+        fields={
+            "name": "Biryani",
+            "description": None,
+            "price_cents": 1200,
+            "currency": "USD",
+            "available": True,
+            "rank": 0,
+        },
         tags=["halal", "spicy"],
-        modifier_groups=[{"name": "Size", "min_select": 0, "max_select": 1, "rank": 0,
-                          "options": [{"name": "A", "price_delta_cents": 0, "rank": 0},
-                                      {"name": "B", "price_delta_cents": 1, "rank": 1}]}],
+        modifier_groups=[
+            {
+                "name": "Size",
+                "min_select": 0,
+                "max_select": 1,
+                "rank": 0,
+                "options": [
+                    {"name": "A", "price_delta_cents": 0, "rank": 0},
+                    {"name": "B", "price_delta_cents": 1, "rank": 1},
+                ],
+            }
+        ],
     )
     await svc.delete_item(r.id, item["id"])
 
     async with sessions() as s:
         for table in (item_tags, modifier_groups, modifier_options):
-            count = (
-                await s.execute(sa.select(sa.func.count()).select_from(table))
-            ).scalar_one()
+            count = (await s.execute(sa.select(sa.func.count()).select_from(table))).scalar_one()
             assert count == 0  # children die with the item — no orphans
 
 
@@ -168,9 +199,7 @@ async def test_render_retries_on_torn_read(grants, cache, monkeypatch):
         calls["n"] += 1
         rows = await real(self, restaurant_id)
         if calls["n"] == 1:  # a concurrent edit lands mid-read
-            await self._s.execute(
-                restaurants.update().values(version=restaurants.c.version + 1)
-            )
+            await self._s.execute(restaurants.update().values(version=restaurants.c.version + 1))
         return rows
 
     monkeypatch.setattr(CatalogRepo, "get_menu_rows", tearing)
@@ -188,10 +217,18 @@ async def test_pricing_read_retries_on_torn_read(grants, cache, monkeypatch):
     r, _ = await _create(svc)
     cat = await svc.add_category(r.id, name="Mains", rank=0)
     item = await svc.add_item(
-        r.id, category_id=cat["id"],
-        fields={"name": "Biryani", "description": None, "price_cents": 1200,
-                "currency": "USD", "available": True, "rank": 0},
-        tags=[], modifier_groups=[],
+        r.id,
+        category_id=cat["id"],
+        fields={
+            "name": "Biryani",
+            "description": None,
+            "price_cents": 1200,
+            "currency": "USD",
+            "available": True,
+            "rank": 0,
+        },
+        tags=[],
+        modifier_groups=[],
     )
 
     real = CatalogRepo.get_pricing_rows
@@ -201,9 +238,7 @@ async def test_pricing_read_retries_on_torn_read(grants, cache, monkeypatch):
         calls["n"] += 1
         rows = await real(self, restaurant_id, item_ids)
         if calls["n"] == 1:  # concurrent price edit mid-read
-            await self._s.execute(
-                restaurants.update().values(version=restaurants.c.version + 1)
-            )
+            await self._s.execute(restaurants.update().values(version=restaurants.c.version + 1))
         return rows
 
     monkeypatch.setattr(CatalogRepo, "get_pricing_rows", tearing)

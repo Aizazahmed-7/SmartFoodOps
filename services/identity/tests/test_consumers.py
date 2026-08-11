@@ -32,7 +32,9 @@ async def _harness(tmp_path):
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     key = load_or_generate(settings.signing_key_path)
     issuer = TokenIssuer(
-        key, issuer=settings.token_issuer, audience=settings.token_audience,
+        key,
+        issuer=settings.token_issuer,
+        audience=settings.token_audience,
         ttl_seconds=settings.access_ttl_seconds,
     )
     service = IdentityService(sessions, issuer, settings)

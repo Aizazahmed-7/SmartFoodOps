@@ -29,9 +29,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
     )
-    op.create_index(
-        "ix_restaurants_owner_user_id", "restaurants", ["owner_user_id"], unique=True
-    )
+    op.create_index("ix_restaurants_owner_user_id", "restaurants", ["owner_user_id"], unique=True)
     op.create_index("ix_restaurants_city", "restaurants", ["city"])
 
     op.create_table(
@@ -117,16 +115,13 @@ def upgrade() -> None:
     # on AWS the migration role needs CREATE privilege (or pre-provision it).
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     # Trigram GIN = typo-tolerant name matching ("biriani" → "Biryani House").
-    op.execute(
-        "CREATE INDEX ix_restaurants_name_trgm ON restaurants USING gin (name gin_trgm_ops)"
-    )
+    op.execute("CREATE INDEX ix_restaurants_name_trgm ON restaurants USING gin (name gin_trgm_ops)")
     op.execute("CREATE INDEX ix_menu_items_name_trgm ON menu_items USING gin (name gin_trgm_ops)")
     # FTS expression indexes = ranked word matching; expressions (not stored
     # columns) so the Core metadata stays portable — the search adapter must
     # query with these exact expressions to hit the indexes.
     op.execute(
-        "CREATE INDEX ix_restaurants_fts ON restaurants "
-        "USING gin (to_tsvector('simple', name))"
+        "CREATE INDEX ix_restaurants_fts ON restaurants USING gin (to_tsvector('simple', name))"
     )
     op.execute(
         "CREATE INDEX ix_menu_items_fts ON menu_items "

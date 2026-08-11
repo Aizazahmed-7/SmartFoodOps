@@ -36,9 +36,7 @@ class StubProducer:
         if self.fail_times > 0:
             self.fail_times -= 1
             raise RuntimeError("kafka down")
-        self.sent.append(
-            {"topic": topic, "key": key, "record": record, "headers": headers}
-        )
+        self.sent.append({"topic": topic, "key": key, "record": record, "headers": headers})
 
 
 async def _sessions():
@@ -73,9 +71,9 @@ async def _unpublished(sessions) -> int:
     async with sessions() as s:
         return (
             await s.execute(
-                sa.select(sa.func.count()).select_from(outbox).where(
-                    outbox.c.published_at.is_(None)
-                )
+                sa.select(sa.func.count())
+                .select_from(outbox)
+                .where(outbox.c.published_at.is_(None))
             )
         ).scalar_one()
 
@@ -85,7 +83,10 @@ async def test_drain_publishes_in_order_and_marks():
     await _stage(sessions, 3, traceparent="00-abc-def-01")
     producer = StubProducer()
     poller = OutboxPoller(
-        sessions, outbox, topic="c1.catalog.changes", producer=producer  # type: ignore[arg-type]
+        sessions,
+        outbox,
+        topic="c1.catalog.changes",
+        producer=producer,  # type: ignore[arg-type]
     )
     assert await poller.drain_once() == 3
     versions = [s["record"]["aggregate_version"] for s in producer.sent]
@@ -114,7 +115,11 @@ async def test_batch_size_bounds_each_pass():
     await _stage(sessions, 5)
     producer = StubProducer()
     poller = OutboxPoller(
-        sessions, outbox, topic="t", producer=producer, batch_size=2  # type: ignore[arg-type]
+        sessions,
+        outbox,
+        topic="t",
+        producer=producer,
+        batch_size=2,  # type: ignore[arg-type]
     )
     assert await poller.drain_once() == 2
     assert await _unpublished(sessions) == 3
@@ -136,7 +141,11 @@ async def test_run_survives_failures_and_cancels_cleanly():
     await _stage(sessions, 1)
     producer = StubProducer(fail_times=1)  # first pass dies, second succeeds
     poller = OutboxPoller(
-        sessions, outbox, topic="t", producer=producer, interval=0.01  # type: ignore[arg-type]
+        sessions,
+        outbox,
+        topic="t",
+        producer=producer,
+        interval=0.01,  # type: ignore[arg-type]
     )
     task = asyncio.create_task(poller.run())
     for _ in range(200):
@@ -162,7 +171,10 @@ async def test_cancellation_mid_drain_propagates():
             await asyncio.sleep(3600)
 
     poller = OutboxPoller(
-        sessions, outbox, topic="t", producer=BlockingProducer()  # type: ignore[arg-type]
+        sessions,
+        outbox,
+        topic="t",
+        producer=BlockingProducer(),  # type: ignore[arg-type]
     )
     task = asyncio.create_task(poller.run())
     await entered.wait()  # cancellation lands INSIDE drain_once

@@ -24,9 +24,7 @@ class Upstream:
         if request.url.host == "down.test":
             raise httpx.ConnectError("boom")
         self.requests.append(request)
-        return httpx.Response(
-            201, json={"from": request.url.host}, headers={"X-Upstream": "yes"}
-        )
+        return httpx.Response(201, json={"from": request.url.host}, headers={"X-Upstream": "yes"})
 
     @property
     def last(self) -> httpx.Request:

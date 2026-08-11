@@ -17,15 +17,31 @@ Week 3 adds Debezium mode; both emit the same wire format via smartfood-kafka.
 import asyncio
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 import sqlalchemy as sa
-from smartfood_kafka import DOMAIN_EVENT_SCHEMA, DOMAIN_EVENT_SUBJECT, EventProducer
+from smartfood_kafka import DOMAIN_EVENT_SCHEMA, DOMAIN_EVENT_SUBJECT
 from smartfood_otel import get_logger
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = get_logger("smartfood-outbox")
+
+
+class DomainEventSender(Protocol):
+    """The one capability the poller needs — structural, so tests can hand
+    in a stub without inheriting from the real EventProducer."""
+
+    async def send(
+        self,
+        topic: str,
+        *,
+        subject: str,
+        schema: dict[str, Any],
+        key: str,
+        record: dict[str, Any],
+        headers: list[tuple[str, bytes]] | None = None,
+    ) -> None: ...
 
 
 def _aware(dt: datetime) -> datetime:
@@ -53,7 +69,7 @@ class OutboxPoller:
         table: sa.Table,
         *,
         topic: str,
-        producer: EventProducer,
+        producer: DomainEventSender,
         cell_id: str = "c1",
         batch_size: int = 100,
         interval: float = 0.5,
@@ -89,9 +105,7 @@ class OutboxPoller:
                     schema=DOMAIN_EVENT_SCHEMA,
                     key=row.aggregate_id,
                     record=_record(row, self._cell_id),
-                    headers=(
-                        [("traceparent", traceparent.encode())] if traceparent else []
-                    ),
+                    headers=([("traceparent", traceparent.encode())] if traceparent else []),
                 )
             # Mark only after EVERY send in the batch was broker-confirmed —
             # a crash mid-batch re-sends the whole batch (dedupe absorbs it).

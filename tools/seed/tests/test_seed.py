@@ -41,9 +41,7 @@ class HostRouter(httpx.AsyncBaseTransport):
     minus the network."""
 
     def __init__(self, apps: dict[str, Any]):
-        self._transports = {
-            host: httpx.ASGITransport(app=app) for host, app in apps.items()
-        }
+        self._transports = {host: httpx.ASGITransport(app=app) for host, app in apps.items()}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         return await self._transports[request.url.host].handle_async_request(request)
@@ -92,24 +90,47 @@ def edge(tmp_path):
         yield edge_app
 
 
+def test_template_names_are_globally_unique():
+    """Duplicate names across cities read as broken data in browse — the
+    dataset itself must make same-name rows impossible."""
+    names = [t["name"] for t in TEMPLATES]
+    assert len(names) == len(set(names))
+    assert {t["city"] for t in TEMPLATES} == set(CITIES)
+
+
 async def test_seed_creates_everything_then_replays_clean(edge):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=edge), base_url="http://gw.test"
     ) as client:
         first = await seed(client)
-        expected = len(CITIES) * len(TEMPLATES)
+        expected = len(TEMPLATES)
         assert first == {"created": expected, "replayed": 0}
 
         # Spot-check the world through the public APIs (via the edge):
+        # each city holds exactly its templates, no duplicates.
+        for city in CITIES:
+            browse = (await client.get("/v1/restaurants", params={"city": city})).json()
+            names = [r["name"] for r in browse["restaurants"]]
+            assert sorted(names) == sorted(t["name"] for t in TEMPLATES if t["city"] == city)
+
         browse = (await client.get("/v1/restaurants", params={"city": "springfield"})).json()
-        assert len(browse["restaurants"]) == len(TEMPLATES)
         biryani = next(r for r in browse["restaurants"] if r["name"] == "Biryani House")
         menu = (await client.get(f"/v1/menus/{biryani['id']}")).json()
         assert [c["name"] for c in menu["categories"]] == ["Mains", "Sides"]
         mains = menu["categories"][0]["items"]
         assert mains[0]["name"] == "Chicken Biryani"
         assert mains[0]["tags"] == ["halal", "spicy"]
+        assert mains[0]["description"]  # descriptions feed FTS search
         assert mains[0]["modifier_groups"][0]["options"][1]["price_delta_cents"] == 300
+
+        # The multi-select shape (checkbox UI path) made it through intact.
+        barn = next(r for r in browse["restaurants"] if r["name"] == "Burger Barn")
+        barn_menu = (await client.get(f"/v1/menus/{barn['id']}")).json()
+        smash = barn_menu["categories"][0]["items"][0]
+        groups = {g["name"]: g for g in smash["modifier_groups"]}
+        assert set(groups) == {"Size", "Add-ons"}
+        assert groups["Add-ons"]["min_select"] == 0
+        assert groups["Add-ons"]["max_select"] == 3
 
         # Idempotency: the second run creates NOTHING and changes nothing.
         second = await seed(client)

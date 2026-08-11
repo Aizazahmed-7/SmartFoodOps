@@ -29,9 +29,7 @@ def test_promoted_owner_can_replay_onboarding(client, grants):
     must return the existing restaurant, not a 403 (found by the seed test)."""
     first = client.post("/v1/restaurants", json=BODY, headers=CUSTOMER)
     rid = first.json()["id"]
-    promoted = headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=rid)
-    )
+    promoted = headers_for(AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=rid))
     replay = client.post("/v1/restaurants", json=BODY, headers=promoted)
     assert replay.status_code == 200
     assert replay.json()["id"] == rid

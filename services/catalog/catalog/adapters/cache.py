@@ -43,7 +43,8 @@ class RedisCache:
         except _ERRORS as exc:
             log.warning(
                 "cache delete failed — key may serve stale until TTL",
-                key=key, error=str(exc),
+                key=key,
+                error=str(exc),
             )
 
     async def acquire_lock(self, key: str, ttl_ms: int) -> bool:

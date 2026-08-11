@@ -20,24 +20,34 @@ def test_search_assembles_cards_and_normalizes_params(client, search_port):
             "restaurant_id": rid,
             "score": 0.92,
             "matched_items": [
-                {"id": "itm_1", "name": "Chicken Biryani", "price_cents": 1200,
-                 "score": 0.92}
+                {"id": "itm_1", "name": "Chicken Biryani", "price_cents": 1200, "score": 0.92}
             ],
         },
         {"restaurant_id": "rst_vanished", "score": 0.5, "matched_items": []},
     ]
     r = client.get(
         "/v1/search",
-        params={"q": " biriani ", "city": "Springfield", "cuisine": "Pakistani",
-                "tag": "Halal", "page": 1},
+        params={
+            "q": " biriani ",
+            "city": "Springfield",
+            "cuisine": "Pakistani",
+            "tag": "Halal",
+            "page": 1,
+        },
     )
     assert r.status_code == 200
     assert r.headers["Cache-Control"] == "no-store"  # deliberately uncached
 
     # Params reached the port normalized, page → offset, limit+1 for has_more:
     assert search_port.calls == [
-        {"query": "biriani", "city": "springfield", "cuisine": "pakistani",
-         "tag": "halal", "limit": 21, "offset": 20}
+        {
+            "query": "biriani",
+            "city": "springfield",
+            "cuisine": "pakistani",
+            "tag": "halal",
+            "limit": 21,
+            "offset": 20,
+        }
     ]
 
     body = r.json()
@@ -91,6 +101,4 @@ def test_search_validation_branches(client):
     bad_filter = client.get("/v1/search", params={"q": "biryani", "cuisine": "x/y"})
     assert bad_filter.status_code == 422
     assert bad_filter.json()["error"]["code"] == "VALIDATION_FAILED"
-    assert (
-        client.get("/v1/search", params={"q": "biryani", "page": -1}).status_code == 422
-    )
+    assert client.get("/v1/search", params={"q": "biryani", "page": -1}).status_code == 422

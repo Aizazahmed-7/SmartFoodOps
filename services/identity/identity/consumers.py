@@ -61,7 +61,8 @@ class GrantConvergenceHandler:
             # partition; surfaced for ops (proper DLQ lands with W3).
             log.error(
                 "grant convergence permanently un-appliable — ops review",
-                event_id=event_id, error=type(exc).__name__,
+                event_id=event_id,
+                error=type(exc).__name__,
             )
 
         await self._mark_processed(event_id)

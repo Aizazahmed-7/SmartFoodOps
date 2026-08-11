@@ -21,8 +21,9 @@ from .serde import AvroSerde
 class _KafkaProducer(Protocol):
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
-    async def send_and_wait(self, topic: str, value: bytes, *, key: bytes,
-                            headers: list[tuple[str, bytes]]) -> Any: ...
+    async def send_and_wait(
+        self, topic: str, value: bytes, *, key: bytes, headers: list[tuple[str, bytes]]
+    ) -> Any: ...
 
 
 class EventProducer:
@@ -34,9 +35,7 @@ class EventProducer:
         client: _KafkaProducer | None = None,
     ):
         self._serde = serde
-        self._client: _KafkaProducer = client or AIOKafkaProducer(
-            bootstrap_servers=bootstrap
-        )
+        self._client: _KafkaProducer = client or AIOKafkaProducer(bootstrap_servers=bootstrap)
 
     async def start(self) -> None:
         await self._client.start()
@@ -55,9 +54,7 @@ class EventProducer:
         headers: list[tuple[str, bytes]] | None = None,
     ) -> None:
         value = await self._serde.encode(subject, schema, record)
-        await self._client.send_and_wait(
-            topic, value, key=key.encode(), headers=headers or []
-        )
+        await self._client.send_and_wait(topic, value, key=key.encode(), headers=headers or [])
 
 
 async def ensure_compacted_topic(

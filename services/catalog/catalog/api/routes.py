@@ -95,9 +95,7 @@ def _svc(request: Request) -> CatalogService:
 
 # system_admin is named explicitly (UC-15 admin CRUD): require_role only
 # auto-passes `system`, and _own() then exempts both from restaurant scoping.
-RestaurantAdmin = Annotated[
-    AuthContext, Depends(require_role("restaurant_admin", "system_admin"))
-]
+RestaurantAdmin = Annotated[AuthContext, Depends(require_role("restaurant_admin", "system_admin"))]
 
 _SCOPE_EXEMPT = {"system", "system_admin"}
 
@@ -171,7 +169,9 @@ async def update_restaurant(
         restaurant = await _svc(request).update_restaurant(restaurant_id, changes, cuisines)
     except NothingToUpdate:
         raise ApiError(
-            "VALIDATION_FAILED", "nothing to update", 422,
+            "VALIDATION_FAILED",
+            "nothing to update",
+            422,
             details=[{"field": "body", "issue": "at least one field required"}],
         ) from None
     except RestaurantNotFound:
@@ -230,8 +230,11 @@ async def add_category(
 
 @router.patch("/v1/restaurants/{restaurant_id}/categories/{category_id}")
 async def update_category(
-    restaurant_id: str, category_id: str, body: CategoryUpdate,
-    ctx: RestaurantAdmin, request: Request,
+    restaurant_id: str,
+    category_id: str,
+    body: CategoryUpdate,
+    ctx: RestaurantAdmin,
+    request: Request,
 ) -> dict:
     _own(ctx, restaurant_id)
     try:
@@ -240,7 +243,9 @@ async def update_category(
         )
     except NothingToUpdate:
         raise ApiError(
-            "VALIDATION_FAILED", "nothing to update", 422,
+            "VALIDATION_FAILED",
+            "nothing to update",
+            422,
             details=[{"field": "body", "issue": "at least one field required"}],
         ) from None
     except CategoryNotFound:
@@ -257,9 +262,7 @@ async def delete_category(
     except CategoryNotFound:
         raise ApiError("NOT_FOUND", "unknown category", 404) from None
     except CategoryNotEmpty:
-        raise ApiError(
-            "CATEGORY_NOT_EMPTY", "category still contains items", 409
-        ) from None
+        raise ApiError("CATEGORY_NOT_EMPTY", "category still contains items", 409) from None
 
 
 # ── menu: items ────────────────────────────────────────────────────
@@ -355,14 +358,15 @@ async def add_item(
 
 @router.patch("/v1/restaurants/{restaurant_id}/items/{item_id}")
 async def update_item(
-    restaurant_id: str, item_id: str, body: ItemUpdate,
-    ctx: RestaurantAdmin, request: Request,
+    restaurant_id: str,
+    item_id: str,
+    body: ItemUpdate,
+    ctx: RestaurantAdmin,
+    request: Request,
 ) -> dict:
     _own(ctx, restaurant_id)
     sent = body.model_fields_set
-    changes = body.model_dump(
-        exclude_unset=True, exclude={"tags", "modifier_groups"}
-    )
+    changes = body.model_dump(exclude_unset=True, exclude={"tags", "modifier_groups"})
     try:
         return await _svc(request).update_item(
             restaurant_id,
@@ -377,7 +381,9 @@ async def update_item(
         )
     except NothingToUpdate:
         raise ApiError(
-            "VALIDATION_FAILED", "nothing to update", 422,
+            "VALIDATION_FAILED",
+            "nothing to update",
+            422,
             details=[{"field": "body", "issue": "at least one field required"}],
         ) from None
     except ItemNotFound:
@@ -415,7 +421,9 @@ async def pricing_read(
     snapshot lives in order_db. Bypasses every cache by design."""
     if not 1 <= len(item_ids) <= 50:
         raise ApiError(
-            "VALIDATION_FAILED", "item_ids out of bounds", 422,
+            "VALIDATION_FAILED",
+            "item_ids out of bounds",
+            422,
             details=[{"field": "item_ids", "issue": "between 1 and 50 ids"}],
         )
     try:
@@ -456,7 +464,9 @@ def _norm_filter(value: str | None, name: str) -> str | None:
     slug = "-".join(value.strip().lower().split())
     if not _SLUG.match(slug):
         raise ApiError(
-            "VALIDATION_FAILED", "invalid filter", 422,
+            "VALIDATION_FAILED",
+            "invalid filter",
+            422,
             details=[{"field": name, "issue": "not a valid tag"}],
         )
     return slug

@@ -98,9 +98,7 @@ modifier_options = sa.Table(
     "modifier_options",
     metadata,
     sa.Column("id", sa.Text, primary_key=True),
-    sa.Column(
-        "group_id", sa.Text, sa.ForeignKey("modifier_groups.id"), nullable=False, index=True
-    ),
+    sa.Column("group_id", sa.Text, sa.ForeignKey("modifier_groups.id"), nullable=False, index=True),
     sa.Column("name", sa.Text, nullable=False),  # "Large"
     sa.Column("price_delta_cents", sa.Integer, nullable=False, server_default="0"),
     sa.Column("rank", sa.Integer, nullable=False, server_default="0"),

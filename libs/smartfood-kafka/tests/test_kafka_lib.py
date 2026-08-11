@@ -165,6 +165,7 @@ async def test_ensure_compacted_topic_creates_once():
 
 async def test_versions_endpoint_refusal_is_loud():
     """Compat check passes but the schema itself is refused (incompatible)."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.startswith("/config/"):
             return httpx.Response(200, json={})

@@ -71,9 +71,7 @@ class CatalogRepo:
 
     async def get_restaurant(self, restaurant_id: str) -> Row[Any] | None:
         return (
-            await self._s.execute(
-                sa.select(restaurants).where(restaurants.c.id == restaurant_id)
-            )
+            await self._s.execute(sa.select(restaurants).where(restaurants.c.id == restaurant_id))
         ).one_or_none()
 
     async def update_restaurant(self, restaurant_id: str, changes: dict[str, Any]) -> int:
@@ -95,9 +93,7 @@ class CatalogRepo:
     async def set_cuisines(self, restaurant_id: str, cuisines: list[str]) -> None:
         """Replace-the-set semantics: the given list becomes the whole truth."""
         await self._s.execute(
-            restaurant_cuisines.delete().where(
-                restaurant_cuisines.c.restaurant_id == restaurant_id
-            )
+            restaurant_cuisines.delete().where(restaurant_cuisines.c.restaurant_id == restaurant_id)
         )
         await self._s.execute(
             restaurant_cuisines.insert(),
@@ -165,8 +161,7 @@ class CatalogRepo:
         return (
             await self._s.execute(
                 sa.select(menu_items).where(
-                    (menu_items.c.id == item_id)
-                    & (menu_items.c.restaurant_id == restaurant_id)
+                    (menu_items.c.id == item_id) & (menu_items.c.restaurant_id == restaurant_id)
                 )
             )
         ).one_or_none()
@@ -182,15 +177,10 @@ class CatalogRepo:
         )
         return item_id
 
-    async def update_item(
-        self, restaurant_id: str, item_id: str, changes: dict[str, Any]
-    ) -> int:
+    async def update_item(self, restaurant_id: str, item_id: str, changes: dict[str, Any]) -> int:
         result = await self._s.execute(
             menu_items.update()
-            .where(
-                (menu_items.c.id == item_id)
-                & (menu_items.c.restaurant_id == restaurant_id)
-            )
+            .where((menu_items.c.id == item_id) & (menu_items.c.restaurant_id == restaurant_id))
             .values(**changes)
         )
         return cast(CursorResult[Any], result).rowcount
@@ -239,15 +229,11 @@ class CatalogRepo:
         await self._s.execute(modifier_options.insert(), option_rows)
 
     async def delete_item_modifiers(self, item_id: str) -> None:
-        group_ids = sa.select(modifier_groups.c.id).where(
-            modifier_groups.c.item_id == item_id
-        )
+        group_ids = sa.select(modifier_groups.c.id).where(modifier_groups.c.item_id == item_id)
         await self._s.execute(
             modifier_options.delete().where(modifier_options.c.group_id.in_(group_ids))
         )
-        await self._s.execute(
-            modifier_groups.delete().where(modifier_groups.c.item_id == item_id)
-        )
+        await self._s.execute(modifier_groups.delete().where(modifier_groups.c.item_id == item_id))
 
     async def delete_item_tags(self, item_id: str) -> None:
         await self._s.execute(item_tags.delete().where(item_tags.c.item_id == item_id))
@@ -279,9 +265,7 @@ class CatalogRepo:
             query = query.where(
                 sa.exists(
                     sa.select(sa.literal(1))
-                    .select_from(
-                        menu_items.join(item_tags, item_tags.c.item_id == menu_items.c.id)
-                    )
+                    .select_from(menu_items.join(item_tags, item_tags.c.item_id == menu_items.c.id))
                     .where(
                         (menu_items.c.restaurant_id == restaurants.c.id)
                         & (item_tags.c.tag == tag)
@@ -318,9 +302,14 @@ class CatalogRepo:
 
     # ── menu: set-based reads (no per-row loops — repo contract) ───
 
-    async def get_menu_rows(self, restaurant_id: str) -> tuple[
-        Sequence[Row[Any]], Sequence[Row[Any]], Sequence[Row[Any]],
-        Sequence[Row[Any]], Sequence[Row[Any]],
+    async def get_menu_rows(
+        self, restaurant_id: str
+    ) -> tuple[
+        Sequence[Row[Any]],
+        Sequence[Row[Any]],
+        Sequence[Row[Any]],
+        Sequence[Row[Any]],
+        Sequence[Row[Any]],
     ]:
         """(categories, items, tags, groups, options) for one restaurant —
         5 queries regardless of menu size."""
@@ -377,8 +366,7 @@ class CatalogRepo:
         items = (
             await self._s.execute(
                 sa.select(menu_items).where(
-                    menu_items.c.id.in_(item_ids)
-                    & (menu_items.c.restaurant_id == restaurant_id)
+                    menu_items.c.id.in_(item_ids) & (menu_items.c.restaurant_id == restaurant_id)
                 )
             )
         ).all()
@@ -413,9 +401,7 @@ class CatalogRepo:
             return None
         tags = (
             await self._s.execute(
-                sa.select(item_tags)
-                .where(item_tags.c.item_id == item_id)
-                .order_by(item_tags.c.tag)
+                sa.select(item_tags).where(item_tags.c.item_id == item_id).order_by(item_tags.c.tag)
             )
         ).all()
         groups = (
@@ -449,9 +435,7 @@ class CatalogRepo:
         )
         return int(result.scalar_one())
 
-    async def insert_menu_version(
-        self, restaurant_id: str, version: int, now: datetime
-    ) -> None:
+    async def insert_menu_version(self, restaurant_id: str, version: int, now: datetime) -> None:
         await self._s.execute(
             menu_versions.insert().values(
                 restaurant_id=restaurant_id, version=version, published_at=now
