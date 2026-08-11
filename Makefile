@@ -13,8 +13,12 @@ else
 	$(COMPOSE) --profile core --profile apps up -d --wait
 endif
 
-up-ui: ## Start management consoles (Kafka console :8085, Redis UI :8086); Postgres → desktop pgAdmin on localhost:5432
+up-ui: ## Start management consoles (Kafka console :8085, Redis UI :8087); Postgres → desktop pgAdmin on localhost:5432
 	$(COMPOSE) --profile core --profile ui up -d
+
+up-lean: ## W1 working set (~4 GB) — skips temporal/localstack/rabbitmq/mock-psp until W2 needs them
+	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry gateway identity catalog edge-bff
+	@echo "✔ lean stack up — gateway http://localhost:8080 · frontend proxies here"
 
 up-full: up up-apps up-ui
 

@@ -119,7 +119,7 @@ Profiles: **core** (infra), **cdc** (Debezium — deliberately split out, it cos
 | Profile | Component | Host port | Notes |
 |---|---|---|---|
 | core | postgres:15 | 5432 | One database per service, created by `initdb/` scripts |
-| core | redis:7 | 6379 | Single node; identical keys/TTLs/Lua as prod |
+| core | redis:7 | 6380 | Host port (6379 squatted locally); in-network `redis:6379`. Single node; identical keys/TTLs/Lua as prod |
 | core | rabbitmq:3-management | 5672 / 15672 | Celery broker / management UI |
 | core | Kafka (KRaft, single broker) | **19092** | Dual listeners: `kafka:9092` in-network, `localhost:19092` from host — see §12 |
 | core | Confluent Schema Registry | **8086** (host) → 8081 (in-network) | host-remapped: another local project intermittently serves 8081 on this machine; services use `http://schema-registry:8081` unchanged |

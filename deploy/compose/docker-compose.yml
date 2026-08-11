@@ -69,9 +69,11 @@ services:
       retries: 20
 
   redis:
+    # Host 6380: 6379 is held by the local-deployment project's redis.
+    # In-network stays redis:6379 — only host-side tools use 6380.
     profiles: [core]
     image: redis:7
-    ports: ["6379:6379"]
+    ports: ["6380:6379"]
     command: ["redis-server", "--maxmemory-policy", "volatile-ttl"]
 
   rabbitmq:
@@ -229,13 +231,21 @@ services:
     ports: ["8085:8080"]
     environment:
       KAFKA_BROKERS: kafka:9092
+      # Both spellings so the console decodes Avro regardless of version
+      # (v2 nests schema registry under kafka.*, v3 moved it top-level).
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://schema-registry:8081
+      SCHEMAREGISTRY_ENABLED: "true"
+      SCHEMAREGISTRY_URLS: http://schema-registry:8081
     depends_on:
       kafka: { condition: service_healthy }
+      schema-registry: { condition: service_started }
 
   redis-commander:
     profiles: [ui]
     image: ghcr.io/joeferner/redis-commander:latest
-    ports: ["8086:8081"]
+    # 8086 belongs to schema-registry (8081 is squatted by another local app)
+    ports: ["8087:8081"]
     environment:
       REDIS_HOSTS: global-redis:redis:6379
     depends_on:

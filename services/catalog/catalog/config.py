@@ -7,7 +7,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
     database_url: str = "postgresql+asyncpg://catalog_svc:catalog_svc@localhost:5432/catalog_db"
-    redis_url: str = "redis://localhost:6379/0"
+    # 6380 = compose host mapping (6379 is taken by another local project);
+    # in-container the env var overrides this with redis://redis:6379/0.
+    redis_url: str = "redis://localhost:6380/0"
 
     # Internal grant call on self-serve onboarding (service-ownership.md: Catalog → Identity).
     identity_base_url: str = "http://localhost:8001"
