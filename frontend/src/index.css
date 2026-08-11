@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+body {
+  @apply bg-slate-950 text-slate-100 antialiased;
+}
+
+.card {
+  @apply rounded-2xl bg-slate-900 border border-slate-800 p-4;
+}
+
+.btn-primary,
+.btn-ghost,
+.btn-danger,
+.btn {
+  @apply rounded-xl px-4 py-2 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed;
+}
+
+.btn-primary {
+  @apply bg-orange-500 text-slate-950 hover:bg-orange-400;
+}
+
+.btn-ghost {
+  @apply bg-slate-800 text-slate-200 hover:bg-slate-700;
+}
+
+.btn-danger {
+  @apply bg-red-900/60 text-red-200 hover:bg-red-900;
+}
+
+.input {
+  @apply w-full rounded-xl bg-slate-800 border border-slate-700 px-3 py-2 text-sm
+    placeholder-slate-500 focus:outline-none focus:border-orange-500;
+}
+
+.chip {
+  @apply rounded-full px-3 py-1 text-xs font-medium bg-slate-800 text-slate-300
+    hover:bg-slate-700 cursor-pointer transition-colors;
+}
+
+.chip-active {
+  @apply bg-orange-500 text-slate-950 hover:bg-orange-400;
+}
+
+.tag {
+  @apply rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wide bg-slate-800 text-slate-400;
+}
