@@ -1,13 +1,15 @@
 """Catalog service — owns what a restaurant sells, and the menu cache pipeline."""
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import httpx
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers
+from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, ensure_compacted_topic
 from smartfood_otel import RequestContextMiddleware, setup_logging
+from smartfood_outbox import OutboxPoller
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -16,7 +18,7 @@ from .adapters.identity_grants import IdentityGrantsClient
 from .adapters.search import PostgresSearch
 from .api.routes import router
 from .config import Settings
-from .db import metadata
+from .db import metadata, outbox
 from .domain.ports import CachePort, GrantsPort, SearchPort
 from .domain.service import CatalogService
 
@@ -40,6 +42,7 @@ def create_app(
     grants: GrantsPort | None = None,
     cache: CachePort | None = None,
     search: SearchPort | None = None,
+    poller: OutboxPoller | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("catalog")
@@ -60,6 +63,18 @@ def create_app(
         own_redis = aioredis.from_url(settings.redis_url, decode_responses=True)
         cache = RedisCache(own_redis)
 
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    topic = f"{settings.cell_id}.catalog.changes"
+    own_producer: EventProducer | None = None
+    if poller is None and settings.outbox_mode == "poller":  # pragma: no cover
+        # Real Kafka wiring — exercised by the live smoke, not the unit suite.
+        own_producer = EventProducer(
+            settings.kafka_bootstrap, AvroSerde(SchemaRegistry(settings.schema_registry_url))
+        )
+        poller = OutboxPoller(
+            sessions, outbox, topic=topic, producer=own_producer, cell_id=settings.cell_id
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if settings.create_all:
@@ -68,7 +83,19 @@ def create_app(
         else:
             # Alembic manages its own (sync) connection; run it off the event loop.
             await asyncio.to_thread(_run_migrations, settings.database_url)  # pragma: no cover
+        drain_task: asyncio.Task[None] | None = None
+        if poller is not None:
+            if own_producer is not None:  # pragma: no cover — live path
+                await ensure_compacted_topic(settings.kafka_bootstrap, topic)
+                await own_producer.start()
+            drain_task = asyncio.create_task(poller.run())
         yield
+        if drain_task is not None:
+            drain_task.cancel()  # cancellation IS the poller's shutdown signal
+            with suppress(asyncio.CancelledError):
+                await drain_task
+        if own_producer is not None:  # pragma: no cover — live path
+            await own_producer.stop()
         await engine.dispose()
         if own_http is not None:
             await own_http.aclose()
@@ -81,7 +108,6 @@ def create_app(
 
     # Composition root: repo ← service ← routes. The API layer only ever
     # sees app.state.service; the domain only sees the sessionmaker.
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
     if search is None:
         search = PostgresSearch(sessions)  # PG-only SQL — fine: prod IS Postgres
     app.state.service = CatalogService(sessions, grants, cache, search)

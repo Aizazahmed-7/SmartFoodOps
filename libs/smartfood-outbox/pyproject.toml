@@ -2,7 +2,7 @@
 name = "smartfood-outbox"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = ["sqlalchemy[asyncio]>=2.0", "smartfood-kafka"]
+dependencies = ["sqlalchemy[asyncio]>=2.0", "smartfood-kafka", "smartfood-otel"]
 
 [build-system]
 requires = ["hatchling"]
@@ -13,3 +13,4 @@ packages = ["smartfood_outbox"]
 
 [tool.uv.sources]
 smartfood-kafka = { workspace = true }
+smartfood-otel = { workspace = true }

@@ -13,7 +13,12 @@ from typing import Any
 
 import structlog
 
-from .propagation import extract_traceparent, make_traceparent, trace_id_of
+from .propagation import (
+    extract_traceparent,
+    make_traceparent,
+    set_current_traceparent,
+    trace_id_of,
+)
 
 REQUEST_ID_HEADER = "x-request-id"
 
@@ -43,6 +48,7 @@ class RequestContextMiddleware:
             request_id=request_id,
             trace_id=trace_id_of(traceparent),
         )
+        set_current_traceparent(traceparent)
         scope.setdefault("state", {})
         scope["state"]["traceparent"] = traceparent
 

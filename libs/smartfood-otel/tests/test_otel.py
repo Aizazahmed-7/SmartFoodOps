@@ -80,3 +80,26 @@ def test_client_supplied_ids_are_kept():
 def test_malformed_traceparent_replaced_not_trusted():
     r = client.get("/ctx", headers={"traceparent": "not-a-traceparent"})
     assert len(r.json()["trace_id"]) == 32
+
+
+def test_current_traceparent_outside_requests_is_none():
+    from smartfood_otel import current_traceparent
+
+    assert current_traceparent() is None  # pollers/consumers/startup
+
+
+def test_middleware_sets_current_traceparent():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from smartfood_otel import RequestContextMiddleware, current_traceparent
+
+    app = FastAPI()
+    app.add_middleware(RequestContextMiddleware)
+
+    @app.get("/probe")
+    async def probe() -> dict:
+        return {"traceparent": current_traceparent()}
+
+    inbound = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
+    body = TestClient(app).get("/probe", headers={"traceparent": inbound}).json()
+    assert body["traceparent"] == inbound  # request-scoped and propagated

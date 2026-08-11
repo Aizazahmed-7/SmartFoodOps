@@ -2,7 +2,7 @@
 name = "smartfood-kafka"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = ["pydantic>=2.9", "aiokafka>=0.11"]
+dependencies = ["pydantic>=2.9", "aiokafka>=0.11", "fastavro>=1.9", "httpx>=0.27"]
 
 [build-system]
 requires = ["hatchling"]

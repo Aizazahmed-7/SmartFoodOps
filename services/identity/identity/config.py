@@ -14,5 +14,11 @@ class Settings(BaseSettings):
     access_ttl_seconds: int = 900
     refresh_ttl_days: int = 30
 
+    # Event backbone (task #6): the grant-convergence consumer (ADR-0020).
+    kafka_consumers: str = "off"  # on | off
+    kafka_bootstrap: str = "localhost:19092"
+    schema_registry_url: str = "http://localhost:8081"
+    cell_id: str = "c1"
+
     # Tests use sqlite + create_all; containers run Alembic migrations.
     create_all: bool = False

@@ -27,6 +27,7 @@ typeCheckingMode = "standard"
 # Tests and adapters stay on standard.
 strict = [
     "libs/smartfood-api/smartfood_api",
+    "libs/smartfood-kafka/smartfood_kafka",
     "libs/smartfood-auth/smartfood_auth",
     "libs/smartfood-otel/smartfood_otel",
     "libs/smartfood-outbox/smartfood_outbox",
@@ -39,6 +40,7 @@ reportUnusedFunction = false  # false-positives on decorator-registered handlers
 extraPaths = [
     "libs/smartfood-api",
     "libs/smartfood-auth",
+    "libs/smartfood-kafka",
     "libs/smartfood-otel",
     "libs/smartfood-outbox",
 ]

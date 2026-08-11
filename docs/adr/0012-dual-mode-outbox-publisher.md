@@ -29,3 +29,12 @@ The shared `smartfood-outbox` library ships two publishers behind one switch:
 - The dev poller adds slight publish latency and per-service polling load (irrelevant at dev volumes).
 
 **Revisit trigger**: a Debezium feature the poller cannot mirror byte-identically (e.g., a new SMT), or record-parity CI failing twice in a quarter → re-evaluate whether the poller earns its maintenance cost.
+
+**Implementation note (2026-08-10)**: `OUTBOX_MODE=poller` is now real —
+`smartfood_outbox.OutboxPoller` (batched `FOR UPDATE SKIP LOCKED`, publish
+then mark, at-least-once) producing Confluent-wire-format Avro through
+`smartfood-kafka` (registry + `BACKWARD_TRANSITIVE` asserted at startup).
+Pulled forward from W3 with the grant-convergence consumer (ADR-0020, task
+#6). Ordering caveat while on the poller: ONE poller instance per service —
+multiple instances + SKIP LOCKED could interleave one aggregate's rows;
+Debezium (W3) reads the WAL and retires the caveat.

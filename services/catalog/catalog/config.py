@@ -12,5 +12,11 @@ class Settings(BaseSettings):
     # Internal grant call on self-serve onboarding (service-ownership.md: Catalog → Identity).
     identity_base_url: str = "http://localhost:8001"
 
+    # Event backbone (task #6): compose sets poller mode + in-network URLs.
+    outbox_mode: str = "off"  # poller | off
+    kafka_bootstrap: str = "localhost:19092"
+    schema_registry_url: str = "http://localhost:8081"
+    cell_id: str = "c1"
+
     # Tests use sqlite + create_all; containers run Alembic migrations.
     create_all: bool = False

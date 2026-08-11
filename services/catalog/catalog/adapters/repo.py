@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, cast
 
 import sqlalchemy as sa
+from smartfood_otel import current_traceparent
 from smartfood_outbox import event_id
 from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -475,5 +476,6 @@ class CatalogRepo:
                 event_type=event_type,
                 payload=payload,
                 occurred_at=now,
+                traceparent=current_traceparent(),
             )
         )

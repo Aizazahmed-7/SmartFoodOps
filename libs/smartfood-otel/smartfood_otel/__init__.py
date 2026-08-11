@@ -7,9 +7,15 @@ for the real OpenTelemetry SDK without changing this surface.
 
 from .logging import bind_order, get_logger, setup_logging
 from .middleware import REQUEST_ID_HEADER, RequestContextMiddleware
-from .propagation import extract_traceparent, make_traceparent, trace_id_of
+from .propagation import (
+    current_traceparent,
+    extract_traceparent,
+    make_traceparent,
+    trace_id_of,
+)
 
 __all__ = [
+    "current_traceparent",
     "REQUEST_ID_HEADER",
     "RequestContextMiddleware",
     "bind_order",

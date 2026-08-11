@@ -128,4 +128,7 @@ outbox = sa.Table(
     sa.Column("payload", sa.JSON, nullable=False),
     sa.Column("occurred_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("published_at", sa.TIMESTAMP(timezone=True), nullable=True, index=True),
+    # W3C trace context captured at staging; the poller lifts it into Kafka
+    # headers so the async hop stays stitched in Jaeger (docs §12).
+    sa.Column("traceparent", sa.Text, nullable=True),
 )

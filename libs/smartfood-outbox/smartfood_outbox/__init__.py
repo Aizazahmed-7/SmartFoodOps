@@ -8,6 +8,10 @@ poller can never mint a second identity for the same fact.
 
 import uuid
 
+from .poller import OutboxPoller
+
+__all__ = ["OutboxPoller", "event_id"]
+
 # Fixed project namespace — NEVER change it: event ids must stay stable
 # across deploys, or every consumer's dedupe store silently resets.
 _NAMESPACE = uuid.UUID("b6a7e2d4-9c41-4f5a-8f37-2f8f0a6e1c93")

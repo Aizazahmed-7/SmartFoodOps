@@ -9,10 +9,27 @@ the real OTel SDK; the header format is a standard, so nothing else changes.
 import re
 import secrets
 from collections.abc import Mapping
+from contextvars import ContextVar
 
 _TRACEPARENT_RE = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$")
 
 HEADER = "traceparent"
+
+# Request-scoped, set by RequestContextMiddleware. A plain ContextVar (not a
+# structlog contextvar) on purpose: log lines already carry trace_id; the
+# full traceparent is transport context for outbox rows / Kafka headers,
+# not log noise.
+_current_traceparent: ContextVar[str | None] = ContextVar("traceparent", default=None)
+
+
+def current_traceparent() -> str | None:
+    """The active request's traceparent — None outside a request (pollers,
+    consumers, startup)."""
+    return _current_traceparent.get()
+
+
+def set_current_traceparent(traceparent: str) -> None:
+    _current_traceparent.set(traceparent)
 
 
 def make_traceparent() -> str:

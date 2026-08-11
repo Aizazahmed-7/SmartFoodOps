@@ -255,3 +255,17 @@ async def test_event_ids_are_deterministic_and_distinct():
         event_id("order", "rst_1", 1, "RestaurantCreated"),
     }
     assert len(ids) == 5
+
+
+async def test_staged_events_carry_the_traceparent(grants, cache):
+    """The async hop stays stitched: whatever traceparent the middleware set
+    for the request lands on the outbox row (docs §12)."""
+    from smartfood_otel.propagation import set_current_traceparent
+
+    svc, sessions = await _service(grants, cache)
+    tp = "00-" + "12" * 16 + "-" + "34" * 8 + "-01"
+    set_current_traceparent(tp)
+    r, _ = await _create(svc)
+    async with sessions() as s:
+        row = (await s.execute(sa.select(outbox))).one()
+    assert row.traceparent == tp

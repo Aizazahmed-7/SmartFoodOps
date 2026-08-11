@@ -122,7 +122,7 @@ Profiles: **core** (infra), **cdc** (Debezium — deliberately split out, it cos
 | core | redis:7 | 6379 | Single node; identical keys/TTLs/Lua as prod |
 | core | rabbitmq:3-management | 5672 / 15672 | Celery broker / management UI |
 | core | Kafka (KRaft, single broker) | **19092** | Dual listeners: `kafka:9092` in-network, `localhost:19092` from host — see §12 |
-| core | Confluent Schema Registry | 8081 | |
+| core | Confluent Schema Registry | **8086** (host) → 8081 (in-network) | host-remapped: another local project intermittently serves 8081 on this machine; services use `http://schema-registry:8081` unchanged |
 | core | Temporal dev server + UI | 7233 / 8233 | SQLite-persisted history (survives restarts) |
 | core | LocalStack (DynamoDB + Streams) | 4566 | |
 | core | mock-psp | 9080 | Failure-injection knobs, §9 |

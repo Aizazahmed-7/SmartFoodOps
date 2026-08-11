@@ -1,7 +1,7 @@
 """Identity service — issues the tokens the rest of the platform trusts."""
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers
@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 
 from .api.routes import router
 from .config import Settings
+from .consumers import CatalogChangesConsumer
 from .db import metadata
 from .domain.service import IdentityService
 from .keys import load_or_generate
@@ -30,7 +31,9 @@ def _run_migrations(database_url: str) -> None:  # pragma: no cover — Postgres
     command.upgrade(cfg, "head")
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, *, consumer: CatalogChangesConsumer | None = None
+) -> FastAPI:
     settings = settings or Settings()
     setup_logging("identity")
 
@@ -47,7 +50,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             # Alembic manages its own (sync) connection; run it off the event loop.
             await asyncio.to_thread(_run_migrations, settings.database_url)  # pragma: no cover
+        consumer_task: asyncio.Task[None] | None = None
+        live_consumer = consumer
+        if live_consumer is None and settings.kafka_consumers == "on":  # pragma: no cover
+            # Real Kafka wiring — exercised by the live smoke, not the unit suite.
+            from aiokafka import AIOKafkaConsumer  # pyright: ignore[reportMissingTypeStubs]
+            from smartfood_kafka import AvroSerde, SchemaRegistry
+
+            from .consumers import GROUP, GrantConvergenceHandler
+
+            live_consumer = CatalogChangesConsumer(
+                AIOKafkaConsumer(
+                    f"{settings.cell_id}.catalog.changes",
+                    group_id=GROUP,
+                    bootstrap_servers=settings.kafka_bootstrap,
+                    enable_auto_commit=False,
+                    auto_offset_reset="earliest",
+                ),
+                AvroSerde(SchemaRegistry(settings.schema_registry_url)),
+                GrantConvergenceHandler(sessions, app.state.service),
+            )
+        if live_consumer is not None:
+            consumer_task = asyncio.create_task(live_consumer.run())
         yield
+        if consumer_task is not None:
+            consumer_task.cancel()  # cancellation is the consumer's shutdown signal
+            with suppress(asyncio.CancelledError):
+                await consumer_task
         await engine.dispose()
 
     app = FastAPI(title="identity", lifespan=lifespan)

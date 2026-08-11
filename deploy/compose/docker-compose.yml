@@ -17,6 +17,8 @@ x-app-base: &app-base
     KAFKA_BOOTSTRAP: kafka:9092
     TEMPORAL_ADDRESS: temporal:7233
     OUTBOX_MODE: poller
+    SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    KAFKA_CONSUMERS: "on"
     AWS_ENDPOINT_URL: http://localstack:4566
     AWS_ACCESS_KEY_ID: test
     AWS_SECRET_ACCESS_KEY: test
@@ -36,6 +38,19 @@ x-app-base: &app-base
 
 services:
   # ── core profile ────────────────────────────────────────────────
+  schema-registry:
+    profiles: [core]
+    image: confluentinc/cp-schema-registry:7.6.1
+    # Host 8086 (another local project intermittently serves 8081 on this
+    # machine); in-network stays schema-registry:8081.
+    ports: ["8086:8081"]
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+    depends_on:
+      kafka: { condition: service_healthy }
+
   postgres:
     profiles: [core]
     image: postgres:15

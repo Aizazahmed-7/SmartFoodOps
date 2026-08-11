@@ -47,3 +47,14 @@ refresh_tokens = sa.Table(
     sa.Column("revoked", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
 )
+
+# Consumer-side dedupe (ADR-0018): one row per (group, event) ever processed.
+# The grant operation is idempotent anyway — this table suppresses replay
+# noise and makes at-least-once delivery observable.
+processed_events = sa.Table(
+    "processed_events",
+    metadata,
+    sa.Column("consumer_group", sa.Text, primary_key=True),
+    sa.Column("event_id", sa.Text, primary_key=True),
+    sa.Column("processed_at", sa.TIMESTAMP(timezone=True), nullable=False),
+)
