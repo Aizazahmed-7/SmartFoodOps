@@ -28,11 +28,13 @@ down:
 nuke: ## Down + delete all volumes (fresh start)
 	$(COMPOSE) --profile core --profile apps down -v
 
+# Profile flags are required even for logs: compose can't resolve a
+# profile-gated service (or its depends_on chain) without them.
 logs: ## Tail logs (SVC=order for one service)
 ifdef SVC
-	$(COMPOSE) logs -f $(SVC)
+	$(COMPOSE) --profile core --profile apps --profile ui logs -f $(SVC)
 else
-	$(COMPOSE) logs -f
+	$(COMPOSE) --profile core --profile apps --profile ui logs -f
 endif
 
 psql: ## Shell into a service DB: make psql DB=order_db
