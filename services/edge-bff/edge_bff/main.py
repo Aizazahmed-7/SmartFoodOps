@@ -6,17 +6,21 @@ no database — deliberately thin so it scales as N identical tasks.
 """
 
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 import jwt as pyjwt
 import structlog
 from fastapi import FastAPI, Request, Response
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse
 from smartfood_api import ApiError, install_error_handlers
 from smartfood_auth import STRIP_HEADERS, JwksVerifier, context_from_claims, headers_for
 from smartfood_otel import RequestContextMiddleware, get_logger, setup_logging
 
 from .config import Settings
-from .routing import match, needs_auth
+from .openapi import merge_specs
+from .routing import RULES, match, needs_auth
 
 log = get_logger("edge-bff")
 
@@ -55,13 +59,50 @@ def create_app(
         yield
         await http_client.aclose()
 
-    app = FastAPI(title="edge-bff", lifespan=lifespan)
+    # Default docs disabled: they would describe the edge itself (a catch-all
+    # proxy — useless). /docs + /openapi.json below serve the MERGED spec.
+    app = FastAPI(
+        title="edge-bff", lifespan=lifespan,
+        openapi_url=None, docs_url=None, redoc_url=None,
+    )
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok", "service": "edge-bff"}
+
+    # ── the FE's single API contract (edge_bff/openapi.py) ─────────
+
+    upstreams = sorted({rule.upstream for rule in RULES})  # allowlist = sources
+
+    async def _build_spec() -> dict[str, Any]:
+        specs: dict[str, dict[str, Any]] = {}
+        missing: list[str] = []
+        for upstream in upstreams:
+            try:
+                resp = await http_client.get(getattr(settings, upstream) + "/openapi.json")
+                resp.raise_for_status()
+                specs[upstream] = resp.json()
+            except (httpx.HTTPError, ValueError):
+                missing.append(upstream)  # partial docs beat no docs
+        return merge_specs(specs, missing)
+
+    @app.get("/openapi.json")
+    async def merged_openapi(request: Request) -> dict[str, Any]:
+        cached = getattr(app.state, "merged_spec", None)
+        if cached is None or "refresh" in request.query_params:
+            spec = await _build_spec()
+            # Cache only a COMPLETE doc — a partial one (some upstream down
+            # at fetch time) rebuilds per request until everyone is back.
+            if "x-unavailable-upstreams" not in spec:
+                app.state.merged_spec = spec
+            return spec
+        return cached
+
+    @app.get("/docs")
+    async def swagger_ui() -> HTMLResponse:
+        return get_swagger_ui_html(openapi_url="/openapi.json", title="SmartFoodOps API")
 
     @app.api_route(
         "/{path:path}",

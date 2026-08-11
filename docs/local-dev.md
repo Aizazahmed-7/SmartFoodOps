@@ -147,6 +147,8 @@ Ports 8003 and 8004 are deliberately unused — the cart is client state (ADR-00
 
 Clients always target `http://localhost:8080` (nginx). Its path rules mirror the ALB exactly: `/ws/rider/*` → rider-gateway, `/sse/track/*` → tracking-gateway, default → edge-bff. Compose DNS names match ECS Service Connect names (`http://order.sfo.local:8000` pattern), so **zero code differs between compose and ECS**.
 
+**API docs for frontend work**: `http://localhost:8080/docs` (Swagger UI) / `http://localhost:8080/openapi.json` — the edge serves a **merged** spec: every service's OpenAPI, filtered to exactly what the gateway's allowlist routes (so `/v1/internal/*` never appears, and auth-required operations carry the bearer scheme). Cached once complete; `?refresh=1` rebuilds after a service adds endpoints. Per-service docs (`:8001/docs`, `:8002/docs`) remain for service-local debugging only — the FE contract is the merged one.
+
 ---
 
 ## 4. Slim mode — the daily workflow
