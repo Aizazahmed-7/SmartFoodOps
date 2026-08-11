@@ -2,7 +2,7 @@
 name = "order"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = ["fastapi>=0.115", "uvicorn>=0.32", "sqlalchemy[asyncio]>=2.0", "asyncpg>=0.30", "redis>=5.1", "temporalio>=1.7", "smartfood-auth", "smartfood-otel", "smartfood-outbox", "smartfood-idempotency", "smartfood-pricing"]
+dependencies = ["fastapi>=0.115", "uvicorn>=0.32", "sqlalchemy[asyncio]>=2.0", "asyncpg>=0.30", "redis>=5.1", "httpx>=0.27", "alembic>=1.13", "pydantic-settings>=2.5", "temporalio>=1.7", "smartfood-api", "smartfood-auth", "smartfood-kafka", "smartfood-otel", "smartfood-outbox", "smartfood-idempotency", "smartfood-pricing"]
 
 [build-system]
 requires = ["hatchling"]
@@ -12,7 +12,9 @@ build-backend = "hatchling.build"
 packages = ["order"]
 
 [tool.uv.sources]
+smartfood-api = { workspace = true }
 smartfood-auth = { workspace = true }
+smartfood-kafka = { workspace = true }
 smartfood-otel = { workspace = true }
 smartfood-outbox = { workspace = true }
 smartfood-idempotency = { workspace = true }

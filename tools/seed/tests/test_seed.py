@@ -1,6 +1,6 @@
-"""The seeder against the REAL three-app chain in-process: seed → edge-bff
-(JWT verify + header stamping) → identity/catalog, including the real
-Catalog→Identity grant hop. The closest thing to `make seed` that runs
+"""The seeder against the REAL four-app chain in-process: seed → edge-bff
+(JWT verify + header stamping) → identity/catalog/inventory, including the
+real Catalog→Identity grant hop. The closest thing to `make seed` that runs
 without infrastructure."""
 
 from typing import Any
@@ -15,7 +15,9 @@ from edge_bff.main import create_app as create_edge
 from fastapi.testclient import TestClient
 from identity.config import Settings as IdentitySettings
 from identity.main import create_app as create_identity
-from seed.main import CITIES, TEMPLATES, SeedError, seed
+from inventory.config import Settings as InventorySettings
+from inventory.main import create_app as create_inventory
+from seed.main import CITIES, PASSWORD, SEED_STOCK, TEMPLATES, SeedError, seed
 from smartfood_auth import JwksVerifier
 
 
@@ -69,11 +71,21 @@ def edge(tmp_path):
         cache=_NullCache(),
         search=_NullSearch(),
     )
-    router = HostRouter({"identity.test": identity_app, "catalog.test": catalog_app})
+    inventory_app = create_inventory(
+        InventorySettings(database_url="sqlite+aiosqlite://", create_all=True)
+    )
+    router = HostRouter(
+        {
+            "identity.test": identity_app,
+            "catalog.test": catalog_app,
+            "inventory.test": inventory_app,
+        }
+    )
     edge_app = create_edge(
         EdgeSettings(
             identity_base_url="http://identity.test",
             catalog_base_url="http://catalog.test",
+            inventory_base_url="http://inventory.test",
             identity_jwks_url="http://identity.test/.well-known/jwks.json",
             token_issuer="http://identity.test",
         ),
@@ -85,8 +97,13 @@ def edge(tmp_path):
             http=httpx.AsyncClient(transport=router),
         ),
     )
-    # TestClient contexts run all three lifespans (create_all etc.).
-    with TestClient(identity_app), TestClient(catalog_app), TestClient(edge_app):
+    # TestClient contexts run all four lifespans (create_all etc.).
+    with (
+        TestClient(identity_app),
+        TestClient(catalog_app),
+        TestClient(inventory_app),
+        TestClient(edge_app),
+    ):
         yield edge_app
 
 
@@ -132,11 +149,54 @@ async def test_seed_creates_everything_then_replays_clean(edge):
         assert groups["Add-ons"]["min_select"] == 0
         assert groups["Add-ons"]["max_select"] == 3
 
+        # STRICT stock: every seeded item is stocked through the real
+        # inventory API (owner's own bearer token, via the edge).
+        login = await client.post(
+            "/v1/auth/login",
+            json={
+                "email": "owner-springfield-biryani-house@demo.smartfood.dev",
+                "password": PASSWORD,
+            },
+        )
+        bearer = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        stock_url = f"/v1/inventory/restaurants/{biryani['id']}/stock"
+        rows = (await client.get(stock_url, headers=bearer)).json()["items"]
+        menu_item_count = sum(len(c["items"]) for c in menu["categories"])
+        assert len(rows) == menu_item_count
+        assert all(r["available"] == SEED_STOCK for r in rows)
+
+        # An admin's manual count must survive re-seeding.
+        touched = rows[0]["item_id"]
+        await client.put(f"{stock_url}/{touched}", json={"available": 5}, headers=bearer)
+
         # Idempotency: the second run creates NOTHING and changes nothing.
         second = await seed(client)
         assert second == {"created": 0, "replayed": expected}
         menu_after = (await client.get(f"/v1/menus/{biryani['id']}")).json()
         assert menu_after == menu  # same version, same content — untouched
+        rows_after = {
+            r["item_id"]: r["available"]
+            for r in (await client.get(stock_url, headers=bearer)).json()["items"]
+        }
+        assert rows_after[touched] == 5  # admin's change survived
+        assert all(v == SEED_STOCK for i, v in rows_after.items() if i != touched)
+
+        # An item added AFTER seeding (no stock row yet — the consumer isn't
+        # in this chain) gets topped up by the next replay.
+        cat_id = menu["categories"][0]["id"]
+        new_item = (
+            await client.post(
+                f"/v1/restaurants/{biryani['id']}/items",
+                json={"category_id": cat_id, "name": "Late Addition", "price_cents": 500},
+                headers=bearer,
+            )
+        ).json()
+        await seed(client)
+        rows_final = {
+            r["item_id"]: r["available"]
+            for r in (await client.get(stock_url, headers=bearer)).json()["items"]
+        }
+        assert rows_final[new_item["id"]] == SEED_STOCK
 
 
 async def test_seed_fails_loudly_on_broken_gateway():

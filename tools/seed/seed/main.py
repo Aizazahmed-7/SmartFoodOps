@@ -21,6 +21,11 @@ import httpx
 
 PASSWORD = "demo1234demo"  # every demo login, per docs/local-dev.md
 
+# STRICT stock (Inventory, W2): items are born at 0 and cannot sell until
+# stocked. Seed stocks every item so demo orders can actually validate.
+SEED_STOCK = 100
+SEED_CAPACITY = 20
+
 # Three modifier shapes so the UI's every path has data:
 # required radio (SIZE), optional radio (SPICE), multi-select (ADDONS).
 SIZE = [
@@ -573,8 +578,12 @@ async def _seed_restaurant(client: httpx.AsyncClient, template: dict[str, Any]) 
 
     menu = _expect(await client.get(f"/v1/menus/{restaurant_id}"), 200)
     if menu["categories"]:
-        return False  # already seeded — replays change nothing
+        # Already seeded — replays change nothing the admin may have touched;
+        # stock is only topped up where it is verifiably untouched (0 @ v0).
+        await _ensure_stock(client, admin, restaurant_id, menu)
+        return False
 
+    created_item_ids: list[str] = []
     for rank, (category_name, items) in enumerate(template["menu"].items()):
         category = _expect(
             await client.post(
@@ -585,7 +594,7 @@ async def _seed_restaurant(client: httpx.AsyncClient, template: dict[str, Any]) 
             201,
         )
         for item_rank, (item_name, price_cents, description, tags, groups) in enumerate(items):
-            _expect(
+            item = _expect(
                 await client.post(
                     f"/v1/restaurants/{restaurant_id}/items",
                     json={
@@ -601,7 +610,51 @@ async def _seed_restaurant(client: httpx.AsyncClient, template: dict[str, Any]) 
                 ),
                 201,
             )
+            created_item_ids.append(item["id"])
+
+    for item_id in created_item_ids:
+        _expect(
+            await client.put(
+                f"/v1/inventory/restaurants/{restaurant_id}/stock/{item_id}",
+                json={"available": SEED_STOCK},
+                headers=admin,
+            ),
+            200,
+        )
+    _expect(
+        await client.put(
+            f"/v1/inventory/restaurants/{restaurant_id}/capacity",
+            json={"capacity": SEED_CAPACITY},
+            headers=admin,
+        ),
+        200,
+    )
     return True
+
+
+async def _ensure_stock(
+    client: httpx.AsyncClient, admin: dict[str, str], restaurant_id: str, menu: dict[str, Any]
+) -> None:
+    """Replay path: stock only items that are verifiably untouched
+    (available 0 at version 0 — never PUT by an admin, or missing entirely).
+    An admin's counts and capacity survive re-seeding."""
+    current = _expect(
+        await client.get(f"/v1/inventory/restaurants/{restaurant_id}/stock", headers=admin),
+        200,
+    )
+    by_id = {row["item_id"]: row for row in current["items"]}
+    menu_item_ids = [item["id"] for category in menu["categories"] for item in category["items"]]
+    for item_id in menu_item_ids:
+        row = by_id.get(item_id)
+        if row is None or (row["available"] == 0 and row["version"] == 0):
+            _expect(
+                await client.put(
+                    f"/v1/inventory/restaurants/{restaurant_id}/stock/{item_id}",
+                    json={"available": SEED_STOCK},
+                    headers=admin,
+                ),
+                200,
+            )
 
 
 async def seed(client: httpx.AsyncClient) -> dict[str, int]:

@@ -31,8 +31,11 @@ strict = [
     "libs/smartfood-auth/smartfood_auth",
     "libs/smartfood-otel/smartfood_otel",
     "libs/smartfood-outbox/smartfood_outbox",
+    "libs/smartfood-pricing/smartfood_pricing",
     "services/identity/identity/domain",
     "services/catalog/catalog/domain",
+    "services/inventory/inventory/domain",
+    "services/order/order/domain",
 ]
 reportUnusedFunction = false  # false-positives on decorator-registered handlers
 # Resolve workspace libs to their SOURCE (py.typed) rather than through the
@@ -43,6 +46,7 @@ extraPaths = [
     "libs/smartfood-kafka",
     "libs/smartfood-otel",
     "libs/smartfood-outbox",
+    "libs/smartfood-pricing",
 ]
 pythonVersion = "3.12"
 venvPath = "."

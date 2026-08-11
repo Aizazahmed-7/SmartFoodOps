@@ -96,10 +96,15 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
       interval: 5s
       timeout: 10s
       retries: 20
@@ -111,8 +116,16 @@ services:
     ports: ["7233:7233", "8233:8233"]
     entrypoint: ["temporal"]
     command:
-      ["server", "start-dev", "--ip", "0.0.0.0", "--ui-port", "8233",
-       "--db-filename", "/data/temporal.db"]
+      [
+        "server",
+        "start-dev",
+        "--ip",
+        "0.0.0.0",
+        "--ui-port",
+        "8233",
+        "--db-filename",
+        "/data/temporal.db",
+      ]
     volumes:
       - temporal-data:/data
 
@@ -136,8 +149,20 @@ services:
       TIMEOUT_RATE: "0.0"
       UNKNOWN_OUTCOME_RATE: "0.0"
       LATENCY_MS_P50: "40"
-    command: ["uv", "run", "--package", "mock-psp", "uvicorn", "mock_psp.main:app",
-              "--host", "0.0.0.0", "--port", "9080", "--reload"]
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "mock-psp",
+        "uvicorn",
+        "mock_psp.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9080",
+        "--reload",
+      ]
     depends_on: {}
 
   gateway:
@@ -156,8 +181,20 @@ services:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/identity
       DATABASE_URL: postgresql+asyncpg://identity_svc:identity_svc@postgres:5432/identity_db
-    command: ["uv", "run", "--package", "identity", "uvicorn", "identity.main:app",
-              "--host", "0.0.0.0", "--port", "8001", "--reload"]
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "identity",
+        "uvicorn",
+        "identity.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8001",
+        "--reload",
+      ]
 
   catalog:
     <<: *app-base
@@ -167,8 +204,20 @@ services:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/catalog
       DATABASE_URL: postgresql+asyncpg://catalog_svc:catalog_svc@postgres:5432/catalog_db
-    command: ["uv", "run", "--package", "catalog", "uvicorn", "catalog.main:app",
-              "--host", "0.0.0.0", "--port", "8002", "--reload"]
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "catalog",
+        "uvicorn",
+        "catalog.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8002",
+        "--reload",
+      ]
 
   inventory:
     <<: *app-base
@@ -178,8 +227,20 @@ services:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/inventory
       DATABASE_URL: postgresql+asyncpg://inventory_svc:inventory_svc@postgres:5432/inventory_db
-    command: ["uv", "run", "--package", "inventory", "uvicorn", "inventory.main:app",
-              "--host", "0.0.0.0", "--port", "8005", "--reload"]
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "inventory",
+        "uvicorn",
+        "inventory.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8005",
+        "--reload",
+      ]
 
   order:
     <<: *app-base
@@ -189,8 +250,20 @@ services:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/order
       DATABASE_URL: postgresql+asyncpg://order_svc:order_svc@postgres:5432/order_db
-    command: ["uv", "run", "--package", "order", "uvicorn", "order.main:app",
-              "--host", "0.0.0.0", "--port", "8006", "--reload"]
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "order",
+        "uvicorn",
+        "order.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8006",
+        "--reload",
+      ]
 
   order-worker:
     <<: *app-base
@@ -209,8 +282,20 @@ services:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/payment
       DATABASE_URL: postgresql+asyncpg://payment_svc:payment_svc@postgres:5432/payment_db
-    command: ["uv", "run", "--package", "payment", "uvicorn", "payment.main:app",
-              "--host", "0.0.0.0", "--port", "8007", "--reload"]
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "payment",
+        "uvicorn",
+        "payment.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8007",
+        "--reload",
+      ]
 
   edge-bff:
     <<: *app-base
@@ -219,8 +304,20 @@ services:
     environment:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/edge-bff
-    command: ["uv", "run", "--package", "edge-bff", "uvicorn", "edge_bff.main:app",
-              "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "edge-bff",
+        "uvicorn",
+        "edge_bff.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
 
   # ── ui profile — management consoles ────────────────────────────
   # Postgres has no container UI on purpose: connect your desktop pgAdmin

@@ -49,6 +49,7 @@ Seed catalog (grows only via PR):
 | `ORDER_ALREADY_DECIDED` | 409 | Restaurant decision repeated with a different verdict |
 | `ITEM_UNAVAILABLE` | 409 | Menu item 86'd or stock reservation failed |
 | `RESTAURANT_AT_CAPACITY` | 409 | Capacity gate rejected placement |
+| `RESTAURANT_CLOSED` | 409 | Restaurant paused/closed — not taking orders right now |
 | `PRICE_CHANGED` | 409 | Quote/placement price mismatch (diff in `details`) |
 | `PAYMENT_DECLINED` | 402 | Mock-PSP authorization declined (ADR-0010) |
 | `RATE_LIMITED` | 429 | Per-class bucket exhausted (§6) |
@@ -141,9 +142,14 @@ Planned (build-plan weeks; each row is finalized when the endpoint lands):
 | GET `/v1/orders/{id}` | auth | – | READ | order | *(planned W2)* |
 | GET `/v1/orders` | auth | – | READ | order | *(planned W2)* — cursor-paginated history |
 | POST `/v1/orders/{id}/cancel` | auth | **required** | PLACEMENT | order | *(planned W2)* — signals the workflow |
-| POST `/v1/quote` | auth | – | READ | order | *(planned W2)* — pricing lib in-process, stateless |
+| POST `/v1/quote` | auth (customer or restaurant_admin — owners order dinner too) | – (stateless read) | READ | order | pricing lib in-process; self-heals version drift (response carries current `menu_version`); 409 `ITEM_UNAVAILABLE`/`RESTAURANT_CLOSED`, 422 selection violations, 503 when catalog is down |
 | POST `/v1/restaurant/orders/{id}/accept` · `/reject` | auth (restaurant role) | **required** | WRITE | order | *(planned W2)* — restaurant decision → workflow signal |
-| Inventory stock/reservation endpoints | auth | per-endpoint | WRITE | inventory | *(planned W2)* — rows added when shapes land |
+| GET `/v1/inventory/restaurants/{rid}/stock` | auth (restaurant role) | – | READ | inventory | scope mismatch → 404; `{items: [{item_id, available, version}]}` |
+| PUT `/v1/inventory/restaurants/{rid}/stock/{item_id}` | auth (restaurant role) | – (PUT = absolute set, naturally idempotent) | WRITE | inventory | `{available 0..100000}`; upsert; foreign item → 404 |
+| PUT `/v1/inventory/restaurants/{rid}/capacity` | auth (restaurant role) | – (idempotent PUT) | WRITE | inventory | `{capacity 1..1000}`; lowering below `active` is legal — new orders stop, running ones drain |
+| POST `/v1/internal/reservations` | system-only, never edge-routed | – (reservation PK = order_id is the key) | n/a | inventory | all-or-nothing: capacity slot + every line, one tx; 201 created / 200 replay; 409 `ITEM_UNAVAILABLE` (per-line details) / `RESTAURANT_AT_CAPACITY` |
+| POST `/v1/internal/reservations/{order_id}/release` | system-only | – (guarded transition) | n/a | inventory | `{reason: cancelled\|expired}`; restores stock + slot; not-active → no-op |
+| POST `/v1/internal/reservations/{order_id}/commit` | system-only | – (guarded transition) | n/a | inventory | settlement: stock stays sold, slot frees; not-active → no-op |
 
 ---
 

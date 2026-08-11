@@ -20,6 +20,10 @@ up-lean: ## W1 working set (~4 GB) — skips temporal/localstack/rabbitmq/mock-p
 	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry gateway identity catalog edge-bff
 	@echo "✔ lean stack up — gateway http://localhost:8080 · frontend proxies here"
 
+up-m2: ## Inventory+Orders milestone working set (~6-7 GB): W1 set + temporal, mock-psp, inventory, order(+worker), payment
+	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal mock-psp gateway identity catalog edge-bff inventory order order-worker payment
+	@echo "✔ m2 stack up — gateway :8080 · temporal-ui :8233 · mock-psp :9080"
+
 up-full: up up-apps up-ui
 
 down:
@@ -51,8 +55,8 @@ test: ## Unit tests (no infra needed)
 cov: ## Unit tests + coverage report
 	uv sync --all-packages -q && uv run --no-sync pytest -q \
 		--cov=smartfood_api --cov=smartfood_auth --cov=smartfood_kafka --cov=smartfood_otel \
-		--cov=smartfood_outbox --cov=identity --cov=edge_bff --cov=catalog \
-		--cov=seed \
+		--cov=smartfood_outbox --cov=smartfood_pricing --cov=identity --cov=edge_bff \
+		--cov=catalog --cov=inventory --cov=order --cov=seed \
 		--cov-report=term-missing
 
 seed:
