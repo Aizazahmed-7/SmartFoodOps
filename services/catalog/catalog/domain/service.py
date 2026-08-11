@@ -17,6 +17,7 @@ The menu tree is deliberately dicts, not dataclasses: it is a document
 
 import asyncio
 import json
+import time
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import replace
@@ -461,7 +462,7 @@ class CatalogService:
             blob = await self._cache.get(_blob_key(restaurant_id, version))
             if blob is not None:
                 return json.loads(blob)
-            menu = await self._render_and_cache(restaurant_id)
+            menu = await self._render_and_cache(restaurant_id, reason="version_requested")
             if menu["version"] != version:
                 raise StaleMenuVersion
             return menu
@@ -473,9 +474,12 @@ class CatalogService:
             blob = await self._cache.get(_blob_key(restaurant_id, int(pointer)))
             if blob is not None:
                 return json.loads(blob)
-        return await self._render_and_cache(restaurant_id)
+            reason = "blob_expired"
+        else:
+            reason = "pointer_miss"
+        return await self._render_and_cache(restaurant_id, reason=reason)
 
-    async def _render_and_cache(self, restaurant_id: str) -> dict[str, Any]:
+    async def _render_and_cache(self, restaurant_id: str, *, reason: str) -> dict[str, Any]:
         """Singleflight render: one renderer per restaurant per 3s window;
         losers wait a beat and re-check, then render anyway — a lock must
         never fail a user. Writes blob THEN pointer: a crash between the two
@@ -483,6 +487,8 @@ class CatalogService:
         lock = _lock_key(restaurant_id)
         acquired = await self._cache.acquire_lock(lock, 3000)
         if not acquired:
+            # Rare enough to log at INFO; frequent lines here = lock contention.
+            log.info("waiting for concurrent menu render", restaurant_id=restaurant_id)
             await asyncio.sleep(0.05)
             pointer = await self._cache.get(_ptr_key(restaurant_id))
             if pointer is not None:
@@ -490,6 +496,7 @@ class CatalogService:
                 if blob is not None:
                     return json.loads(blob)
         try:
+            started = time.perf_counter()
             async with self._sessions() as session:
                 restaurant, menu = await self._consistent_read(CatalogRepo(session), restaurant_id)
             doc = {
@@ -502,6 +509,15 @@ class CatalogService:
             payload = json.dumps(doc)
             await self._cache.set(_blob_key(restaurant_id, restaurant.version), payload, 86400)
             await self._cache.set(_ptr_key(restaurant_id), str(restaurant.version), 604800)
+            # The miss-that-cost-something: one line per menu edit or TTL
+            # expiry. Absence of these between requests = cache is serving.
+            log.info(
+                "menu rendered",
+                restaurant_id=restaurant_id,
+                version=restaurant.version,
+                reason=reason,
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
             return doc
         finally:
             if acquired:

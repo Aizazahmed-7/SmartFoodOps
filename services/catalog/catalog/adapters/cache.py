@@ -27,6 +27,7 @@ class RedisCache:
             # a live-debugging session (network-detached redis container).
             log.warning("cache get failed — treating as miss", key=key, error=str(exc))
             return None
+        log.debug("cache get", key=key, outcome="miss" if value is None else "hit")
         # decode_responses=True gives str, but the client type can't promise
         # it — normalize so a misconfigured client can't leak bytes upward.
         return value.decode() if isinstance(value, bytes) else value

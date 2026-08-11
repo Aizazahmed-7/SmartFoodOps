@@ -16,7 +16,8 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import sqlalchemy as sa
-from smartfood_otel import get_logger
+import structlog
+from smartfood_otel import get_logger, trace_id_of
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -104,6 +105,16 @@ class CatalogChangesConsumer:
         await self._client.start()
         try:
             async for message in self._client:
+                # Rebind the producer's trace context from the Kafka headers:
+                # the consumer's log lines join the SAME trace_id the original
+                # HTTP request logged under — grep crosses the async hop.
+                structlog.contextvars.clear_contextvars()
+                traceparent = next(
+                    (v.decode() for k, v in (message.headers or []) if k == "traceparent"),
+                    None,
+                )
+                if traceparent and (trace_id := trace_id_of(traceparent)):
+                    structlog.contextvars.bind_contextvars(trace_id=trace_id)
                 event = await self._serde.decode(message.value)
                 await self._handler.handle(event)
                 await self._client.commit()

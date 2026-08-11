@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -58,7 +59,30 @@ async def ctx() -> dict:
     return dict(structlog.contextvars.get_contextvars())
 
 
+@app.get("/healthz")
+async def healthz() -> dict:
+    return {"status": "ok"}
+
+
+@app.get("/boom")
+async def boom() -> dict:
+    raise ValueError("boom")
+
+
 client = TestClient(app)
+
+
+def _events(capsys, event: str) -> list[dict]:
+    """Parse captured stdout as JSON log lines, keep the named event."""
+    rows = []
+    for line in capsys.readouterr().out.strip().splitlines():
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if parsed.get("event") == event:
+            rows.append(parsed)
+    return rows
 
 
 def test_request_id_minted_and_echoed():
@@ -80,6 +104,51 @@ def test_client_supplied_ids_are_kept():
 def test_malformed_traceparent_replaced_not_trusted():
     r = client.get("/ctx", headers={"traceparent": "not-a-traceparent"})
     assert len(r.json()["trace_id"]) == 32
+
+
+def test_every_request_emits_a_completed_line(capsys):
+    """The guaranteed per-hop grep match for a request_id/trace_id."""
+    setup_logging("access-test")
+    client.get("/ctx", headers={"X-Request-ID": "req-log-1"})
+    line = _events(capsys, "request completed")[-1]
+    assert line["method"] == "GET"
+    assert line["path"] == "/ctx"
+    assert line["status"] == 200
+    assert line["request_id"] == "req-log-1"  # correlation ids ride along
+    assert isinstance(line["duration_ms"], float)
+
+
+def test_healthchecks_stay_quiet(capsys):
+    setup_logging("access-test")
+    assert client.get("/healthz").status_code == 200
+    assert _events(capsys, "request completed") == []
+
+
+def test_crash_logs_500_and_reraises(capsys):
+    setup_logging("access-test")
+    with pytest.raises(ValueError):
+        client.get("/boom")
+    line = _events(capsys, "request completed")[-1]
+    assert line["path"] == "/boom"
+    assert line["status"] == 500
+
+
+def test_log_level_env_enables_debug(monkeypatch, capsys):
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    setup_logging("lvl-test")
+    get_logger().debug("dbg-visible")
+    assert any(
+        parsed.get("event") == "dbg-visible"
+        for line in capsys.readouterr().out.strip().splitlines()
+        if (parsed := json.loads(line))
+    )
+
+
+def test_log_level_unknown_name_falls_back_to_info(monkeypatch, capsys):
+    monkeypatch.setenv("LOG_LEVEL", "BANANA")
+    setup_logging("lvl-test")
+    get_logger().debug("dbg-hidden")
+    assert "dbg-hidden" not in capsys.readouterr().out
 
 
 def test_current_traceparent_outside_requests_is_none():

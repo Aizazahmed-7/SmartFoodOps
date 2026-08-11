@@ -4,15 +4,19 @@ Pure ASGI (no framework dependency): wraps any FastAPI/Starlette app. Per
 request it (1) clears stale context, (2) takes or mints X-Request-ID and
 traceparent, (3) binds request_id + trace_id into structlog's contextvars so
 every log line of this request carries them, (4) echoes X-Request-ID on the
-response so clients can quote it in bug reports.
+response so clients can quote it in bug reports, and (5) emits one
+"request completed" line — the guaranteed per-hop match when grepping a
+trace_id or request_id across services.
 """
 
+import time
 import uuid
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
 import structlog
 
+from .logging import get_logger
 from .propagation import (
     extract_traceparent,
     make_traceparent,
@@ -21,6 +25,12 @@ from .propagation import (
 )
 
 REQUEST_ID_HEADER = "x-request-id"
+
+# Docker healthchecks poll these every few seconds — logging them would
+# bury real traffic under heartbeat noise.
+_QUIET_PATHS = {"/healthz", "/readyz"}
+
+log = get_logger("smartfood-otel.access")
 
 # Pure-ASGI protocol types (framework-free by design — see module docstring).
 Scope = MutableMapping[str, Any]
@@ -52,11 +62,30 @@ class RequestContextMiddleware:
         scope.setdefault("state", {})
         scope["state"]["traceparent"] = traceparent
 
+        status: dict[str, int | None] = {"code": None}
+
         async def send_with_request_id(message: Message) -> None:
             if message["type"] == "http.response.start":
+                status["code"] = message["status"]
                 message.setdefault("headers", []).append(
                     (REQUEST_ID_HEADER.encode(), request_id.encode())
                 )
             await send(message)
 
-        await self.app(scope, receive, send_with_request_id)
+        started = time.perf_counter()
+        try:
+            await self.app(scope, receive, send_with_request_id)
+        except Exception:
+            # Response never started — the outer error boundary will 500.
+            status["code"] = 500
+            raise
+        finally:
+            path = scope.get("path", "")
+            if path not in _QUIET_PATHS:
+                log.info(
+                    "request completed",
+                    method=scope.get("method", ""),
+                    path=path,
+                    status=status["code"],
+                    duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                )

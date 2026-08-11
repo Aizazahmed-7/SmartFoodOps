@@ -6,18 +6,25 @@ against, so that swap changes no service code (docs §14).
 """
 
 import logging
+import os
 
 import structlog
 from structlog.typing import Processor
 
 
-def setup_logging(service: str, *, level: int = logging.INFO) -> None:
+def setup_logging(service: str, *, level: int | None = None) -> None:
     """Configure process-wide JSON logs: one line per event, UTC timestamps.
 
     Every line carries `service`, plus whatever the request middleware and
     bind_order() have put into context (request_id, trace_id, order_id) —
     that is what makes `grep order_id=... across services` work.
+
+    Level: explicit arg wins; else LOG_LEVEL env (e.g. DEBUG turns on the
+    per-op cache hit/miss lines); unknown names fall back to INFO.
     """
+    if level is None:
+        name = os.environ.get("LOG_LEVEL", "INFO").upper()
+        level = logging.getLevelNamesMapping().get(name, logging.INFO)
 
     def add_service(
         _logger: structlog.typing.WrappedLogger,

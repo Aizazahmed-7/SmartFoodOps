@@ -10,6 +10,7 @@ import asyncio
 
 import httpx
 from smartfood_auth import AuthContext, headers_for
+from smartfood_otel import current_traceparent
 
 from ..domain.ports import GrantRejected, GrantUnavailable
 
@@ -17,6 +18,15 @@ _HEADERS = {
     **headers_for(AuthContext(sub="svc:catalog", role="system")),
     "X-Internal-Caller": "catalog",
 }
+
+
+def _headers() -> dict[str, str]:
+    """Static identity headers + the caller's traceparent (when inside a
+    request) so the grant hop logs under the same trace_id at identity."""
+    headers = dict(_HEADERS)
+    if traceparent := current_traceparent():
+        headers["traceparent"] = traceparent
+    return headers
 
 
 class IdentityGrantsClient:
@@ -39,7 +49,7 @@ class IdentityGrantsClient:
             if attempt:
                 await asyncio.sleep(self._retry_delay * attempt)
             try:
-                resp = await self._http.post(self._url, json=body, headers=_HEADERS)
+                resp = await self._http.post(self._url, json=body, headers=_headers())
             except httpx.HTTPError:
                 continue  # network trouble — transient, retry
             if resp.status_code < 300:

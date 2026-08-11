@@ -86,7 +86,7 @@ async def test_drain_publishes_in_order_and_marks():
         sessions,
         outbox,
         topic="c1.catalog.changes",
-        producer=producer,  # type: ignore[arg-type]
+        producer=producer,
     )
     assert await poller.drain_once() == 3
     versions = [s["record"]["aggregate_version"] for s in producer.sent]
@@ -105,9 +105,29 @@ async def test_no_traceparent_means_no_header():
     sessions = await _sessions()
     await _stage(sessions, 1)  # traceparent NULL
     producer = StubProducer()
-    poller = OutboxPoller(sessions, outbox, topic="t", producer=producer)  # type: ignore[arg-type]
+    poller = OutboxPoller(sessions, outbox, topic="t", producer=producer)
     await poller.drain_once()
     assert producer.sent[0]["headers"] == []
+
+
+async def test_publish_log_line_carries_the_rows_trace_id(capsys):
+    """The line that lets `grep trace_id` cross the async hop."""
+    from smartfood_otel import setup_logging
+
+    sessions = await _sessions()
+    tp = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"  # valid W3C, unlike above
+    await _stage(sessions, 1, traceparent=tp)
+    setup_logging("outbox-test")
+    poller = OutboxPoller(sessions, outbox, topic="t", producer=StubProducer())
+    await poller.drain_once()
+    published = [
+        parsed
+        for line in capsys.readouterr().out.strip().splitlines()
+        if line.startswith("{") and (parsed := json.loads(line))
+        if parsed.get("event") == "outbox event published"
+    ]
+    assert published[0]["trace_id"] == "ab" * 16
+    assert published[0]["event_type"] == "ItemAdded"
 
 
 async def test_batch_size_bounds_each_pass():
@@ -119,7 +139,7 @@ async def test_batch_size_bounds_each_pass():
         outbox,
         topic="t",
         producer=producer,
-        batch_size=2,  # type: ignore[arg-type]
+        batch_size=2,
     )
     assert await poller.drain_once() == 2
     assert await _unpublished(sessions) == 3
@@ -130,7 +150,7 @@ async def test_failed_send_marks_nothing():
     sessions = await _sessions()
     await _stage(sessions, 2)
     producer = StubProducer(fail_times=1)
-    poller = OutboxPoller(sessions, outbox, topic="t", producer=producer)  # type: ignore[arg-type]
+    poller = OutboxPoller(sessions, outbox, topic="t", producer=producer)
     with pytest.raises(RuntimeError):
         await poller.drain_once()
     assert await _unpublished(sessions) == 2  # everything still queued
@@ -145,7 +165,7 @@ async def test_run_survives_failures_and_cancels_cleanly():
         outbox,
         topic="t",
         producer=producer,
-        interval=0.01,  # type: ignore[arg-type]
+        interval=0.01,
     )
     task = asyncio.create_task(poller.run())
     for _ in range(200):
@@ -174,7 +194,7 @@ async def test_cancellation_mid_drain_propagates():
         sessions,
         outbox,
         topic="t",
-        producer=BlockingProducer(),  # type: ignore[arg-type]
+        producer=BlockingProducer(),
     )
     task = asyncio.create_task(poller.run())
     await entered.wait()  # cancellation lands INSIDE drain_once

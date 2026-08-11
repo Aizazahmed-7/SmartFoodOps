@@ -45,6 +45,24 @@ async def test_success_stamps_system_identity():
     }
 
 
+async def test_traceparent_forwarded_only_inside_request_context():
+    from smartfood_otel.propagation import set_current_traceparent
+
+    tp = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
+    set_current_traceparent(tp)
+    client, calls = make([200])
+    await client.grant_restaurant_admin(user_id="u", restaurant_id="r")
+    # identity's middleware adopts this id → the grant hop logs under the
+    # SAME trace_id as the onboarding request that caused it.
+    assert calls["requests"][0].headers["traceparent"] == tp
+
+
+async def test_no_traceparent_header_outside_requests():
+    client, calls = make([200])  # module default: no request context set
+    await client.grant_restaurant_admin(user_id="u", restaurant_id="r")
+    assert "traceparent" not in calls["requests"][0].headers
+
+
 async def test_5xx_retries_then_succeeds():
     client, calls = make([500, 200])
     await client.grant_restaurant_admin(user_id="u", restaurant_id="r")

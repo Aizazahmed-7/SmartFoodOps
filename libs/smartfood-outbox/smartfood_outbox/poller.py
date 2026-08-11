@@ -21,7 +21,7 @@ from typing import Any, Protocol
 
 import sqlalchemy as sa
 from smartfood_kafka import DOMAIN_EVENT_SCHEMA, DOMAIN_EVENT_SUBJECT
-from smartfood_otel import get_logger
+from smartfood_otel import get_logger, trace_id_of
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -106,6 +106,17 @@ class OutboxPoller:
                     key=row.aggregate_id,
                     record=_record(row, self._cell_id),
                     headers=([("traceparent", traceparent.encode())] if traceparent else []),
+                )
+                # The poller runs outside any request, so the row's stored
+                # traceparent is stamped explicitly — this line is what makes
+                # `grep trace_id` cross the async hop.
+                trace_id = trace_id_of(traceparent) if traceparent else None
+                log.info(
+                    "outbox event published",
+                    event_id=row.id,
+                    event_type=row.event_type,
+                    topic=self._topic,
+                    **({"trace_id": trace_id} if trace_id else {}),
                 )
             # Mark only after EVERY send in the batch was broker-confirmed —
             # a crash mid-batch re-sends the whole batch (dedupe absorbs it).

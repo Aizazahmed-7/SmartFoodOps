@@ -1,6 +1,8 @@
 """Slice 5 branches: blob/pointer caching, write ordering, invalidation,
 version addressing, singleflight, browse filters + page cache, cache-down."""
 
+import json
+
 from catalog.domain.service import _blob_key, _lock_key, _ptr_key
 from smartfood_auth import AuthContext, headers_for
 
@@ -102,12 +104,42 @@ def test_versioned_unknown_restaurant_is_404(client):
     assert client.get("/v1/menus/rst_ghost", params={"v": 1}).status_code == 404
 
 
-def test_singleflight_loser_never_releases_foreign_lock(client, cache):
+def test_singleflight_loser_never_releases_foreign_lock(client, cache, capsys):
     rid, _, _ = seed_menu(client)
     cache.locks.add(_lock_key(rid))  # someone else is rendering
+    capsys.readouterr()
     r = client.get(f"/v1/menus/{rid}")
     assert r.status_code == 200  # waited, then rendered anyway — never blocked
     assert _lock_key(rid) in cache.locks  # the winner's lock was NOT released
+    # Contention is logged: frequent lines here = lock contention signal.
+    assert "waiting for concurrent menu render" in capsys.readouterr().out
+
+
+def test_render_reasons_are_logged(client, cache, capsys):
+    """Each fall-through to Postgres says WHY: the log's answer to
+    'was the cache hit, and if not, what was missing?'"""
+    rid, _, _ = seed_menu(client)  # last mutation deleted the pointer
+    capsys.readouterr()  # discard seeding noise
+
+    version = client.get(f"/v1/menus/{rid}").json()["version"]  # cold read
+    del cache.data[_blob_key(rid, version)]  # blob TTL "expired", ptr survives
+    client.get(f"/v1/menus/{rid}")
+    cache.data.clear()  # everything gone; ask for the version explicitly
+    assert client.get(f"/v1/menus/{rid}", params={"v": version}).status_code == 200
+
+    rendered = [
+        parsed
+        for line in capsys.readouterr().out.strip().splitlines()
+        if line.startswith("{") and (parsed := json.loads(line))
+        if parsed.get("event") == "menu rendered"
+    ]
+    assert [entry["reason"] for entry in rendered] == [
+        "pointer_miss",
+        "blob_expired",
+        "version_requested",
+    ]
+    assert all(entry["version"] == version for entry in rendered)
+    assert all(isinstance(entry["duration_ms"], float) for entry in rendered)
 
 
 # ── browse ─────────────────────────────────────────────────────────
