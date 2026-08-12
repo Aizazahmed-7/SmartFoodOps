@@ -126,6 +126,15 @@ class IdentityRepo:
             ).all()
         )
 
+    async def get_address(self, *, user_id: str, address_id: str) -> Row[Any] | None:
+        # Ownership lives in the query: wrong owner → None → 404 (docs §5.2).
+        result = await self._s.execute(
+            sa.select(addresses).where(
+                (addresses.c.id == address_id) & (addresses.c.user_id == user_id)
+            )
+        )
+        return result.one_or_none()
+
     async def delete_address(self, *, user_id: str, address_id: str) -> int:
         # Ownership lives in the query: wrong owner → 0 rows (docs §5.2).
         result = await self._s.execute(

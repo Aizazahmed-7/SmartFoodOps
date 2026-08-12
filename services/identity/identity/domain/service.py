@@ -240,6 +240,18 @@ class IdentityService:
                 for r in rows
             ]
 
+    async def get_address(self, user_id: str, address_id: str) -> Address:
+        """Internal read for order placement (system callers): the address
+        must belong to the given user — a foreign id is a 404, same as
+        absent (no existence leaks, even between services)."""
+        async with self._sessions() as session:
+            row = await IdentityRepo(session).get_address(user_id=user_id, address_id=address_id)
+            if row is None:
+                raise AddressNotFound
+            return Address(
+                id=row.id, label=row.label, line1=row.line1, city=row.city, lat=row.lat, lon=row.lon
+            )
+
     async def delete_address(self, user_id: str, address_id: str) -> None:
         async with self._sessions() as session:
             rowcount = await IdentityRepo(session).delete_address(

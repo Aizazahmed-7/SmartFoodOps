@@ -196,3 +196,16 @@ async def delete_address(address_id: str, ctx: Auth, request: Request) -> None:
         await _svc(request).delete_address(ctx.sub, address_id)
     except AddressNotFound:
         raise ApiError("NOT_FOUND", "not found", 404) from None
+
+
+@router.get("/v1/internal/users/{user_id}/addresses/{address_id}")
+async def internal_get_address(
+    user_id: str, address_id: str, ctx: SystemOnly, request: Request
+) -> AddressOut:
+    """Order placement resolves the delivery address server-side (the
+    request carries IDs only — never client-asserted address content)."""
+    try:
+        address = await _svc(request).get_address(user_id, address_id)
+    except AddressNotFound:
+        raise ApiError("NOT_FOUND", "not found", 404) from None
+    return AddressOut.model_validate(address, from_attributes=True)

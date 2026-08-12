@@ -293,3 +293,40 @@ async def test_refresh_for_vanished_user_rejected(tmp_path):
         await s.commit()
     with pytest.raises(InvalidRefreshToken):
         await svc.refresh(pair.refresh_token)
+
+
+def test_internal_address_read_for_placement(client):
+    """Order placement's server-side address resolution: system-only,
+    ownership in the query (foreign/unknown → 404, same shape)."""
+    from smartfood_auth import AuthContext
+
+    headers = _login_headers(client)
+    created = client.post(
+        "/v1/me/addresses",
+        json={"label": "home", "line1": "12 Mango St", "city": "Springfield"},
+        headers=headers,
+    )
+    addr_id = created.json()["id"]
+    user_id = client.get("/v1/auth/me", headers=headers).json()["id"]
+
+    system = headers_for(AuthContext(sub="svc:order", role="system"))
+    r = client.get(f"/v1/internal/users/{user_id}/addresses/{addr_id}", headers=system)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == addr_id
+    assert body["line1"] == "12 Mango St"
+
+    # Someone ELSE's user_id with this address id → 404 (ownership in query).
+    assert (
+        client.get(f"/v1/internal/users/usr_other/addresses/{addr_id}", headers=system).status_code
+        == 404
+    )
+    # Unknown address → 404; non-system caller → 403.
+    assert (
+        client.get(f"/v1/internal/users/{user_id}/addresses/adr_ghost", headers=system).status_code
+        == 404
+    )
+    assert (
+        client.get(f"/v1/internal/users/{user_id}/addresses/{addr_id}", headers=headers).status_code
+        == 403
+    )

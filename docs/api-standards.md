@@ -138,9 +138,9 @@ Planned (build-plan weeks; each row is finalized when the endpoint lands):
 | GET `/v1/restaurants` | public_read | – | READ | catalog | *(planned W1)* |
 | GET `/v1/restaurants/{rid}` | public_read | – | READ | catalog | *(planned W1)* |
 | GET `/v1/menus/{rid}` | public_read | – | READ | catalog | *(planned W1)* — ETag = menu version |
-| POST `/v1/orders` | auth | **required** | PLACEMENT | order | *(planned W2)* — 202 `{order_id, status}`, saga does the rest |
-| GET `/v1/orders/{id}` | auth | – | READ | order | *(planned W2)* |
-| GET `/v1/orders` | auth | – | READ | order | *(planned W2)* — cursor-paginated history |
+| POST `/v1/orders` | auth (customer or restaurant_admin) | **required** (§4 in full: replay w/ `Idempotent-Replay: true`, reuse 422, in-progress 409; deterministic refusals release the key) | PLACEMENT | order | 202 `{order_id, status}`; one tx = order + line/address/pricing snapshots + OrderPlaced outbox + idempotency completion; saga start after commit |
+| GET `/v1/orders/{id}` | auth (customer or restaurant_admin) | – | READ | order | snapshots, not live menu; not-yours = 404 |
+| GET `/v1/orders` | auth (customer or restaurant_admin) | – | READ | order | keyset cursor (`[placed_at, order_id]` b64), limit ≤100 default 20 |
 | POST `/v1/orders/{id}/cancel` | auth | **required** | PLACEMENT | order | *(planned W2)* — signals the workflow |
 | POST `/v1/quote` | auth (customer or restaurant_admin — owners order dinner too) | – (stateless read) | READ | order | pricing lib in-process; self-heals version drift (response carries current `menu_version`); 409 `ITEM_UNAVAILABLE`/`RESTAURANT_CLOSED`, 422 selection violations, 503 when catalog is down |
 | POST `/v1/restaurant/orders/{id}/accept` · `/reject` | auth (restaurant role) | **required** | WRITE | order | *(planned W2)* — restaurant decision → workflow signal |

@@ -32,6 +32,7 @@ strict = [
     "libs/smartfood-otel/smartfood_otel",
     "libs/smartfood-outbox/smartfood_outbox",
     "libs/smartfood-pricing/smartfood_pricing",
+    "libs/smartfood-idempotency/smartfood_idempotency",
     "services/identity/identity/domain",
     "services/catalog/catalog/domain",
     "services/inventory/inventory/domain",
@@ -47,6 +48,7 @@ extraPaths = [
     "libs/smartfood-otel",
     "libs/smartfood-outbox",
     "libs/smartfood-pricing",
+    "libs/smartfood-idempotency",
 ]
 pythonVersion = "3.12"
 venvPath = "."
