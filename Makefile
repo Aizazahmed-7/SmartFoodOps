@@ -57,7 +57,7 @@ cov: ## Unit tests + coverage report
 		--cov=smartfood_api --cov=smartfood_auth --cov=smartfood_kafka --cov=smartfood_otel \
 		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency \
 		--cov=identity --cov=edge_bff \
-		--cov=catalog --cov=inventory --cov=order --cov=seed \
+		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=mock_psp --cov=seed \
 		--cov-report=term-missing
 
 seed:

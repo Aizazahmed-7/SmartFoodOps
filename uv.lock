@@ -569,6 +569,7 @@ source = { editable = "tools/mock-psp" }
 dependencies = [
     { name = "fastapi" },
     { name = "pydantic" },
+    { name = "pydantic-settings" },
     { name = "uvicorn" },
 ]
 
@@ -576,6 +577,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "pydantic", specifier = ">=2.9" },
+    { name = "pydantic-settings", specifier = ">=2.5" },
     { name = "uvicorn", specifier = ">=0.32" },
 ]
 
@@ -657,11 +659,15 @@ name = "payment"
 version = "0.1.0"
 source = { editable = "services/payment" }
 dependencies = [
+    { name = "alembic" },
     { name = "asyncpg" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "pydantic-settings" },
+    { name = "smartfood-api" },
     { name = "smartfood-auth" },
     { name = "smartfood-idempotency" },
+    { name = "smartfood-kafka" },
     { name = "smartfood-otel" },
     { name = "smartfood-outbox" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -670,11 +676,15 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "pydantic-settings", specifier = ">=2.5" },
+    { name = "smartfood-api", editable = "libs/smartfood-api" },
     { name = "smartfood-auth", editable = "libs/smartfood-auth" },
     { name = "smartfood-idempotency", editable = "libs/smartfood-idempotency" },
+    { name = "smartfood-kafka", editable = "libs/smartfood-kafka" },
     { name = "smartfood-otel", editable = "libs/smartfood-otel" },
     { name = "smartfood-outbox", editable = "libs/smartfood-outbox" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },

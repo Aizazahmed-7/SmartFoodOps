@@ -47,6 +47,7 @@ Seed catalog (grows only via PR):
 | `CATEGORY_NOT_EMPTY` | 409 | Deleting a menu category that still contains items — move or delete the items first |
 | `ORDER_NOT_CANCELLABLE` | 409 | Cancel after the cancellable window (e.g. post-pickup) |
 | `ORDER_ALREADY_DECIDED` | 409 | Restaurant decision repeated with a different verdict |
+| `ORDER_STATE_CONFLICT` | 409 | Lifecycle action doesn't fit the current state (capture w/o auth, /ready before /preparing) |
 | `ITEM_UNAVAILABLE` | 409 | Menu item 86'd or stock reservation failed |
 | `RESTAURANT_AT_CAPACITY` | 409 | Capacity gate rejected placement |
 | `RESTAURANT_CLOSED` | 409 | Restaurant paused/closed — not taking orders right now |
@@ -147,6 +148,7 @@ Planned (build-plan weeks; each row is finalized when the endpoint lands):
 | GET `/v1/inventory/restaurants/{rid}/stock` | auth (restaurant role) | – | READ | inventory | scope mismatch → 404; `{items: [{item_id, available, version}]}` |
 | PUT `/v1/inventory/restaurants/{rid}/stock/{item_id}` | auth (restaurant role) | – (PUT = absolute set, naturally idempotent) | WRITE | inventory | `{available 0..100000}`; upsert; foreign item → 404 |
 | PUT `/v1/inventory/restaurants/{rid}/capacity` | auth (restaurant role) | – (idempotent PUT) | WRITE | inventory | `{capacity 1..1000}`; lowering below `active` is legal — new orders stop, running ones drain |
+| POST `/v1/internal/payments/{order_id}/authorize` · `/capture` · `/void` · `/refund` | system-only, never edge-routed | money keys `{order_id}:{op}` via smartfood-idempotency (read-before-execute; PSP shares the same key) | n/a | payment | 402 `PAYMENT_DECLINED` stored+replayed; capture/refund amounts from the stored auth; 409 `ORDER_STATE_CONFLICT` on state mismatch |
 | POST `/v1/internal/reservations` | system-only, never edge-routed | – (reservation PK = order_id is the key) | n/a | inventory | all-or-nothing: capacity slot + every line, one tx; 201 created / 200 replay; 409 `ITEM_UNAVAILABLE` (per-line details) / `RESTAURANT_AT_CAPACITY` |
 | POST `/v1/internal/reservations/{order_id}/release` | system-only | – (guarded transition) | n/a | inventory | `{reason: cancelled\|expired}`; restores stock + slot; not-active → no-op |
 | POST `/v1/internal/reservations/{order_id}/commit` | system-only | – (guarded transition) | n/a | inventory | settlement: stock stays sold, slot frees; not-active → no-op |

@@ -37,6 +37,7 @@ strict = [
     "services/catalog/catalog/domain",
     "services/inventory/inventory/domain",
     "services/order/order/domain",
+    "services/payment/payment/domain",
 ]
 reportUnusedFunction = false  # false-positives on decorator-registered handlers
 # Resolve workspace libs to their SOURCE (py.typed) rather than through the
