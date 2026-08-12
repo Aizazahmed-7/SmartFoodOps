@@ -18,18 +18,43 @@ def test_app_builds_real_catalog_client_when_none_injected():
     # exiting the context ran the lifespan shutdown — own_http.aclose()
 
 
-def test_worker_skeleton_importable():
-    """The keep-alive skeleton's only contract until S5 lands the real
-    Temporal worker: importable, with a callable main."""
+def test_worker_module_importable():
+    """The worker module wires without a Temporal server present."""
     from order import worker
 
-    assert callable(worker.main)
+    assert callable(worker.main) and callable(worker.build_worker)
 
 
-async def test_saga_stub_logs_and_returns():
-    from order.adapters.saga_stub import SagaNotYetWired
+async def test_temporal_saga_starts_by_name_and_swallows_duplicates():
+    from order.adapters.temporal_client import TemporalSaga
+    from order.values import WorkflowInput
+    from temporalio.exceptions import WorkflowAlreadyStartedError
 
-    await SagaNotYetWired().start("ord_x")  # observable no-op until S5
+    class FakeClient:
+        def __init__(self):
+            self.calls: list = []
+
+        async def start_workflow(self, name, arg, *, id, task_queue, id_reuse_policy):
+            self.calls.append((name, arg, id, task_queue))
+            if len(self.calls) > 1:
+                raise WorkflowAlreadyStartedError(id, name)
+
+    fake = FakeClient()
+    saga = TemporalSaga(
+        "unused:7233",
+        task_queue="order-tq",
+        accept_timeout_s=180,
+        pickup_delay_s=20,
+        dropoff_delay_s=30,
+        client=fake,  # type: ignore[arg-type]
+    )
+    await saga.start("ord_1")
+    await saga.start("ord_1")  # duplicate — swallowed, not raised
+    name, arg, workflow_id, task_queue = fake.calls[0]
+    assert name == "OrderWorkflow"
+    assert isinstance(arg, WorkflowInput) and arg.order_id == "ord_1"
+    assert (workflow_id, task_queue) == ("ord::ord_1", "order-tq")
+    assert len(fake.calls) == 2
 
 
 def test_injected_poller_lives_and_dies_with_the_app():

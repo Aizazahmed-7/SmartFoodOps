@@ -85,6 +85,12 @@ class OrderRepo:
         )
         return result.one_or_none()
 
+    async def get_order_any(self, order_id: str) -> Row[Any] | None:
+        """Unscoped read for saga activities — the system operating on its
+        own database, not a user request (no ownership clause by design)."""
+        result = await self._s.execute(sa.select(orders).where(orders.c.order_id == order_id))
+        return result.one_or_none()
+
     async def get_items(self, order_id: str) -> list[Row[Any]]:
         result = await self._s.execute(
             sa.select(order_items)

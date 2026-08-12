@@ -22,7 +22,7 @@ from sqlalchemy.pool import StaticPool
 
 from .adapters.catalog_client import CatalogClient
 from .adapters.identity_client import IdentityClient
-from .adapters.saga_stub import SagaNotYetWired
+from .adapters.temporal_client import TemporalSaga
 from .api.routes import router
 from .config import Settings
 from .db import idempotency_keys, metadata, outbox
@@ -68,7 +68,14 @@ def create_app(
         catalog = catalog or CatalogClient(settings.catalog_base_url, own_http)
         identity = identity or IdentityClient(settings.identity_base_url, own_http)
     if saga is None:
-        saga = SagaNotYetWired()
+        # Lazy-connecting: no Temporal traffic until the first placement.
+        saga = TemporalSaga(
+            settings.temporal_address,
+            task_queue=settings.task_queue,
+            accept_timeout_s=settings.accept_timeout_s,
+            pickup_delay_s=settings.pickup_delay_s,
+            dropoff_delay_s=settings.dropoff_delay_s,
+        )
 
     events_topic = topic(settings.cell_id, Topic.ORDERS_EVENTS)
     own_producer: EventProducer | None = None
