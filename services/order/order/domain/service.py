@@ -23,6 +23,7 @@ from smartfood_idempotency import (
     Replay,
     Reserved,
 )
+from smartfood_kafka import EventType
 from smartfood_pricing import Line, PricedOrder, PricingConfig, PricingError, price_order
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -152,7 +153,7 @@ class OrderService:
             await repo.stage_event(
                 order_id=order_id,
                 version=0,
-                event_type="OrderPlaced",
+                event_type=EventType.ORDER_PLACED,
                 payload={
                     "order_id": order_id,
                     "user_id": user_id,

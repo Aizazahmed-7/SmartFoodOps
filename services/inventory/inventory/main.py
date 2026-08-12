@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers
-from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry
+from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, Topic, topic
 from smartfood_otel import RequestContextMiddleware, setup_logging
 from smartfood_outbox import OutboxPoller
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -57,14 +57,14 @@ def create_app(
     if reaper is None:
         reaper = Reaper(service, interval_seconds=settings.reaper_interval_seconds)
 
-    topic = f"{settings.cell_id}.inventory.events"
+    events_topic = topic(settings.cell_id, Topic.INVENTORY_EVENTS)
     own_producer: EventProducer | None = None
     if poller is None and settings.outbox_mode == "poller":  # pragma: no cover — live wiring
         own_producer = EventProducer(
             settings.kafka_bootstrap, AvroSerde(SchemaRegistry(settings.schema_registry_url))
         )
         poller = OutboxPoller(
-            sessions, outbox, topic=topic, producer=own_producer, cell_id=settings.cell_id
+            sessions, outbox, topic=events_topic, producer=own_producer, cell_id=settings.cell_id
         )
 
     live_consumer = consumer
@@ -76,7 +76,7 @@ def create_app(
         serde = AvroSerde(SchemaRegistry(settings.schema_registry_url))
         live_consumer = CatalogChangesConsumer(
             AIOKafkaConsumer(
-                f"{settings.cell_id}.catalog.changes",
+                topic(settings.cell_id, Topic.CATALOG_CHANGES),
                 bootstrap_servers=settings.kafka_bootstrap,
                 group_id=GROUP,
                 enable_auto_commit=False,

@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
-from smartfood_api import ApiError, StrictModel
+from smartfood_api import ApiError, ErrorCode, StrictModel
 from smartfood_auth import Auth, AuthContext, jwks, require_role
 
 from ..domain.service import (
@@ -101,7 +101,7 @@ async def login(body: LoginIn, request: Request) -> TokenPair:
     try:
         pair = await _svc(request).login(email=body.email, password=body.password)
     except InvalidCredentials:
-        raise ApiError("AUTH_INVALID_CREDENTIALS", "invalid credentials", 401) from None
+        raise ApiError(ErrorCode.AUTH_INVALID_CREDENTIALS, "invalid credentials", 401) from None
     return TokenPair.model_validate(pair)
 
 
@@ -111,10 +111,12 @@ async def refresh(body: RefreshIn, request: Request) -> TokenPair:
         pair = await _svc(request).refresh(body.refresh_token)
     except RefreshTokenReused:
         raise ApiError(
-            "AUTH_REFRESH_REUSED", "refresh token reuse detected — all sessions revoked", 401
+            ErrorCode.AUTH_REFRESH_REUSED,
+            "refresh token reuse detected — all sessions revoked",
+            401,
         ) from None
     except InvalidRefreshToken:
-        raise ApiError("AUTH_INVALID_CREDENTIALS", "invalid refresh token", 401) from None
+        raise ApiError(ErrorCode.AUTH_INVALID_CREDENTIALS, "invalid refresh token", 401) from None
     return TokenPair.model_validate(pair)
 
 
@@ -123,7 +125,7 @@ async def me(ctx: Auth, request: Request) -> ProfileOut:
     try:
         profile = await _svc(request).get_profile(ctx.sub)
     except UnknownUser:
-        raise ApiError("NOT_FOUND", "unknown user", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown user", 404) from None
     return ProfileOut.model_validate(profile)
 
 
@@ -134,13 +136,13 @@ async def update_me(body: ProfileUpdate, ctx: Auth, request: Request) -> dict:
         await _svc(request).update_profile(ctx.sub, changes)
     except NothingToUpdate:
         raise ApiError(
-            "VALIDATION_FAILED",
+            ErrorCode.VALIDATION_FAILED,
             "nothing to update",
             422,
             details=[{"field": "body", "issue": "at least one field required"}],
         ) from None
     except UnknownUser:
-        raise ApiError("NOT_FOUND", "unknown user", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown user", 404) from None
     return {"status": "updated", **changes}
 
 
@@ -165,9 +167,11 @@ async def grant_role(body: GrantIn, ctx: SystemOnly, request: Request) -> dict:
             user_id=body.user_id, restaurant_id=body.restaurant_id
         )
     except UnknownUser:
-        raise ApiError("NOT_FOUND", "unknown user", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown user", 404) from None
     except GrantConflict:
-        raise ApiError("GRANT_CONFLICT", "user cannot be granted this restaurant", 409) from None
+        raise ApiError(
+            ErrorCode.GRANT_CONFLICT, "user cannot be granted this restaurant", 409
+        ) from None
     return {"status": "granted", "user_id": body.user_id, "restaurant_id": body.restaurant_id}
 
 
@@ -177,7 +181,7 @@ async def add_address(body: AddressIn, ctx: Auth, request: Request) -> AddressOu
         address = await _svc(request).add_address(ctx.sub, body.model_dump())
     except AddressLimitReached:
         raise ApiError(
-            "VALIDATION_FAILED",
+            ErrorCode.VALIDATION_FAILED,
             "address limit reached",
             422,
             details=[{"field": "addresses", "issue": "at most 20 saved addresses"}],
@@ -195,7 +199,7 @@ async def delete_address(address_id: str, ctx: Auth, request: Request) -> None:
     try:
         await _svc(request).delete_address(ctx.sub, address_id)
     except AddressNotFound:
-        raise ApiError("NOT_FOUND", "not found", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "not found", 404) from None
 
 
 @router.get("/v1/internal/users/{user_id}/addresses/{address_id}")
@@ -207,5 +211,5 @@ async def internal_get_address(
     try:
         address = await _svc(request).get_address(user_id, address_id)
     except AddressNotFound:
-        raise ApiError("NOT_FOUND", "not found", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "not found", 404) from None
     return AddressOut.model_validate(address, from_attributes=True)

@@ -13,7 +13,7 @@ import httpx
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers
 from smartfood_idempotency import IdempotencyStore
-from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry
+from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, Topic, topic
 from smartfood_otel import RequestContextMiddleware, setup_logging
 from smartfood_outbox import OutboxPoller
 from smartfood_pricing import PricingConfig
@@ -70,14 +70,14 @@ def create_app(
     if saga is None:
         saga = SagaNotYetWired()
 
-    topic = f"{settings.cell_id}.orders.events"
+    events_topic = topic(settings.cell_id, Topic.ORDERS_EVENTS)
     own_producer: EventProducer | None = None
     if poller is None and settings.outbox_mode == "poller":  # pragma: no cover — live wiring
         own_producer = EventProducer(
             settings.kafka_bootstrap, AvroSerde(SchemaRegistry(settings.schema_registry_url))
         )
         poller = OutboxPoller(
-            sessions, outbox, topic=topic, producer=own_producer, cell_id=settings.cell_id
+            sessions, outbox, topic=events_topic, producer=own_producer, cell_id=settings.cell_id
         )
 
     @asynccontextmanager

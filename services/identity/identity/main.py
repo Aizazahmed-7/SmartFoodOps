@@ -55,13 +55,13 @@ def create_app(
         if live_consumer is None and settings.kafka_consumers == "on":  # pragma: no cover
             # Real Kafka wiring — exercised by the live smoke, not the unit suite.
             from aiokafka import AIOKafkaConsumer  # pyright: ignore[reportMissingTypeStubs]
-            from smartfood_kafka import AvroSerde, SchemaRegistry
+            from smartfood_kafka import AvroSerde, SchemaRegistry, Topic, topic
 
             from .consumers import GROUP, GrantConvergenceHandler
 
             live_consumer = CatalogChangesConsumer(
                 AIOKafkaConsumer(
-                    f"{settings.cell_id}.catalog.changes",
+                    topic(settings.cell_id, Topic.CATALOG_CHANGES),
                     group_id=GROUP,
                     bootstrap_servers=settings.kafka_bootstrap,
                     enable_auto_commit=False,

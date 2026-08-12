@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
-from smartfood_api import ApiError, StrictModel
+from smartfood_api import ApiError, ErrorCode, StrictModel
 from smartfood_auth import AuthContext, require_role
 from smartfood_idempotency import BodyMismatch, InProgress, Replay, body_hash
 from smartfood_pricing import (
@@ -75,28 +75,30 @@ def _map_pricing_errors(exc: Exception) -> ApiError:
     """The pricing/dependency taxonomy → api-standards codes (shared by
     quote and placement)."""
     if isinstance(exc, RestaurantNotFound):
-        return ApiError("NOT_FOUND", "unknown restaurant", 404)
+        return ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404)
     if isinstance(exc, MenuVersionChanged):
         return ApiError(
-            "PRICE_CHANGED",
+            ErrorCode.PRICE_CHANGED,
             "menu changed — re-quote and confirm the new total",
             409,
             details=[{"field": "menu_version", "issue": f"menu is now at version {exc.current}"}],
         )
     if isinstance(exc, RestaurantClosed):
-        return ApiError("RESTAURANT_CLOSED", "restaurant is not taking orders", 409)
+        return ApiError(ErrorCode.RESTAURANT_CLOSED, "restaurant is not taking orders", 409)
     if isinstance(exc, ItemUnavailable):
         return ApiError(
-            "ITEM_UNAVAILABLE",
+            ErrorCode.ITEM_UNAVAILABLE,
             "some items are unavailable",
             409,
             details=[{"item_id": item_id, "issue": "unavailable"} for item_id in exc.item_ids],
         )
     if isinstance(exc, InvalidSelection):
-        return ApiError("VALIDATION_FAILED", "invalid modifier selection", 422, details=exc.details)
+        return ApiError(
+            ErrorCode.VALIDATION_FAILED, "invalid modifier selection", 422, details=exc.details
+        )
     assert isinstance(exc, (SnapshotUnavailable, AddressUnavailable))
     return ApiError(
-        "DEPENDENCY_UNAVAILABLE",
+        ErrorCode.DEPENDENCY_UNAVAILABLE,
         "temporarily unavailable",
         503,
         headers={"Retry-After": "1"},
@@ -144,7 +146,7 @@ async def place_order(
 ) -> Any:
     if not idempotency_key:
         raise ApiError(
-            "VALIDATION_FAILED",
+            ErrorCode.VALIDATION_FAILED,
             "Idempotency-Key header is required for placement",
             422,
             details=[{"field": "Idempotency-Key", "issue": "required header"}],
@@ -162,7 +164,7 @@ async def place_order(
         )
     except AddressNotFound:
         raise ApiError(
-            "NOT_FOUND",
+            ErrorCode.NOT_FOUND,
             "unknown address",
             404,
             details=[{"field": "address_id", "issue": "no such saved address"}],
@@ -180,13 +182,15 @@ async def place_order(
         )
     if isinstance(outcome, InProgress):
         raise ApiError(
-            "IDEMPOTENCY_IN_PROGRESS",
+            ErrorCode.IDEMPOTENCY_IN_PROGRESS,
             "a request with this key is already executing",
             409,
             headers={"Retry-After": "1"},
         )
     assert isinstance(outcome, BodyMismatch)
-    raise ApiError("IDEMPOTENCY_KEY_REUSE", "this key was used with a different request body", 422)
+    raise ApiError(
+        ErrorCode.IDEMPOTENCY_KEY_REUSE, "this key was used with a different request body", 422
+    )
 
 
 @router.get("/v1/orders/{order_id}")
@@ -195,7 +199,7 @@ async def get_order(order_id: str, ctx: Purchaser, request: Request) -> dict[str
         return await _svc(request).get_order(ctx.sub, order_id)
     except OrderNotFound:
         # not-found and not-yours are the same 404 (no existence leaks)
-        raise ApiError("NOT_FOUND", "unknown order", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown order", 404) from None
 
 
 @router.get("/v1/orders")
@@ -209,7 +213,7 @@ async def list_orders(
         return await _svc(request).list_orders(ctx.sub, limit=limit, cursor=cursor)
     except InvalidCursor:
         raise ApiError(
-            "VALIDATION_FAILED",
+            ErrorCode.VALIDATION_FAILED,
             "malformed cursor",
             422,
             details=[{"field": "cursor", "issue": "not a valid cursor"}],

@@ -7,7 +7,14 @@ import httpx
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers
-from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, ensure_compacted_topic
+from smartfood_kafka import (
+    AvroSerde,
+    EventProducer,
+    SchemaRegistry,
+    Topic,
+    ensure_compacted_topic,
+    topic,
+)
 from smartfood_otel import RequestContextMiddleware, setup_logging
 from smartfood_outbox import OutboxPoller
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -64,7 +71,7 @@ def create_app(
         cache = RedisCache(own_redis)
 
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    topic = f"{settings.cell_id}.catalog.changes"
+    changes_topic = topic(settings.cell_id, Topic.CATALOG_CHANGES)
     own_producer: EventProducer | None = None
     if poller is None and settings.outbox_mode == "poller":  # pragma: no cover
         # Real Kafka wiring — exercised by the live smoke, not the unit suite.
@@ -72,7 +79,7 @@ def create_app(
             settings.kafka_bootstrap, AvroSerde(SchemaRegistry(settings.schema_registry_url))
         )
         poller = OutboxPoller(
-            sessions, outbox, topic=topic, producer=own_producer, cell_id=settings.cell_id
+            sessions, outbox, topic=changes_topic, producer=own_producer, cell_id=settings.cell_id
         )
 
     @asynccontextmanager
@@ -86,7 +93,7 @@ def create_app(
         drain_task: asyncio.Task[None] | None = None
         if poller is not None:
             if own_producer is not None:  # pragma: no cover — live path
-                await ensure_compacted_topic(settings.kafka_bootstrap, topic)
+                await ensure_compacted_topic(settings.kafka_bootstrap, changes_topic)
                 await own_producer.start()
             drain_task = asyncio.create_task(poller.run())
         yield

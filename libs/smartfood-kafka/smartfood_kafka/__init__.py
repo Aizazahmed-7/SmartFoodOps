@@ -9,6 +9,7 @@ from .envelope import DOMAIN_EVENT_SCHEMA, DOMAIN_EVENT_SUBJECT
 from .producer import EventProducer, ensure_compacted_topic
 from .registry import SchemaRegistry, SchemaRegistryError
 from .serde import AvroSerde, SerdeError
+from .vocabulary import EventType, Topic, topic
 
 __all__ = [
     "DOMAIN_EVENT_SCHEMA",
@@ -18,5 +19,8 @@ __all__ = [
     "SchemaRegistry",
     "SchemaRegistryError",
     "EventProducer",
+    "EventType",
+    "Topic",
     "ensure_compacted_topic",
+    "topic",
 ]

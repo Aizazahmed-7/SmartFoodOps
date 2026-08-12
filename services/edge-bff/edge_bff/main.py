@@ -14,7 +14,7 @@ import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
-from smartfood_api import ApiError, install_error_handlers
+from smartfood_api import ApiError, ErrorCode, install_error_handlers
 from smartfood_auth import STRIP_HEADERS, JwksVerifier, context_from_claims, headers_for
 from smartfood_otel import RequestContextMiddleware, get_logger, setup_logging
 
@@ -114,7 +114,7 @@ def create_app(
     async def proxy(path: str, request: Request) -> Response:
         rule = match("/" + path)
         if rule is None:
-            raise ApiError("NOT_FOUND", "no such route", 404)
+            raise ApiError(ErrorCode.NOT_FOUND, "no such route", 404)
 
         # 1. Authenticate when the route demands it.
         stamped: dict[str, str] = {}
@@ -123,7 +123,7 @@ def create_app(
             scheme, _, token = auth_header.partition(" ")
             if scheme.lower() != "bearer" or not token:
                 raise ApiError(
-                    "AUTH_INVALID_CREDENTIALS",
+                    ErrorCode.AUTH_INVALID_CREDENTIALS,
                     "missing bearer token",
                     401,
                     headers={"WWW-Authenticate": "Bearer"},
@@ -132,14 +132,14 @@ def create_app(
                 claims = await token_verifier.verify(token)
             except pyjwt.ExpiredSignatureError:
                 raise ApiError(
-                    "AUTH_TOKEN_EXPIRED",
+                    ErrorCode.AUTH_TOKEN_EXPIRED,
                     "access token expired — refresh",
                     401,
                     headers={"WWW-Authenticate": "Bearer"},
                 ) from None
             except pyjwt.InvalidTokenError:
                 raise ApiError(
-                    "AUTH_INVALID_CREDENTIALS",
+                    ErrorCode.AUTH_INVALID_CREDENTIALS,
                     "invalid token",
                     401,
                     headers={"WWW-Authenticate": "Bearer"},
@@ -170,7 +170,7 @@ def create_app(
         except httpx.HTTPError:
             log.warning("upstream unavailable", upstream=rule.upstream, path=path)
             raise ApiError(
-                "DEPENDENCY_UNAVAILABLE",
+                ErrorCode.DEPENDENCY_UNAVAILABLE,
                 "upstream unavailable",
                 503,
                 headers={"Retry-After": "1"},

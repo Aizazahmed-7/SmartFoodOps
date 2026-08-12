@@ -6,10 +6,15 @@ are corrected by writing a reversing pair, never by editing history —
 that is the entire point of double-entry bookkeeping.
 """
 
+from typing import Literal, get_args
+
 import sqlalchemy as sa
 from smartfood_idempotency import idempotency_table
 
 metadata = sa.MetaData()
+
+PaymentStatus = Literal["AUTHORIZED", "DECLINED", "CAPTURED", "VOIDED", "REFUNDED"]
+PAYMENT_STATUSES: tuple[str, ...] = get_args(PaymentStatus)
 
 # One row per order's payment: the authorization hold and its lifecycle.
 payments = sa.Table(
@@ -28,10 +33,7 @@ payments = sa.Table(
     sa.Column("version", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
-    sa.CheckConstraint(
-        "status IN ('AUTHORIZED','DECLINED','CAPTURED','VOIDED','REFUNDED')",
-        name="ck_payments_status",
-    ),
+    sa.CheckConstraint(f"status IN {PAYMENT_STATUSES!r}", name="ck_payments_status"),
     sa.CheckConstraint("amount_cents >= 1", name="ck_payments_amount_positive"),
 )
 

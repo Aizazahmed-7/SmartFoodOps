@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 import sqlalchemy as sa
 import structlog
+from smartfood_kafka import EventType
 from smartfood_otel import get_logger, trace_id_of
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,7 +36,7 @@ class GrantConvergenceHandler:
         self._service = service
 
     async def handle(self, event: dict[str, Any]) -> None:
-        if event.get("event_type") != "RestaurantCreated":
+        if event.get("event_type") != EventType.RESTAURANT_CREATED:
             return  # not ours — other consumers care, we don't
         event_id = str(event["event_id"])
         async with self._sessions() as session:

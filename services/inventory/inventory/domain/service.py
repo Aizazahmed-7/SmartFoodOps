@@ -15,11 +15,13 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from smartfood_kafka import EventType
 from smartfood_otel import get_logger
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import InventoryRepo
+from ..db import ReservationStatus
 from .models import Reservation, ReservationLine, StockRow
 
 log = get_logger("inventory.service")
@@ -103,7 +105,7 @@ class InventoryService:
                 aggregate_type="stock",
                 aggregate_id=item_id,
                 version=version,
-                event_type="StockAdjusted",
+                event_type=EventType.STOCK_ADJUSTED,
                 payload={
                     "item_id": item_id,
                     "restaurant_id": restaurant_id,
@@ -179,7 +181,7 @@ class InventoryService:
                 aggregate_type="reservation",
                 aggregate_id=order_id,
                 version=0,
-                event_type="StockReserved",
+                event_type=EventType.STOCK_RESERVED,
                 payload={
                     "order_id": order_id,
                     "restaurant_id": restaurant_id,
@@ -203,7 +205,7 @@ class InventoryService:
     async def release(self, order_id: str, *, reason: str) -> bool:
         """Compensation: restore stock, free the slot. reason='expired' is the
         reaper's path (distinct terminal status). Not-active → False (no-op)."""
-        target = "expired" if reason == "expired" else "released"
+        target: ReservationStatus = "expired" if reason == "expired" else "released"
         now = _now()
         async with self._sessions() as session:
             repo = InventoryRepo(session)
@@ -219,7 +221,7 @@ class InventoryService:
                 aggregate_type="reservation",
                 aggregate_id=order_id,
                 version=finished.version,
-                event_type="ReservationReleased",
+                event_type=EventType.RESERVATION_RELEASED,
                 payload={
                     "order_id": order_id,
                     "restaurant_id": finished.restaurant_id,
@@ -246,7 +248,7 @@ class InventoryService:
                 aggregate_type="reservation",
                 aggregate_id=order_id,
                 version=finished.version,
-                event_type="ReservationConsumed",
+                event_type=EventType.RESERVATION_CONSUMED,
                 payload={
                     "order_id": order_id,
                     "restaurant_id": finished.restaurant_id,

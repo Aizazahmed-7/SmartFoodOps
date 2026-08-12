@@ -12,7 +12,7 @@ from smartfood_outbox import event_id
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import ledger, outbox, payments
+from ..db import PaymentStatus, ledger, outbox, payments
 
 
 class PaymentRepo:
@@ -27,7 +27,7 @@ class PaymentRepo:
         self,
         *,
         order_id: str,
-        status: str,
+        status: PaymentStatus,
         amount_cents: int,
         currency: str,
         card_token: str,
@@ -49,7 +49,7 @@ class PaymentRepo:
         )
 
     async def transition_payment(
-        self, order_id: str, *, expected: str, target: str, now: datetime
+        self, order_id: str, *, expected: PaymentStatus, target: PaymentStatus, now: datetime
     ) -> int | None:
         """Guarded state move; returns the NEW version, or None (0 rows —
         it wasn't in `expected`, someone else already moved it)."""

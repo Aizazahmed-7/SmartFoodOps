@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from smartfood_api import ApiError, StrictModel, install_error_handlers
+from smartfood_api import ApiError, ErrorCode, StrictModel, install_error_handlers
 from smartfood_otel import RequestContextMiddleware
 
 app = FastAPI()
@@ -19,7 +19,7 @@ async def echo(body: Body) -> dict:
 
 @app.get("/boom-api")
 async def boom_api():
-    raise ApiError("NOT_FOUND", "no such thing", 404)
+    raise ApiError(ErrorCode.NOT_FOUND, "no such thing", 404)
 
 
 @app.get("/boom-http")

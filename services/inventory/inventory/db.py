@@ -4,9 +4,14 @@ SQLAlchemy Core tables: the single source both the Alembic migration and the
 test create_all derive from. Must stay sqlite-compatible for the unit suite.
 """
 
+from typing import Literal, get_args
+
 import sqlalchemy as sa
 
 metadata = sa.MetaData()
+
+ReservationStatus = Literal["active", "released", "consumed", "expired"]
+RESERVATION_STATUSES: tuple[str, ...] = get_args(ReservationStatus)
 
 # One row per menu item — STRICT stock (user decision): rows start at 0 and
 # an item cannot sell until its admin sets stock. Rows are auto-created by
@@ -51,9 +56,7 @@ reservations = sa.Table(
     sa.Column("version", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("expires_at", sa.TIMESTAMP(timezone=True), nullable=False),
-    sa.CheckConstraint(
-        "status IN ('active','released','consumed','expired')", name="ck_reservations_status"
-    ),
+    sa.CheckConstraint(f"status IN {RESERVATION_STATUSES!r}", name="ck_reservations_status"),
 )
 sa.Index("ix_reservations_reaper", reservations.c.status, reservations.c.expires_at)
 

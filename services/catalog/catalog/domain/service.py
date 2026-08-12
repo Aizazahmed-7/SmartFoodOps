@@ -24,6 +24,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
+from smartfood_kafka import EventType
 from smartfood_otel import get_logger
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
@@ -279,7 +280,7 @@ class CatalogService:
                     restaurant = await self._publish(
                         repo,
                         restaurant_id,
-                        "RestaurantCreated",
+                        EventType.RESTAURANT_CREATED,
                         {"owner_user_id": owner_user_id},
                     )
                     await session.commit()
@@ -319,7 +320,7 @@ class CatalogService:
                 await repo.update_restaurant(restaurant_id, changes)
             if cuisines is not None:
                 await repo.set_cuisines(restaurant_id, cuisines)
-            restaurant = await self._publish(repo, restaurant_id, "RestaurantUpdated")
+            restaurant = await self._publish(repo, restaurant_id, EventType.RESTAURANT_UPDATED)
             await session.commit()
         await self._cache.delete(_ptr_key(restaurant_id))  # next read re-renders
         return restaurant
@@ -330,7 +331,9 @@ class CatalogService:
             rowcount = await repo.update_restaurant(restaurant_id, {"status": status})
             if rowcount == 0:
                 raise RestaurantNotFound
-            event = "RestaurantPaused" if status == "paused" else "RestaurantResumed"
+            event = (
+                EventType.RESTAURANT_PAUSED if status == "paused" else EventType.RESTAURANT_RESUMED
+            )
             restaurant = await self._publish(repo, restaurant_id, event)
             await session.commit()
         await self._cache.delete(_ptr_key(restaurant_id))
@@ -345,7 +348,7 @@ class CatalogService:
             if await repo.get_restaurant(restaurant_id) is None:
                 raise RestaurantNotFound
             category_id = await repo.insert_category(restaurant_id, name=name, rank=rank)
-            restaurant = await self._publish(repo, restaurant_id, "CategoryAdded")
+            restaurant = await self._publish(repo, restaurant_id, EventType.CATEGORY_ADDED)
             await session.commit()
         await self._cache.delete(_ptr_key(restaurant_id))
         return {"id": category_id, "name": name, "rank": rank, "version": restaurant.version}
@@ -362,7 +365,7 @@ class CatalogService:
                 raise CategoryNotFound
             row = await repo.get_category(restaurant_id, category_id)
             assert row is not None  # just updated it inside this tx
-            restaurant = await self._publish(repo, restaurant_id, "CategoryUpdated")
+            restaurant = await self._publish(repo, restaurant_id, EventType.CATEGORY_UPDATED)
             await session.commit()
         await self._cache.delete(_ptr_key(restaurant_id))
         return {"id": row.id, "name": row.name, "rank": row.rank, "version": restaurant.version}
@@ -375,7 +378,7 @@ class CatalogService:
             if await repo.count_category_items(restaurant_id, category_id) > 0:
                 raise CategoryNotEmpty  # explicit: move/delete items first
             await repo.delete_category(restaurant_id, category_id)
-            restaurant = await self._publish(repo, restaurant_id, "CategoryDeleted")
+            restaurant = await self._publish(repo, restaurant_id, EventType.CATEGORY_DELETED)
             await session.commit()
         await self._cache.delete(_ptr_key(restaurant_id))
         return {"status": "deleted", "version": restaurant.version}
@@ -400,7 +403,7 @@ class CatalogService:
             await repo.set_item_tags(item_id, tags)
             await repo.insert_modifier_groups(item_id, modifier_groups)
             item = await self._read_item(repo, restaurant_id, item_id)
-            restaurant = await self._publish(repo, restaurant_id, "ItemAdded")
+            restaurant = await self._publish(repo, restaurant_id, EventType.ITEM_ADDED)
             await session.commit()
         await self._cache.delete(_ptr_key(restaurant_id))
         return {**item, "version": restaurant.version}
@@ -432,7 +435,7 @@ class CatalogService:
                 await repo.delete_item_modifiers(item_id)
                 await repo.insert_modifier_groups(item_id, modifier_groups)
             item = await self._read_item(repo, restaurant_id, item_id)
-            restaurant = await self._publish(repo, restaurant_id, "ItemUpdated")
+            restaurant = await self._publish(repo, restaurant_id, EventType.ITEM_UPDATED)
             await session.commit()
         await self._cache.delete(_ptr_key(restaurant_id))
         return {**item, "version": restaurant.version}
@@ -447,7 +450,7 @@ class CatalogService:
             await repo.delete_item_modifiers(item_id)
             await repo.delete_item_tags(item_id)
             await repo.delete_item(item_id)
-            restaurant = await self._publish(repo, restaurant_id, "ItemDeleted")
+            restaurant = await self._publish(repo, restaurant_id, EventType.ITEM_DELETED)
             await session.commit()
         await self._cache.delete(_ptr_key(restaurant_id))
         return {"status": "deleted", "version": restaurant.version}

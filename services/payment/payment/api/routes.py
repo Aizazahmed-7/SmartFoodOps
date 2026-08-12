@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
-from smartfood_api import ApiError, StrictModel
+from smartfood_api import ApiError, ErrorCode, StrictModel
 from smartfood_auth import AuthContext, require_role
 
 from ..domain.ports import PspUnavailable
@@ -41,18 +41,20 @@ def _respond(outcome: PaymentOutcome) -> JSONResponse:
 def _map_money_errors(exc: Exception) -> ApiError:
     if isinstance(exc, MoneyOpInProgress):
         return ApiError(
-            "IDEMPOTENCY_IN_PROGRESS",
+            ErrorCode.IDEMPOTENCY_IN_PROGRESS,
             "this money operation is already executing",
             409,
             headers={"Retry-After": "1"},
         )
     if isinstance(exc, MoneyKeyMismatch):
-        return ApiError("IDEMPOTENCY_KEY_REUSE", "money key reused with different parameters", 422)
+        return ApiError(
+            ErrorCode.IDEMPOTENCY_KEY_REUSE, "money key reused with different parameters", 422
+        )
     if isinstance(exc, PaymentStateConflict):
-        return ApiError("ORDER_STATE_CONFLICT", str(exc), 409)
+        return ApiError(ErrorCode.ORDER_STATE_CONFLICT, str(exc), 409)
     assert isinstance(exc, PspUnavailable)
     return ApiError(
-        "DEPENDENCY_UNAVAILABLE",
+        ErrorCode.DEPENDENCY_UNAVAILABLE,
         "payment processor unreachable — retry with the same operation",
         503,
         headers={"Retry-After": "1"},

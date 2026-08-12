@@ -27,7 +27,7 @@ Every non-2xx response, no exceptions:
 - `request_id` is the value edge-bff stamps as `X-Request-ID` — the same id that appears in every log line for the request, so a support ticket maps to a trace in one lookup.
 - 422 responses may add `"details": [{"field": "items[2].qty", "issue": "must be >= 1"}]`.
 - `message` never contains SQL, stack traces, internal hostnames, or another user's data.
-- `code` values come from the catalog below. **Adding a code = a PR to this table, never an inline string.**
+- `code` values come from the catalog below. **Adding a code = a PR to this table AND to its compile-time mirror `smartfood_api.ErrorCode`** — `ApiError` only accepts enum members, so an uncatalogued or typo'd code is a type error, not a broken client flow. (Event names have the same arrangement: `smartfood_kafka.EventType` / `Topic` mirror ARCHITECTURE §11.)
 
 **Pagination convention**: list endpoints take `page` (0-based, fixed page size ≤20) and return `{"…": [...], "page": N, "has_more": bool}` — `has_more` via the limit+1 read, never a `COUNT(*)`. Offset pagination is acceptable while page depth is shallow; any feed that grows without bound (orders) uses keyset/cursor pagination from day one. Unpaginated lists are only allowed when creation is capped (e.g. addresses ≤20) or the resource is a bounded document (a menu).
 

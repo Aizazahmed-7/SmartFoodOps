@@ -5,12 +5,17 @@ order_items), address deletion (delivery_address_snapshot), and pricing
 changes (pricing_snapshot) — an order is a historical fact, not a view.
 """
 
+from typing import Literal, get_args
+
 import sqlalchemy as sa
 from smartfood_idempotency import idempotency_table
 
 metadata = sa.MetaData()
 
-STATUSES = (
+# The state machine's vocabulary (ARCHITECTURE §6.2). The Literal is the
+# single source of truth: every transition signature is checked against it
+# at type-check time, and the CHECK constraint below is derived from it.
+OrderStatus = Literal[
     "PLACED",
     "VALIDATED",
     "PAYMENT_CLEARED",
@@ -24,7 +29,8 @@ STATUSES = (
     "CANCELLING",
     "CANCELLED",
     "REFUNDED",
-)
+]
+STATUSES: tuple[str, ...] = get_args(OrderStatus)
 
 orders = sa.Table(
     "orders",

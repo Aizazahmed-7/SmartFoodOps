@@ -20,13 +20,15 @@ from fastapi.responses import JSONResponse
 from smartfood_otel import get_logger
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .codes import ErrorCode
+
 log = get_logger("smartfood-api")
 
 
 class ApiError(Exception):
     def __init__(
         self,
-        code: str,
+        code: ErrorCode,
         message: str,
         status: int,
         *,
@@ -46,7 +48,7 @@ def _request_id() -> str:
 
 
 def envelope(
-    code: str, message: str, details: list[dict[str, str]] | None = None
+    code: ErrorCode, message: str, details: list[dict[str, str]] | None = None
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "error": {"code": code, "message": message, "request_id": _request_id()}
@@ -57,13 +59,13 @@ def envelope(
 
 
 # Fallback codes for bare HTTPExceptions (services should prefer ApiError).
-_STATUS_CODES = {
-    401: "AUTH_INVALID_CREDENTIALS",
-    403: "FORBIDDEN_ROLE",
-    404: "NOT_FOUND",
-    422: "VALIDATION_FAILED",
-    429: "RATE_LIMITED",
-    503: "DEPENDENCY_UNAVAILABLE",
+_STATUS_CODES: dict[int, ErrorCode] = {
+    401: ErrorCode.AUTH_INVALID_CREDENTIALS,
+    403: ErrorCode.FORBIDDEN_ROLE,
+    404: ErrorCode.NOT_FOUND,
+    422: ErrorCode.VALIDATION_FAILED,
+    429: ErrorCode.RATE_LIMITED,
+    503: ErrorCode.DEPENDENCY_UNAVAILABLE,
 }
 
 
@@ -87,12 +89,12 @@ def install_error_handlers(app: FastAPI) -> None:
         ]
         return JSONResponse(
             status_code=422,
-            content=envelope("VALIDATION_FAILED", "request validation failed", details),
+            content=envelope(ErrorCode.VALIDATION_FAILED, "request validation failed", details),
         )
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-        code = _STATUS_CODES.get(exc.status_code, "INTERNAL_ERROR")
+        code = _STATUS_CODES.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
         return JSONResponse(
             status_code=exc.status_code,
             content=envelope(code, str(exc.detail)),
@@ -105,5 +107,5 @@ def install_error_handlers(app: FastAPI) -> None:
         log.error("unhandled exception", error=repr(exc))
         return JSONResponse(
             status_code=500,
-            content=envelope("INTERNAL_ERROR", "internal error"),
+            content=envelope(ErrorCode.INTERNAL_ERROR, "internal error"),
         )

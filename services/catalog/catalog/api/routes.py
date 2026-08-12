@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import Field, field_validator, model_validator
-from smartfood_api import ApiError, StrictModel
+from smartfood_api import ApiError, ErrorCode, StrictModel
 from smartfood_auth import AuthContext, require_role
 
 from ..domain.models import Restaurant
@@ -102,7 +102,7 @@ _SCOPE_EXEMPT = {"system", "system_admin"}
 
 def _own(ctx: AuthContext, restaurant_id: str) -> None:
     if ctx.role not in _SCOPE_EXEMPT and ctx.restaurant_id != restaurant_id:
-        raise ApiError("NOT_FOUND", "unknown restaurant", 404)
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404)
 
 
 def _out(restaurant: Restaurant) -> RestaurantOut:
@@ -136,10 +136,10 @@ async def create_restaurant(
             hours=body.hours,
         )
     except GrantRejected:
-        raise ApiError("GRANT_CONFLICT", "onboarding grant rejected", 409) from None
+        raise ApiError(ErrorCode.GRANT_CONFLICT, "onboarding grant rejected", 409) from None
     except GrantUnavailable:
         raise ApiError(
-            "DEPENDENCY_UNAVAILABLE",
+            ErrorCode.DEPENDENCY_UNAVAILABLE,
             "could not finish onboarding — retry to complete it",
             503,
             headers={"Retry-After": "1"},
@@ -154,7 +154,7 @@ async def get_restaurant(restaurant_id: str, request: Request) -> RestaurantOut:
     try:
         restaurant = await _svc(request).get_restaurant(restaurant_id)
     except RestaurantNotFound:
-        raise ApiError("NOT_FOUND", "unknown restaurant", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
     return _out(restaurant)
 
 
@@ -169,13 +169,13 @@ async def update_restaurant(
         restaurant = await _svc(request).update_restaurant(restaurant_id, changes, cuisines)
     except NothingToUpdate:
         raise ApiError(
-            "VALIDATION_FAILED",
+            ErrorCode.VALIDATION_FAILED,
             "nothing to update",
             422,
             details=[{"field": "body", "issue": "at least one field required"}],
         ) from None
     except RestaurantNotFound:
-        raise ApiError("NOT_FOUND", "unknown restaurant", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
     return _out(restaurant)
 
 
@@ -186,7 +186,7 @@ async def _set_status(
     try:
         restaurant = await _svc(request).set_status(restaurant_id, status)
     except RestaurantNotFound:
-        raise ApiError("NOT_FOUND", "unknown restaurant", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
     return _out(restaurant)
 
 
@@ -225,7 +225,7 @@ async def add_category(
     try:
         return await _svc(request).add_category(restaurant_id, name=body.name, rank=body.rank)
     except RestaurantNotFound:
-        raise ApiError("NOT_FOUND", "unknown restaurant", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
 
 
 @router.patch("/v1/restaurants/{restaurant_id}/categories/{category_id}")
@@ -243,13 +243,13 @@ async def update_category(
         )
     except NothingToUpdate:
         raise ApiError(
-            "VALIDATION_FAILED",
+            ErrorCode.VALIDATION_FAILED,
             "nothing to update",
             422,
             details=[{"field": "body", "issue": "at least one field required"}],
         ) from None
     except CategoryNotFound:
-        raise ApiError("NOT_FOUND", "unknown category", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown category", 404) from None
 
 
 @router.delete("/v1/restaurants/{restaurant_id}/categories/{category_id}")
@@ -260,9 +260,9 @@ async def delete_category(
     try:
         return await _svc(request).delete_category(restaurant_id, category_id)
     except CategoryNotFound:
-        raise ApiError("NOT_FOUND", "unknown category", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown category", 404) from None
     except CategoryNotEmpty:
-        raise ApiError("CATEGORY_NOT_EMPTY", "category still contains items", 409) from None
+        raise ApiError(ErrorCode.CATEGORY_NOT_EMPTY, "category still contains items", 409) from None
 
 
 # ── menu: items ────────────────────────────────────────────────────
@@ -353,7 +353,7 @@ async def add_item(
             modifier_groups=[g.model_dump() for g in body.modifier_groups],
         )
     except CategoryNotFound:
-        raise ApiError("NOT_FOUND", "unknown category", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown category", 404) from None
 
 
 @router.patch("/v1/restaurants/{restaurant_id}/items/{item_id}")
@@ -381,15 +381,15 @@ async def update_item(
         )
     except NothingToUpdate:
         raise ApiError(
-            "VALIDATION_FAILED",
+            ErrorCode.VALIDATION_FAILED,
             "nothing to update",
             422,
             details=[{"field": "body", "issue": "at least one field required"}],
         ) from None
     except ItemNotFound:
-        raise ApiError("NOT_FOUND", "unknown item", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown item", 404) from None
     except CategoryNotFound:
-        raise ApiError("NOT_FOUND", "unknown category", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown category", 404) from None
 
 
 @router.delete("/v1/restaurants/{restaurant_id}/items/{item_id}")
@@ -400,7 +400,7 @@ async def delete_item(
     try:
         return await _svc(request).delete_item(restaurant_id, item_id)
     except ItemNotFound:
-        raise ApiError("NOT_FOUND", "unknown item", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown item", 404) from None
 
 
 # ── internal (never in the edge allowlist — unreachable from outside) ──
@@ -421,7 +421,7 @@ async def pricing_read(
     snapshot lives in order_db. Bypasses every cache by design."""
     if not 1 <= len(item_ids) <= 50:
         raise ApiError(
-            "VALIDATION_FAILED",
+            ErrorCode.VALIDATION_FAILED,
             "item_ids out of bounds",
             422,
             details=[{"field": "item_ids", "issue": "between 1 and 50 ids"}],
@@ -429,7 +429,7 @@ async def pricing_read(
     try:
         return await _svc(request).pricing_read(restaurant_id, item_ids)
     except RestaurantNotFound:
-        raise ApiError("NOT_FOUND", "unknown restaurant", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
 
 
 # ── public reads: menu (blob/pointer cached) + browse (60s pages) ──
@@ -447,10 +447,10 @@ async def get_menu(
     try:
         menu = await _svc(request).get_menu(restaurant_id, version=v)
     except RestaurantNotFound:
-        raise ApiError("NOT_FOUND", "unknown restaurant", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
     except StaleMenuVersion:
         raise ApiError(
-            "NOT_FOUND", "menu version no longer available — refetch the menu", 404
+            ErrorCode.NOT_FOUND, "menu version no longer available — refetch the menu", 404
         ) from None
     response.headers["Cache-Control"] = (
         "public, max-age=604800, immutable" if v is not None else "public, max-age=5"
@@ -464,7 +464,7 @@ def _norm_filter(value: str | None, name: str) -> str | None:
     slug = "-".join(value.strip().lower().split())
     if not _SLUG.match(slug):
         raise ApiError(
-            "VALIDATION_FAILED",
+            ErrorCode.VALIDATION_FAILED,
             "invalid filter",
             422,
             details=[{"field": name, "issue": "not a valid tag"}],

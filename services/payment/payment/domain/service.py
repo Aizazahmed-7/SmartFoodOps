@@ -26,10 +26,12 @@ from smartfood_idempotency import (
     Replay,
     Reserved,
 )
+from smartfood_kafka import EventType
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import PaymentRepo
+from ..db import PaymentStatus
 from .ports import PaymentGatewayPort, PspStateConflict, PspUnavailable
 
 MONEY_SCOPE = "money"
@@ -103,7 +105,7 @@ class PaymentService:
                     "payment_intent_id": result.psp_ref,
                 },
             )
-            row_status = "AUTHORIZED"
+            row_status: PaymentStatus = "AUTHORIZED"
         else:
             status, body = (
                 402,
@@ -138,7 +140,7 @@ class PaymentService:
                 await repo.stage_event(
                     order_id=order_id,
                     version=0,
-                    event_type="PaymentAuthorized",
+                    event_type=EventType.PAYMENT_AUTHORIZED,
                     payload={
                         "order_id": order_id,
                         "status": "AUTHORIZED",
@@ -162,7 +164,7 @@ class PaymentService:
             target="CAPTURED",
             gateway_call=self._gateway.capture,
             ledger=("customer", "platform_cash"),  # money moves TO us
-            event_type="PaymentCaptured",
+            event_type=EventType.PAYMENT_CAPTURED,
         )
 
     async def void(self, order_id: str) -> PaymentOutcome:
@@ -184,7 +186,7 @@ class PaymentService:
             target="REFUNDED",
             gateway_call=self._gateway.refund,
             ledger=("platform_cash", "customer"),  # the reversing pair
-            event_type="RefundProcessed",
+            event_type=EventType.REFUND_PROCESSED,
         )
 
     async def _lifecycle(
@@ -192,8 +194,8 @@ class PaymentService:
         order_id: str,
         *,
         op: str,
-        expected: str,
-        target: str,
+        expected: PaymentStatus,
+        target: PaymentStatus,
         gateway_call: Any,
         ledger: tuple[str, str] | None,
         event_type: str | None,

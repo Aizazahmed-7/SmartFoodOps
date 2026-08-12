@@ -13,7 +13,7 @@ from smartfood_outbox import event_id
 from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import outbox, reservations, restaurant_load, stock
+from ..db import ReservationStatus, outbox, reservations, restaurant_load, stock
 
 
 class InventoryRepo:
@@ -156,7 +156,9 @@ class InventoryRepo:
             )
         )
 
-    async def finish_reservation(self, order_id: str, target_status: str) -> Row[Any] | None:
+    async def finish_reservation(
+        self, order_id: str, target_status: ReservationStatus
+    ) -> Row[Any] | None:
         """Guarded active→target; None = it was not active (idempotent path)."""
         result = await self._s.execute(
             reservations.update()

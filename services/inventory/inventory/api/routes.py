@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import Field
-from smartfood_api import ApiError, StrictModel
+from smartfood_api import ApiError, ErrorCode, StrictModel
 from smartfood_auth import AuthContext, require_role
 
 from ..domain.models import Reservation, ReservationLine
@@ -35,7 +35,7 @@ def _svc(request: Request) -> InventoryService:
 
 def _own(ctx: AuthContext, restaurant_id: str) -> None:
     if ctx.role not in _SCOPE_EXEMPT and ctx.restaurant_id != restaurant_id:
-        raise ApiError("NOT_FOUND", "unknown restaurant", 404)
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404)
 
 
 # ── DTOs ───────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ async def set_stock(
     try:
         row = await _svc(request).set_stock(restaurant_id, item_id, body.available)
     except StockScopeMismatch:
-        raise ApiError("NOT_FOUND", "unknown item", 404) from None
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown item", 404) from None
     return {"item_id": row.item_id, "available": row.available, "version": row.version}
 
 
@@ -125,11 +125,11 @@ async def create_reservation(
         )
     except AtCapacity:
         raise ApiError(
-            "RESTAURANT_AT_CAPACITY", "restaurant cannot take more orders right now", 409
+            ErrorCode.RESTAURANT_AT_CAPACITY, "restaurant cannot take more orders right now", 409
         ) from None
     except InsufficientStock as exc:
         raise ApiError(
-            "ITEM_UNAVAILABLE",
+            ErrorCode.ITEM_UNAVAILABLE,
             "insufficient stock",
             409,
             details=[
