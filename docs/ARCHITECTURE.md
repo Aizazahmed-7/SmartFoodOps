@@ -235,7 +235,7 @@ sequenceDiagram
 
 Key placement properties:
 
-- **PriceOrder** produces an immutable snapshot `{subtotal, discounts, fees, tax, total}`; authorization and refunds are computed **only** from it — money math is replay-deterministic.
+- **PriceOrder** produces an immutable snapshot `{subtotal, discounts, fees, tax, total}`; authorization and refunds are computed **only** from it — money math is replay-deterministic. *(As built, W2: the placement ROUTE prices synchronously via `smartfood-pricing` and persists the snapshot in the placement transaction — the client hears `PRICE_CHANGED` immediately; the `price_order` local activity then LOADS that snapshot from order_db rather than recomputing. Same numbers by construction; the activity name and contract are unchanged.)*
 - **ValidateAndReserve** re-reads source of truth (never caches) — browse-time staleness is a display concern only (§10). Restaurant capacity is checked here too, via a conditional increment on `inventory_db.restaurant_load` (`WHERE active < capacity`; 0 rows → `RESTAURANT_AT_CAPACITY`) — the kitchen-slots analogue of the stock decrement, released on terminal states.
 - **ConfirmOrder** runs only after all validations — the order is visible as confirmed only after inventory + payment succeed (confirm-only-after-validation requirement).
 - SLO: p99 PLACED→CONFIRMED < 6s.
@@ -290,7 +290,7 @@ stateDiagram-v2
 
 **Payment waits are sub-states, not states.** A 3DS-analog `requires_action` or a PSP-outage queue-and-retry is recorded as a `payment_wait_reason` column on `VALIDATED` — never a new machine state. The state machine stays method-agnostic; read models surface the wait.
 
-Every transition is written by the workflow via the `transition()` helper wrapping the guarded `UPDATE` (`… SET status=:new, aggregate_version=aggregate_version+1 WHERE order_id=:id AND status=:expected`). **0 rows is ambiguous, so the helper re-reads**: already at the target status → idempotent-replay no-op (success); anything else → `IllegalTransition` (non-retryable), incrementing `illegal_transition_total` (§14), which should sit at ~0 — a spike means an idempotency bug. Raw `UPDATE … SET status` outside the helper is grep-banned in CI.
+Every transition is written by the workflow via the `transition()` helper wrapping the guarded `UPDATE` (`… SET status=:new, aggregate_version=aggregate_version+1 WHERE order_id=:id AND status=:expected`). **0 rows is ambiguous, so the helper re-reads**: already at the target status → idempotent-replay no-op (success); anything else → `IllegalTransition` (non-retryable), incrementing `illegal_transition_total` (§14), which should sit at ~0 — a spike means an idempotency bug. Raw `UPDATE … SET status` outside the helper is grep-banned in CI. *(As built, W2: the single-writer rule softened to single-WRITER-HELPER — restaurant-driven PREPARING/READY and the customer-cancel CANCELLING move also go through the same guarded helpers (`transition()` / set-guarded `begin_cancel_from()`), so the invariant is "every status write uses the guarded writer", whoever initiates it.)*
 
 ---
 

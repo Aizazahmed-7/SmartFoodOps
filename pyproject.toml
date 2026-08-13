@@ -7,6 +7,7 @@ dependencies = []
 
 [tool.uv.workspace]
 members = ["libs/*", "services/*", "tools/*"]
+exclude = ["tools/demo"]  # shell scripts, not a package
 
 [dependency-groups]
 dev = [

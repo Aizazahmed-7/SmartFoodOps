@@ -15,7 +15,7 @@ duplicates from stray test runs impossible to spot).
 
 import asyncio
 import os
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -657,6 +657,32 @@ async def _ensure_stock(
             )
 
 
+DEMO_CUSTOMER = "customer@demo.smartfood.dev"
+DEMO_ADDRESS = {"label": "home", "line1": "12 Mango St", "city": "springfield"}
+
+
+async def _seed_customer(client: httpx.AsyncClient) -> bool:
+    """The demo customer every walkthrough logs in as (S9): registered,
+    with one saved address — the placement API requires an address_id.
+    Returns True if the address was created this run (replay = False)."""
+    await client.post(
+        "/v1/auth/register", json={"email": DEMO_CUSTOMER, "password": PASSWORD}
+    )  # idempotent no-op if present; login below is the real gate
+    pair = _expect(
+        await client.post("/v1/auth/login", json={"email": DEMO_CUSTOMER, "password": PASSWORD}),
+        200,
+    )
+    bearer = {"Authorization": f"Bearer {pair['access_token']}"}
+    # _expect is typed for object envelopes; this endpoint returns an array.
+    addresses = cast(
+        "list[dict[str, Any]]", _expect(await client.get("/v1/me/addresses", headers=bearer), 200)
+    )
+    if any(a["label"] == DEMO_ADDRESS["label"] for a in addresses):
+        return False
+    _expect(await client.post("/v1/me/addresses", json=DEMO_ADDRESS, headers=bearer), 201)
+    return True
+
+
 async def seed(client: httpx.AsyncClient) -> dict[str, int]:
     created = replayed = 0
     for template in TEMPLATES:
@@ -664,6 +690,7 @@ async def seed(client: httpx.AsyncClient) -> dict[str, int]:
             created += 1
         else:
             replayed += 1
+    await _seed_customer(client)
     return {"created": created, "replayed": replayed}
 
 

@@ -8,6 +8,10 @@ import {
 import type { MenuItem } from "../api/types";
 import { useAuth } from "../state/auth";
 import { ErrorNote, Money, Spinner } from "../components/ui";
+import PartnerOrders from "./PartnerOrders";
+import PartnerStock from "./PartnerStock";
+
+type Tab = "orders" | "menu" | "stock";
 
 interface GroupDraft {
   name: string;
@@ -123,6 +127,7 @@ export default function PartnerDashboard() {
   const { claims } = useAuth();
   const rid = claims?.restaurant_id;
   const queryClient = useQueryClient();
+  const [tab, setTab] = useState<Tab>("orders");
   const [newCategory, setNewCategory] = useState("");
   const [itemFormCategory, setItemFormCategory] = useState<string | null>(null);
 
@@ -165,6 +170,15 @@ export default function PartnerDashboard() {
   const data = menu.data!;
   const paused = data.status === "paused";
 
+  const tabButton = (t: Tab, label: string) => (
+    <button
+      className={`rounded-lg px-3 py-1.5 text-sm ${tab === t ? "bg-slate-800 text-white" : "text-slate-400 hover:text-white"}`}
+      onClick={() => setTab(t)}
+    >
+      {label}
+    </button>
+  );
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
@@ -177,7 +191,16 @@ export default function PartnerDashboard() {
           onClick={() => setStatus.mutate(!paused)}>
           {paused ? "Resume orders" : "Pause orders"}
         </button>
+        <nav className="ml-auto flex gap-1 rounded-xl border border-slate-800 p-1">
+          {tabButton("orders", "Orders")}
+          {tabButton("menu", "Menu")}
+          {tabButton("stock", "Stock")}
+        </nav>
       </div>
+
+      {tab === "orders" && <PartnerOrders />}
+      {tab === "stock" && <PartnerStock rid={rid} />}
+      {tab !== "menu" ? null : (<>
       <ErrorNote error={removeCategory.error ?? toggle86.error ?? removeItem.error} />
 
       {data.categories.map((cat) => (
@@ -244,6 +267,7 @@ export default function PartnerDashboard() {
           error={createItem.error}
           busy={createItem.isPending} />
       )}
+      </>)}
     </div>
   );
 }

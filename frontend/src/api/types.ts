@@ -109,3 +109,129 @@ export interface SearchResult {
   has_more: boolean;
   results: SearchHit[];
 }
+
+// ── orders (W2) ────────────────────────────────────────────────────
+
+/** The 13-state machine (ARCHITECTURE §6.2), verbatim. */
+export type OrderStatus =
+  | "PLACED"
+  | "VALIDATED"
+  | "PAYMENT_CLEARED"
+  | "CONFIRMED"
+  | "ACCEPTED"
+  | "PREPARING"
+  | "READY"
+  | "PICKED_UP"
+  | "DELIVERED"
+  | "SETTLED"
+  | "CANCELLING"
+  | "CANCELLED"
+  | "REFUNDED";
+
+/** Money after the saga is done with it: nothing left to change. */
+export const TERMINAL_STATUSES: OrderStatus[] = ["SETTLED", "CANCELLED", "REFUNDED"];
+
+/** The FR-21 window — mirror of the backend's CANCELLABLE_STATES. */
+export const CANCELLABLE_STATUSES: OrderStatus[] = [
+  "PLACED", "VALIDATED", "PAYMENT_CLEARED", "CONFIRMED", "ACCEPTED", "PREPARING", "READY",
+];
+
+export interface Totals {
+  subtotal_cents: number;
+  discount_cents: number;
+  fee_cents: number;
+  tax_cents: number;
+  total_cents: number;
+}
+
+export interface QuoteLine {
+  item_id: string;
+  name: string;
+  unit_price_cents: number;
+  qty: number;
+  options: { group_id: string; group_name: string; option_id: string; name: string; price_delta_cents: number }[];
+  line_total_cents: number;
+}
+
+/** POST /v1/quote — the server is the only pricer (FR-16). */
+export interface Quote {
+  restaurant_name: string;
+  menu_version: number;
+  currency: string;
+  lines: QuoteLine[];
+  totals: Totals;
+}
+
+export interface PlacedOrder {
+  order_id: string;
+  status: OrderStatus;
+}
+
+export interface OrderSummary {
+  order_id: string;
+  restaurant_name: string;
+  status: OrderStatus;
+  total_cents: number;
+  placed_at: string;
+}
+
+export interface OrderList {
+  items: OrderSummary[];
+  next_cursor: string | null;
+}
+
+export interface OrderDetail {
+  order_id: string;
+  status: OrderStatus;
+  restaurant_id: string;
+  restaurant_name: string;
+  menu_version: number;
+  placed_at: string;
+  cancel_reason: string | null;
+  currency: string;
+  totals: Totals;
+  delivery_address: { address_id: string; label: string; line1: string; city: string };
+  items: {
+    menu_item_id: string;
+    name: string;
+    qty: number;
+    unit_price_cents: number;
+    options: unknown[];
+    line_total_cents: number;
+  }[];
+}
+
+export interface CancelResult {
+  order_id: string;
+  status: OrderStatus;
+  cancel_reason?: string | null;
+}
+
+// ── kitchen feed + stock (W2, partner side) ────────────────────────
+
+export interface FeedOrder {
+  order_id: string;
+  status: OrderStatus;
+  placed_at: string;
+  total_cents: number;
+  currency: string;
+  cancel_reason: string | null;
+  items: { menu_item_id: string; name: string; qty: number }[];
+}
+
+export interface Feed {
+  items: FeedOrder[];
+  next_cursor: string | null;
+}
+
+export interface DecisionResult {
+  order_id: string;
+  decision: "accept" | "reject";
+  status: OrderStatus;
+}
+
+export interface StockRow {
+  item_id: string;
+  available: number;
+  version: number;
+}

@@ -1,14 +1,58 @@
-import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { getQuote, NotBuiltYet } from "../api/client";
+import { ApiError, getQuote } from "../api/client";
 import { lineTotalCents, useCart } from "../state/cart";
-import { ComingSoon, Money } from "../components/ui";
+import { Money } from "../components/ui";
+import { useAuth } from "../state/auth";
+
+/** Per-code inline messages — the pricing taxonomy, in human. */
+function QuoteError({ error, names }: { error: unknown; names: Map<string, string> }) {
+  if (!(error instanceof ApiError)) return null;
+  const note = (text: string) => (
+    <p className="rounded-xl border border-amber-900 bg-amber-950/60 px-3 py-2 text-sm text-amber-200">
+      {text}
+    </p>
+  );
+  switch (error.code) {
+    case "RESTAURANT_CLOSED":
+      return note("This restaurant isn't taking orders right now.");
+    case "ITEM_UNAVAILABLE": {
+      // details carry item_ids — translate to the names on the lines.
+      const gone = (error.details ?? [])
+        .map((d) => (d as { item_id?: string }).item_id ?? d.field)
+        .map((id) => (id ? (names.get(id) ?? id) : ""))
+        .filter(Boolean);
+      return note(`No longer available: ${gone.join(", ")} — remove to continue.`);
+    }
+    case "VALIDATION_FAILED":
+      return note(error.details?.[0]?.issue ?? error.message);
+    default:
+      return note(error.message);
+  }
+}
 
 export default function Cart() {
   const cart = useCart();
+  const { claims } = useAuth();
   const navigate = useNavigate();
-  const [quoteNote, setQuoteNote] = useState<string | null>(null);
-  const total = cart.lines.reduce((sum, l) => sum + lineTotalCents(l), 0);
+  const estimate = cart.lines.reduce((sum, l) => sum + lineTotalCents(l), 0);
+
+  // The server is the only pricer: re-quote whenever the cart changes.
+  // A quote self-heals across menu edits — its response carries the version
+  // the cart should re-pin to (no PRICE_CHANGED at this stage by design).
+  const quote = useQuery({
+    queryKey: ["quote", cart.restaurantId, cart.lines],
+    queryFn: () => getQuote(cart.restaurantId!, cart.lines),
+    enabled: !!claims && cart.lines.length > 0,
+    retry: false,
+  });
+  const setMenuVersion = useCart((c) => c.setMenuVersion);
+  useEffect(() => {
+    if (quote.data && quote.data.menu_version !== cart.menuVersion) {
+      setMenuVersion(quote.data.menu_version); // re-pin: checkout consents to THIS menu
+    }
+  }, [quote.data, cart.menuVersion, setMenuVersion]);
 
   if (cart.lines.length === 0) {
     return (
@@ -19,21 +63,12 @@ export default function Cart() {
     );
   }
 
-  // The W2 seam: swaps to POST /v1/quote — same pricing code as placement.
-  const requestQuote = async () => {
-    try {
-      await getQuote({ restaurantId: cart.restaurantId, lines: cart.lines });
-    } catch (e) {
-      if (e instanceof NotBuiltYet) setQuoteNote(e.message);
-    }
-  };
-
+  const totals = quote.data?.totals;
   return (
     <div className="mx-auto max-w-2xl space-y-4">
       <div className="flex items-baseline justify-between">
         <h1 className="text-xl font-bold">{cart.restaurantName}</h1>
-        <button className="text-xs text-slate-500 hover:text-red-300"
-          onClick={cart.clear}>
+        <button className="text-xs text-slate-500 hover:text-red-300" onClick={cart.clear}>
           Clear cart
         </button>
       </div>
@@ -61,26 +96,46 @@ export default function Cart() {
         </div>
       ))}
 
-      <div className="card flex items-center justify-between">
-        <div>
-          <p className="font-semibold">Estimated total</p>
-          <p className="text-xs text-slate-500">
-            Display estimate — the final price is computed server-side at checkout.
-          </p>
+      {totals ? (
+        <div className="card space-y-1 text-sm">
+          <div className="flex justify-between text-slate-400">
+            <span>Subtotal</span><Money cents={totals.subtotal_cents} />
+          </div>
+          <div className="flex justify-between text-slate-400">
+            <span>Delivery fee</span><Money cents={totals.fee_cents} />
+          </div>
+          <div className="flex justify-between text-slate-400">
+            <span>Tax</span><Money cents={totals.tax_cents} />
+          </div>
+          <div className="mt-1 flex justify-between border-t border-slate-800 pt-2 text-base font-bold">
+            <span>Total</span><Money cents={totals.total_cents} />
+          </div>
+          <p className="text-xs text-slate-500">Priced by the server just now · menu v{quote.data!.menu_version}</p>
         </div>
-        <p className="text-xl font-bold"><Money cents={total} /></p>
-      </div>
+      ) : (
+        <div className="card flex items-center justify-between">
+          <div>
+            <p className="font-semibold">Estimated total</p>
+            <p className="text-xs text-slate-500">
+              {claims ? (quote.isFetching ? "Getting the exact price…" : "") : "Sign in for an exact quote."}
+            </p>
+          </div>
+          <p className="text-xl font-bold"><Money cents={estimate} /></p>
+        </div>
+      )}
 
-      {quoteNote && <ComingSoon>{quoteNote}</ComingSoon>}
+      <QuoteError
+        error={quote.error}
+        names={new Map(cart.lines.map((l) => [l.itemId, l.name]))}
+      />
 
-      <div className="flex gap-2">
-        <button className="btn-ghost flex-1" onClick={requestQuote}>
-          Get exact quote
-        </button>
-        <button className="btn-primary flex-1" onClick={() => navigate("/checkout")}>
-          Checkout
-        </button>
-      </div>
+      <button
+        className="btn-primary w-full"
+        disabled={!!quote.error}
+        onClick={() => navigate("/checkout")}
+      >
+        Checkout{totals ? <> · <Money cents={totals.total_cents} /></> : null}
+      </button>
     </div>
   );
 }

@@ -169,9 +169,23 @@ async def test_seed_creates_everything_then_replays_clean(edge):
         touched = rows[0]["item_id"]
         await client.put(f"{stock_url}/{touched}", json={"available": 5}, headers=bearer)
 
+        # The demo customer exists with exactly one saved address (S9) —
+        # and the second run below must not duplicate it.
+        customer_pair = (
+            await client.post(
+                "/v1/auth/login",
+                json={"email": "customer@demo.smartfood.dev", "password": PASSWORD},
+            )
+        ).json()
+        customer_bearer = {"Authorization": f"Bearer {customer_pair['access_token']}"}
+        addresses = (await client.get("/v1/me/addresses", headers=customer_bearer)).json()
+        assert [a["label"] for a in addresses] == ["home"]
+
         # Idempotency: the second run creates NOTHING and changes nothing.
         second = await seed(client)
         assert second == {"created": 0, "replayed": expected}
+        addresses_after = (await client.get("/v1/me/addresses", headers=customer_bearer)).json()
+        assert addresses_after == addresses  # no duplicate address
         menu_after = (await client.get(f"/v1/menus/{biryani['id']}")).json()
         assert menu_after == menu  # same version, same content — untouched
         rows_after = {

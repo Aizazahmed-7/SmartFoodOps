@@ -4,14 +4,24 @@
 // ADR-0020) and the request retries once.
 
 import { decodeClaims, useAuth } from "../state/auth";
+import type { CartLine } from "../state/cart";
 import type {
   Address,
   BrowseResult,
+  CancelResult,
+  DecisionResult,
+  Feed,
   Menu,
   MenuItem,
+  OrderDetail,
+  OrderList,
+  OrderStatus,
+  PlacedOrder,
   Profile,
+  Quote,
   RestaurantCard,
   SearchResult,
+  StockRow,
   TokenPair,
 } from "./types";
 
@@ -23,13 +33,6 @@ export class ApiError extends Error {
     public details?: { field: string; issue: string }[],
   ) {
     super(message);
-  }
-}
-
-/** Marks a seam whose backend arrives with Week 2 — the UI shows it as such. */
-export class NotBuiltYet extends Error {
-  constructor(public feature: string) {
-    super(`${feature} arrives with the Week 2 order APIs`);
   }
 }
 
@@ -63,14 +66,16 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  retry = true,
+  opts: { headers?: Record<string, string>; retry?: boolean } = {},
 ): Promise<T> {
+  const { headers = {}, retry = true } = opts;
   const { access } = useAuth.getState();
   const resp = await fetch(path, {
     method,
     headers: {
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       ...(access ? { Authorization: `Bearer ${access}` } : {}),
+      ...headers, // e.g. Idempotency-Key — same headers on the retry below
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
@@ -80,7 +85,7 @@ async function request<T>(
     const err = data?.error ?? {};
     if (err.code === "AUTH_TOKEN_EXPIRED" && retry) {
       await refreshTokens();
-      return request<T>(method, path, body, false);
+      return request<T>(method, path, body, { headers, retry: false });
     }
     throw new ApiError(err.code ?? "UNKNOWN", err.message ?? resp.statusText, resp.status, err.details);
   }
@@ -174,20 +179,98 @@ export const patchItem = (rid: string, itemId: string, changes: Record<string, u
 export const deleteItem = (rid: string, itemId: string) =>
   request("DELETE", `/v1/restaurants/${rid}/items/${itemId}`);
 
-// ── Week 2 seams: real signatures, honest errors ───────────────────
-// When POST /v1/quote and POST /v1/orders land, these bodies become one
-// `request(...)` call each — nothing else in the UI changes.
+// ── orders: quote, placement, tracking, cancel (W2) ────────────────
 
-export async function getQuote(_cart: unknown): Promise<never> {
-  throw new NotBuiltYet("Price quote");
+/** Cart lines → the wire shape both quote and placement accept. */
+export const toOrderLines = (lines: CartLine[]) =>
+  lines.map((l) => ({
+    item_id: l.itemId,
+    qty: l.qty,
+    options: l.options.map((o) => ({ group_id: o.groupId, option_id: o.optionId })),
+  }));
+
+export const getQuote = (restaurantId: string, lines: CartLine[]) =>
+  request<Quote>("POST", "/v1/quote", {
+    restaurant_id: restaurantId,
+    lines: toOrderLines(lines),
+  });
+
+/**
+ * Placement is the one call that needs an Idempotency-Key: it creates a
+ * resource whose id the client can't know. The key is minted once per cart
+ * BODY and persisted in localStorage — the CART lives in localStorage, so
+ * the key must survive exactly as long as the body it protects (a new tab
+ * with the same cart must replay, not double-order). A retry reuses it,
+ * editing the cart regenerates it, success clears it.
+ */
+const IDEM_STORE = "sfo-place-idem";
+
+export function idemKeyFor(body: unknown): string {
+  const hash = JSON.stringify(body);
+  try {
+    const stored = JSON.parse(localStorage.getItem(IDEM_STORE) ?? "null");
+    if (stored?.hash === hash) return stored.key;
+  } catch {
+    /* corrupted entry — mint fresh */
+  }
+  const key = crypto.randomUUID();
+  localStorage.setItem(IDEM_STORE, JSON.stringify({ hash, key }));
+  return key;
 }
 
-export async function placeOrder(_cart: unknown): Promise<never> {
-  throw new NotBuiltYet("Order placement");
+export const clearIdemKey = () => localStorage.removeItem(IDEM_STORE);
+
+export interface PlaceOrderBody {
+  restaurant_id: string;
+  menu_version: number;
+  address_id: string;
+  card_token: string;
+  lines: ReturnType<typeof toOrderLines>;
 }
 
-export async function listOrders(): Promise<never> {
-  throw new NotBuiltYet("Order history");
-}
+export const placeOrder = (body: PlaceOrderBody) =>
+  request<PlacedOrder>("POST", "/v1/orders", body, {
+    headers: { "Idempotency-Key": idemKeyFor(body) },
+  });
+
+export const listOrders = (cursor?: string) =>
+  request<OrderList>("GET", `/v1/orders${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+
+export const getOrder = (orderId: string) =>
+  request<OrderDetail>("GET", `/v1/orders/${orderId}`);
+
+/** 202 submitted / 200 already done — both resolve; 409 (courier has it) throws. */
+export const cancelOrder = (orderId: string) =>
+  request<CancelResult>("POST", `/v1/orders/${orderId}/cancel`);
+
+// ── kitchen: feed, decisions, prep (W2, partner side) ──────────────
+
+export const getRestaurantOrders = (status: OrderStatus, cursor?: string) =>
+  request<Feed>(
+    "GET",
+    // limit=100 (the backend max): a kitchen screen wants the whole queue.
+    `/v1/restaurant/orders?status=${status}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+  );
+
+export const acceptOrder = (orderId: string) =>
+  request<DecisionResult>("POST", `/v1/restaurant/orders/${orderId}/accept`);
+export const rejectOrder = (orderId: string) =>
+  request<DecisionResult>("POST", `/v1/restaurant/orders/${orderId}/reject`);
+export const markPreparing = (orderId: string) =>
+  request<{ order_id: string; status: OrderStatus }>(
+    "POST", `/v1/restaurant/orders/${orderId}/preparing`);
+export const markReady = (orderId: string) =>
+  request<{ order_id: string; status: OrderStatus }>(
+    "POST", `/v1/restaurant/orders/${orderId}/ready`);
+
+// ── inventory: stock + capacity (strict stock, S1) ─────────────────
+
+export const getStock = (rid: string) =>
+  request<{ items: StockRow[] }>("GET", `/v1/inventory/restaurants/${rid}/stock`);
+export const setStock = (rid: string, itemId: string, available: number) =>
+  request<StockRow>("PUT", `/v1/inventory/restaurants/${rid}/stock/${itemId}`, { available });
+export const setCapacity = (rid: string, capacity: number) =>
+  request<{ restaurant_id: string; capacity: number; active: number }>(
+    "PUT", `/v1/inventory/restaurants/${rid}/capacity`, { capacity });
 
 export { decodeClaims };

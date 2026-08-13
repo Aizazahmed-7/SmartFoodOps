@@ -1,4 +1,17 @@
 import type { ReactNode } from "react";
+import type { OrderStatus } from "../api/types";
+
+const STATUS_STYLE: Partial<Record<OrderStatus, string>> = {
+  SETTLED: "bg-emerald-950 text-emerald-300",
+  DELIVERED: "bg-emerald-950 text-emerald-300",
+  CANCELLING: "bg-red-950 text-red-300",
+  CANCELLED: "bg-red-950 text-red-300",
+  REFUNDED: "bg-red-950 text-red-300",
+};
+
+export function StatusTag({ status }: { status: OrderStatus }) {
+  return <span className={`tag ${STATUS_STYLE[status] ?? ""}`}>{status.replace("_", " ")}</span>;
+}
 
 export function Money({ cents }: { cents: number }) {
   const sign = cents < 0 ? "-" : "";
@@ -16,18 +29,6 @@ export function ErrorNote({ error }: { error: unknown }) {
     <p className="rounded-xl bg-red-950/60 border border-red-900 px-3 py-2 text-sm text-red-200">
       {message}
     </p>
-  );
-}
-
-/** The honest stub banner for Week-2 seams. */
-export function ComingSoon({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/60 px-4 py-3 text-sm text-slate-400">
-      <span className="mr-2 rounded bg-orange-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-400">
-        Week 2
-      </span>
-      {children}
-    </div>
   );
 }
 

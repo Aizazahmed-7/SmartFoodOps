@@ -160,6 +160,7 @@ The full stack is ≈ 8–9 GB, so **slim mode is the default**, not the excepti
 | `make up` | `core` profile only + topics/schemas/tables | ~3 GB |
 | `make dev SVC=order` | Run one service **natively on the host**, `uvicorn --reload`, wired to compose infra | +~150 MB |
 | `make up-apps ONLY="payment inventory"` | Add just the containerized neighbors your flow needs | ~4 GB typical |
+| `make up-m2` | The W2 order-lifecycle set: core + temporal, mock-psp, identity, catalog, edge-bff, inventory, order, order-worker, payment (~6–7 GB) |
 | `make up-cdc` | Add the `cdc` profile (Kafka Connect + Debezium) — needed for `OUTBOX_MODE=debezium` (§5) | +1–1.5 GB |
 | `make up-obs` | Add the `obs` profile (otel-collector, Jaeger, Prometheus, Grafana) | — |
 | `make up-ui` | Add the `ui` profile (Redpanda Console) | — |

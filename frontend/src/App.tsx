@@ -8,6 +8,7 @@ import Browse from "./pages/Browse";
 import Cart from "./pages/Cart";
 import Checkout from "./pages/Checkout";
 import Login from "./pages/Login";
+import OrderDetail from "./pages/OrderDetail";
 import Orders from "./pages/Orders";
 import PartnerDashboard from "./pages/PartnerDashboard";
 import PartnerOnboard from "./pages/PartnerOnboard";
@@ -94,6 +95,7 @@ export default function App() {
           <Route path="/cart" element={<Cart />} />
           <Route path="/checkout" element={<Checkout />} />
           <Route path="/orders" element={<Orders />} />
+          <Route path="/orders/:id" element={<OrderDetail />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/account" element={<Account />} />

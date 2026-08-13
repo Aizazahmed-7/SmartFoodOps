@@ -1,32 +1,74 @@
-import { ComingSoon } from "../components/ui";
-
-const PLACEHOLDER = [
-  { name: "Biryani House", status: "DELIVERED", total: "$18.00", when: "yesterday" },
-  { name: "Taco Town", status: "SETTLED", total: "$9.50", when: "last week" },
-];
+import { useInfiniteQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
+import { listOrders } from "../api/client";
+import { TERMINAL_STATUSES } from "../api/types";
+import { useAuth } from "../state/auth";
+import { ErrorNote, Spinner, StatusTag } from "../components/ui";
 
 export default function Orders() {
+  const { claims } = useAuth();
+  const orders = useInfiniteQuery({
+    queryKey: ["orders"],
+    queryFn: ({ pageParam }) => listOrders(pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+    enabled: !!claims,
+    // Poll while anything on the FIRST page is still moving (that's where
+    // live orders sort); go quiet when all terminal.
+    refetchInterval: (query) =>
+      query.state.data?.pages[0]?.items.some((o) => !TERMINAL_STATUSES.includes(o.status))
+        ? 3000
+        : false,
+    refetchIntervalInBackground: true, // tracking keeps moving in a background tab
+  });
+
+  if (!claims)
+    return (
+      <div className="py-16 text-center">
+        <p className="text-slate-400">Sign in to see your orders.</p>
+        <Link to="/login" className="btn-primary mt-4 inline-block">Sign in</Link>
+      </div>
+    );
+  if (orders.isLoading) return <Spinner />;
+
+  const items = orders.data?.pages.flatMap((page) => page.items) ?? [];
   return (
     <div className="mx-auto max-w-2xl space-y-4">
       <h1 className="text-xl font-bold">Your orders</h1>
-      <ComingSoon>
-        Order history reads the order service (Week 2). Below is the intended
-        layout with placeholder data.
-      </ComingSoon>
-      <div className="space-y-2 opacity-50 select-none" aria-hidden>
-        {PLACEHOLDER.map((o, i) => (
-          <div key={i} className="card flex items-center justify-between">
+      <ErrorNote error={orders.error} />
+      {items.length === 0 && (
+        <p className="py-12 text-center text-slate-500">
+          No orders yet — <Link to="/" className="text-orange-400">find something tasty</Link>.
+        </p>
+      )}
+      <div className="space-y-2">
+        {items.map((o) => (
+          <Link key={o.order_id} to={`/orders/${o.order_id}`}
+            className="card flex items-center justify-between transition hover:border-slate-700">
             <div>
-              <p className="font-medium">{o.name}</p>
-              <p className="text-xs text-slate-500">{o.when}</p>
+              <p className="font-medium">{o.restaurant_name}</p>
+              <p className="text-xs text-slate-500">
+                {new Date(o.placed_at).toLocaleString()}
+              </p>
             </div>
             <div className="text-right">
-              <span className="tag">{o.status}</span>
-              <p className="mt-1 text-sm font-semibold">{o.total}</p>
+              <StatusTag status={o.status} />
+              <p className="mt-1 text-sm font-semibold tabular-nums">
+                ${(o.total_cents / 100).toFixed(2)}
+              </p>
             </div>
-          </div>
+          </Link>
         ))}
       </div>
+      {orders.hasNextPage && (
+        <button
+          className="btn-ghost w-full"
+          disabled={orders.isFetchingNextPage}
+          onClick={() => orders.fetchNextPage()}
+        >
+          {orders.isFetchingNextPage ? "Loading…" : "Load older orders"}
+        </button>
+      )}
     </div>
   );
 }
