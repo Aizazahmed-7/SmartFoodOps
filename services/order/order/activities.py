@@ -20,15 +20,20 @@ from temporalio.exceptions import ApplicationError
 from .adapters.repo import OrderRepo
 from .db import OrderStatus
 from .domain.ports import InventoryOpsPort, PaymentOpsPort, PaymentStateConflict
-from .domain.transitions import IllegalTransition, transition
+from .domain.transitions import IllegalTransition, begin_cancel_from, transition
 from .values import (
     ActivityName,
     AuthResult,
+    CancelOutcome,
     CancelReason,
     LineSpec,
     PriceResult,
     ReserveResult,
 )
+
+# What a customer cancel may interrupt mid-kitchen. PICKED_UP is absent on
+# purpose: once the courier holds the food, the cancel loses (FR-21).
+CANCELLABLE_KITCHEN_STATES: tuple[OrderStatus, ...] = ("ACCEPTED", "PREPARING", "READY")
 
 
 class OrderActivities:
@@ -151,6 +156,16 @@ class OrderActivities:
             order_id, expected=expected, target="CANCELLING", cancel_reason=reason
         )
 
+    @activity.defn(name=ActivityName.TRY_BEGIN_CANCEL)
+    async def try_begin_cancel(self, order_id: str, reason: CancelReason) -> CancelOutcome:
+        """The customer-vs-courier referee: set-guarded because the workflow
+        cannot know which kitchen state the row is in when the cancel lands.
+        too_late is a VALUE — losing the race is an answer, not an error."""
+        cancelled = await begin_cancel_from(
+            self._sessions, order_id, allowed=CANCELLABLE_KITCHEN_STATES, reason=reason
+        )
+        return "ok" if cancelled else "too_late"
+
     @activity.defn(name=ActivityName.VOID_AUTHORIZATION)
     async def void_authorization(self, order_id: str) -> None:
         await self._payment.void(order_id)  # 409 no-auth converges inside the client
@@ -205,6 +220,7 @@ class OrderActivities:
             self.capture_payment,
             self.settle_order,
             self.begin_cancel,
+            self.try_begin_cancel,
             self.void_authorization,
             self.release_reservation,
             self.finish_cancel,

@@ -272,6 +272,29 @@ async def test_illegal_transition_is_non_retryable():
     assert exc.value.type == "IllegalTransition"
 
 
+async def test_try_begin_cancel_wins_from_kitchen_states_and_stamps_reason():
+    acts, sessions, _, _ = await _setup()
+    await acts.validate_and_reserve("ord_1", _price())
+    await acts.authorize_payment("ord_1", _price())
+    await acts.confirm_order("ord_1")
+    await acts.mark_accepted("ord_1")
+    assert await acts.try_begin_cancel("ord_1", CancelReason.CUSTOMER_CANCELLED) == "ok"
+    assert await _status(sessions) == "CANCELLING"
+    async with sessions() as s:
+        reason = (await s.execute(sa.select(orders.c.cancel_reason))).scalar_one()
+    assert reason == "customer_cancelled"
+    # at-least-once replay: still "ok", no error
+    assert await acts.try_begin_cancel("ord_1", CancelReason.CUSTOMER_CANCELLED) == "ok"
+
+
+async def test_try_begin_cancel_loses_once_the_courier_has_it():
+    acts, sessions, _, _ = await _setup()
+    await _to_ready(acts, sessions)
+    await acts.mark_picked_up("ord_1")
+    assert await acts.try_begin_cancel("ord_1", CancelReason.CUSTOMER_CANCELLED) == "too_late"
+    assert await _status(sessions) == "PICKED_UP"  # untouched — a value, not an error
+
+
 async def test_every_activity_name_is_registered_exactly_once():
     """The tripwire the worker needs: workflows dispatch BY NAME, so a
     registration dropped from all() fails only at invocation time in a

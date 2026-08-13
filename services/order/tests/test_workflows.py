@@ -101,6 +101,11 @@ def mock_activities(script: dict[str, object] | None = None):
     async def begin_cancel(order_id: str, expected: str, reason: str) -> None:
         calls.append(("begin_cancel", order_id, expected, reason))
 
+    @activity.defn(name=ActivityName.TRY_BEGIN_CANCEL)
+    async def try_begin_cancel(order_id: str, reason: str) -> str:
+        calls.append(("try_begin_cancel", order_id, reason))
+        return outcome("try_begin_cancel", "ok")  # type: ignore[return-value]
+
     @activity.defn(name=ActivityName.VOID_AUTHORIZATION)
     async def void_authorization(order_id: str) -> None:
         calls.append(("void_authorization", order_id))
@@ -124,10 +129,24 @@ def mock_activities(script: dict[str, object] | None = None):
         capture_payment,
         settle_order,
         begin_cancel,
+        try_begin_cancel,
         void_authorization,
         release_reservation,
         finish_cancel,
     ], calls
+
+
+async def _wait_for_child(env, order_id, *, attempts=200):
+    """Block until dlv::{order_id} exists — the deterministic way to know
+    the parent is inside the delivery window before we act on it."""
+    handle = env.client.get_workflow_handle(f"dlv::{order_id}")
+    for _ in range(attempts):
+        try:
+            await handle.describe()
+            return
+        except RPCError:
+            await asyncio.sleep(0.05)
+    raise AssertionError("DeliveryWorkflow never appeared")
 
 
 async def _signal_food_ready(env, order_id, *, times=1):
@@ -144,7 +163,16 @@ async def _signal_food_ready(env, order_id, *, times=1):
     raise AssertionError("DeliveryWorkflow never appeared")
 
 
-async def _run(env, script=None, *, signal=None, deliver=False, sandboxed=False, order_id=None):
+async def _run(
+    env,
+    script=None,
+    *,
+    signal=None,
+    cancel: bool | list[bool] = False,
+    deliver=False,
+    sandboxed=False,
+    order_id=None,
+):
     order_id = order_id or f"ord_{uuid.uuid4().hex[:8]}"
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
     activities, calls = mock_activities(script)
@@ -163,6 +191,9 @@ async def _run(env, script=None, *, signal=None, deliver=False, sandboxed=False,
             id=f"ord::{order_id}",
             task_queue=task_queue,
         )
+        if cancel:
+            for _ in cancel if isinstance(cancel, list) else [cancel]:
+                await handle.signal("cancel_requested")
         if signal is not None:
             for verdict in signal if isinstance(signal, list) else [signal]:
                 await handle.signal("restaurant_decision", verdict)
@@ -332,6 +363,130 @@ async def test_duplicate_start_is_rejected(env):
             )
         await handle.signal("restaurant_decision", "reject")  # unwind: no child needed
         assert await handle.result() == "CANCELLED"
+
+
+async def test_customer_cancel_before_any_verdict_unwinds_fully(env):
+    result, calls, _ = await _run(env, cancel=True)
+    assert result == "CANCELLED"
+    names = [c[0] for c in calls]
+    # pre-accept the customer always wins: known-state BEGIN_CANCEL, not TRY
+    assert ("begin_cancel", calls[-4][1], "CONFIRMED", "customer_cancelled") in calls
+    assert "try_begin_cancel" not in names
+    assert names[-3:] == ["void_authorization", "release_reservation", "finish_cancel"]
+    assert calls[-1][2] == "customer_cancelled"
+
+
+async def test_customer_cancel_beats_a_simultaneous_accept(env):
+    result, calls, _ = await _run(env, signal="accept", cancel=True)
+    # both signals land before the wait wakes: cancel is checked first —
+    # nothing is cooking yet, the customer wins
+    assert result == "CANCELLED"
+    assert "mark_accepted" not in [c[0] for c in calls]
+
+
+async def test_customer_cancel_mid_kitchen_cancels_the_courier(env):
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    activities, calls = mock_activities()
+    worker = Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[OrderWorkflow, DeliveryWorkflow],
+        activities=activities,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+    async with worker:
+        handle = await env.client.start_workflow(
+            "OrderWorkflow",
+            WorkflowInput(order_id=order_id, accept_timeout_s=180),
+            id=f"ord::{order_id}",
+            task_queue=task_queue,
+        )
+        await handle.signal("restaurant_decision", "accept")
+        await _wait_for_child(env, order_id)  # parent is now inside the delivery window
+        await handle.signal("cancel_requested")  # kitchen never sends food_ready
+        result = await handle.result()
+    assert result == "CANCELLED"
+    names = [c[0] for c in calls]
+    assert names[-4:] == [
+        "try_begin_cancel",  # the DB referees...
+        "void_authorization",  # ...then the §7 tail
+        "release_reservation",
+        "finish_cancel",
+    ]
+    assert "capture_payment" not in names and "settle_order" not in names
+    child = await env.client.get_workflow_handle(f"dlv::{order_id}").describe()
+    assert child.status is not None and child.status.name == "CANCELED"  # Temporal's spelling
+
+
+async def test_customer_cancel_too_late_rides_to_settled(env):
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    activities, calls = mock_activities({"try_begin_cancel": "too_late"})
+    worker = Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[OrderWorkflow, DeliveryWorkflow],
+        activities=activities,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+    async with worker:
+        handle = await env.client.start_workflow(
+            "OrderWorkflow",
+            WorkflowInput(order_id=order_id, accept_timeout_s=180),
+            id=f"ord::{order_id}",
+            task_queue=task_queue,
+        )
+        await handle.signal("restaurant_decision", "accept")
+        await _wait_for_child(env, order_id)
+        await handle.signal("cancel_requested")  # courier "already picked up"
+        await _signal_food_ready(env, order_id)  # delivery continues regardless
+        result = await handle.result()
+    assert result == "SETTLED"
+    names = [c[0] for c in calls]
+    assert names.count("try_begin_cancel") == 1  # asked once, told no
+    assert "begin_cancel" not in names and "finish_cancel" not in names
+    assert names[-2:] == ["capture_payment", "settle_order"]  # order completed normally
+
+
+async def test_cancel_completes_even_if_the_child_fails_on_the_guard(env):
+    """The drain invariant: a won cancel flips the row to CANCELLING; if the
+    child's mark then races in, it fails on the guard instead of ending
+    cleanly cancelled — EITHER ending must leave the unwind completing.
+    (mark_picked_up is scripted to fail as the guard would; whether this
+    run's child dies on it or is cancelled first, CANCELLED must result.)"""
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    guard = ApplicationError("order is CANCELLING", non_retryable=True, type="IllegalTransition")
+    activities, calls = mock_activities({"mark_picked_up": guard})
+    worker = Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[OrderWorkflow, DeliveryWorkflow],
+        activities=activities,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+    async with worker:
+        handle = await env.client.start_workflow(
+            "OrderWorkflow",
+            WorkflowInput(order_id=order_id, accept_timeout_s=180),
+            id=f"ord::{order_id}",
+            task_queue=task_queue,
+        )
+        await handle.signal("restaurant_decision", "accept")
+        await _signal_food_ready(env, order_id)  # child heads for its timers
+        await handle.signal("cancel_requested")
+        result = await handle.result()
+    assert result == "CANCELLED"
+    names = [c[0] for c in calls]
+    assert names[-3:] == ["void_authorization", "release_reservation", "finish_cancel"]
+    assert "capture_payment" not in names
+
+
+async def test_duplicate_cancel_signals_unwind_once(env):
+    result, calls, _ = await _run(env, cancel=[True, True])
+    assert result == "CANCELLED"
+    assert [c[0] for c in calls].count("finish_cancel") == 1
 
 
 async def test_workflow_survives_the_real_sandbox(env):

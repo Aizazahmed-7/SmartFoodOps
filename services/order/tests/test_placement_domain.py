@@ -44,6 +44,9 @@ class RecordingSaga:
     async def signal_food_ready(self, order_id):
         raise AssertionError("placement never signals")  # pragma: no cover
 
+    async def signal_cancel(self, order_id):
+        raise AssertionError("placement never signals")  # pragma: no cover
+
 
 def snapshot():
     return {

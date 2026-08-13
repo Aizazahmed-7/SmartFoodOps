@@ -143,6 +143,11 @@ class KitchenService:
                 raise AlreadyDecided("order was already rejected")
             if row.cancel_reason == CancelReason.RESTAURANT_TIMEOUT:
                 raise AlreadyDecided("the decision window timed out")
+            if row.cancel_reason == CancelReason.CUSTOMER_CANCELLED:
+                # S7: the customer mooted the fork — possibly AFTER this
+                # kitchen's accept was submitted. Its retry must hear "the
+                # window closed", not "your action doesn't fit".
+                raise AlreadyDecided("the customer cancelled this order")
             # Cancelled before it ever reached the kitchen (stock, payment):
             # there was never a decision to make — a state problem, not a
             # decided-differently problem.

@@ -46,6 +46,7 @@ class RecordingSaga:
         self.started: list[str] = []
         self.decisions: list[tuple[str, str]] = []
         self.food_ready: list[str] = []
+        self.cancels: list[str] = []
         self.fail_with: Exception | None = None
 
     async def start(self, order_id: str) -> None:
@@ -58,6 +59,10 @@ class RecordingSaga:
     async def signal_food_ready(self, order_id: str) -> None:
         self._maybe_fail()
         self.food_ready.append(order_id)
+
+    async def signal_cancel(self, order_id: str) -> None:
+        self._maybe_fail()
+        self.cancels.append(order_id)
 
     def _maybe_fail(self) -> None:
         if self.fail_with is not None:

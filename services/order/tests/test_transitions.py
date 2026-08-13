@@ -7,7 +7,7 @@ import pytest
 import sqlalchemy as sa
 from order.adapters.repo import OrderRepo
 from order.db import metadata, orders, outbox
-from order.domain.transitions import IllegalTransition, transition
+from order.domain.transitions import IllegalTransition, begin_cancel_from, transition
 from smartfood_kafka import EventType
 from smartfood_outbox import event_id
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -94,6 +94,50 @@ async def test_illegal_transition_names_the_actual_state():
     with pytest.raises(IllegalTransition) as exc:
         await transition(sessions, "ord_ghost", expected="PLACED", target="VALIDATED")
     assert exc.value.actual == "absent"
+
+
+KITCHEN = ("ACCEPTED", "PREPARING", "READY")
+
+
+async def test_begin_cancel_from_flips_any_allowed_state():
+    for start in KITCHEN:
+        sessions = await _sessions()
+        await _seed_order(sessions)
+        await transition(sessions, "ord_1", expected="PLACED", target=start)
+        assert await begin_cancel_from(
+            sessions, "ord_1", allowed=KITCHEN, reason="customer_cancelled"
+        )
+        row = await _status(sessions)
+        assert (row.status, row.cancel_reason) == ("CANCELLING", "customer_cancelled")
+        assert row.aggregate_version == 2  # the set-guarded move bumps too
+
+
+async def test_begin_cancel_from_loses_to_the_courier():
+    sessions = await _sessions()
+    await _seed_order(sessions)
+    await transition(sessions, "ord_1", expected="PLACED", target="PICKED_UP")
+    assert not await begin_cancel_from(
+        sessions, "ord_1", allowed=KITCHEN, reason="customer_cancelled"
+    )
+    row = await _status(sessions)
+    assert (row.status, row.cancel_reason) == ("PICKED_UP", None)  # untouched
+
+
+async def test_begin_cancel_from_replay_is_true_without_a_second_bump():
+    sessions = await _sessions()
+    await _seed_order(sessions)
+    await transition(sessions, "ord_1", expected="PLACED", target="READY")
+    assert await begin_cancel_from(sessions, "ord_1", allowed=KITCHEN, reason="customer_cancelled")
+    assert await begin_cancel_from(sessions, "ord_1", allowed=KITCHEN, reason="customer_cancelled")
+    row = await _status(sessions)
+    assert (row.status, row.aggregate_version) == ("CANCELLING", 2)  # one bump, not two
+
+
+async def test_begin_cancel_from_unknown_order_is_false():
+    sessions = await _sessions()
+    assert not await begin_cancel_from(
+        sessions, "ord_ghost", allowed=KITCHEN, reason="customer_cancelled"
+    )
 
 
 async def test_event_stages_in_the_same_transaction_with_full_state():

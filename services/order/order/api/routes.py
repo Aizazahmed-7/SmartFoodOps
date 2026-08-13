@@ -25,9 +25,18 @@ from ..domain.ports import (
     AddressNotFound,
     AddressUnavailable,
     RestaurantNotFound,
+    SagaUnavailable,
     SnapshotUnavailable,
 )
-from ..domain.service import InvalidCursor, OrderNotFound, OrderService, Placed
+from ..domain.service import (
+    CancelAlreadyDone,
+    CancelSubmitted,
+    InvalidCursor,
+    NotCancellable,
+    OrderNotFound,
+    OrderService,
+    Placed,
+)
 
 router = APIRouter()
 
@@ -190,6 +199,45 @@ async def place_order(
     assert isinstance(outcome, BodyMismatch)
     raise ApiError(
         ErrorCode.IDEMPOTENCY_KEY_REUSE, "this key was used with a different request body", 422
+    )
+
+
+@router.post("/v1/orders/{order_id}/cancel")
+async def cancel_order(order_id: str, ctx: Purchaser, request: Request) -> Any:
+    """Naturally idempotent by state (like the kitchen's decisions): 202 =
+    handed to the saga, 200 = already cancelled/cancelling, 409 = the
+    courier has the food (FR-21). Re-POSTing any of them is safe."""
+    try:
+        outcome = await _svc(request).request_cancel(ctx.sub, order_id)
+    except OrderNotFound:
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown order", 404) from None
+    except SagaUnavailable:
+        raise ApiError(
+            ErrorCode.DEPENDENCY_UNAVAILABLE,
+            "temporarily unavailable",
+            503,
+            headers={"Retry-After": "1"},
+        ) from None
+
+    if isinstance(outcome, CancelSubmitted):
+        return JSONResponse(
+            status_code=202, content={"order_id": order_id, "status": outcome.status}
+        )
+    if isinstance(outcome, CancelAlreadyDone):
+        return JSONResponse(
+            status_code=200,
+            content={
+                "order_id": order_id,
+                "status": outcome.status,
+                "cancel_reason": outcome.cancel_reason,
+            },
+        )
+    assert isinstance(outcome, NotCancellable)
+    raise ApiError(
+        ErrorCode.ORDER_NOT_CANCELLABLE,
+        "the courier already has this order",
+        409,
+        details=[{"field": "status", "issue": f"order is {outcome.status}"}],
     )
 
 

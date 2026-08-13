@@ -69,6 +69,11 @@ class SagaPort(Protocol):
         """Tell dlv::{order_id} the kitchen is done. Same exceptions."""
         ...
 
+    async def signal_cancel(self, order_id: str) -> None:
+        """Deliver the customer's cancel request to ord::{order_id}.
+        Same exceptions; the workflow referees whether it is honored."""
+        ...
+
 
 class InventoryOpsPort(Protocol):
     """The saga's stock operations (worker activities). Structural, so

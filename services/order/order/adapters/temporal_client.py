@@ -21,6 +21,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from ..domain.ports import SagaGone, SagaUnavailable
 from ..values import (
+    SIGNAL_CANCEL_REQUESTED,
     SIGNAL_FOOD_READY,
     SIGNAL_RESTAURANT_DECISION,
     Verdict,
@@ -84,6 +85,10 @@ class TemporalSaga:
     async def signal_food_ready(self, order_id: str) -> None:
         await self._signal(f"dlv::{order_id}", SIGNAL_FOOD_READY)
         log.info("food_ready signalled", order_id=order_id)
+
+    async def signal_cancel(self, order_id: str) -> None:
+        await self._signal(f"ord::{order_id}", SIGNAL_CANCEL_REQUESTED)
+        log.info("cancel signalled", order_id=order_id)
 
     async def _signal(self, workflow_id: str, name: str, *args: object) -> None:
         """RPC → domain translation: NOT_FOUND means the workflow already
