@@ -15,7 +15,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from smartfood_api import ApiError, ErrorCode
-from smartfood_auth import AuthContext, require_role
+from smartfood_auth import AuthContext, Role, require_role
 
 from ..db import OrderStatus
 from ..domain.kitchen import AlreadyDecided, KitchenService, KitchenStateConflict
@@ -25,7 +25,7 @@ from ..values import Verdict
 
 router = APIRouter()
 
-RestaurantAdmin = Annotated[AuthContext, Depends(require_role("restaurant_admin"))]
+RestaurantAdmin = Annotated[AuthContext, Depends(require_role(Role.RESTAURANT_ADMIN))]
 
 
 def _kitchen(request: Request) -> KitchenService:

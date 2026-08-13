@@ -17,7 +17,6 @@ from typing import Any, Protocol
 
 import structlog
 from smartfood_otel import get_logger, trace_id_of
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .adapters.repo import InventoryRepo
@@ -57,15 +56,12 @@ class StockProvisioningHandler:
             for item_id in item_ids:
                 if item_id in known:
                     continue  # existing counts survive menu edits
-                try:
-                    await repo.insert_stock(restaurant_id, item_id, 0, _now())
-                except IntegrityError:  # racing admin PUT — theirs wins
-                    await session.rollback()
+                # Conflict-safe: a racing admin PUT wins WITHOUT the old
+                # mid-batch rollback that silently discarded every earlier
+                # provisioned row of this same event.
+                await repo.insert_stock(restaurant_id, item_id, 0, _now())
             if await repo.get_load(restaurant_id) is None:
-                try:
-                    await repo.insert_load(restaurant_id, self._default_capacity)
-                except IntegrityError:
-                    await session.rollback()
+                await repo.insert_load(restaurant_id, self._default_capacity)
             await session.commit()
             log.info(
                 "stock rows provisioned",

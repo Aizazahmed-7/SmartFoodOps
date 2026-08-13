@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Link, NavLink, Route, Routes, useNavigate } from "react-router-dom";
+import { Link, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { onboardRestaurant } from "./api/client";
 import { useAuth } from "./state/auth";
 import { useCart } from "./state/cart";
@@ -20,6 +20,7 @@ function Header() {
   const { claims, logout } = useAuth();
   const lines = useCart((c) => c.lines);
   const navigate = useNavigate();
+  const location = useLocation();
   const count = lines.reduce((n, l) => n + l.qty, 0);
   const tab = ({ isActive }: { isActive: boolean }) =>
     `rounded-lg px-3 py-1.5 text-sm ${isActive ? "bg-slate-800 text-white" : "text-slate-400 hover:text-white"}`;
@@ -56,7 +57,8 @@ function Header() {
             </button>
           </>
         ) : (
-          <Link to="/login" className="btn-primary">Sign in</Link>
+          // Carry the current location — sign-in resumes where it interrupted.
+          <Link to="/login" state={{ from: location }} className="btn-primary">Sign in</Link>
         )}
       </div>
     </header>

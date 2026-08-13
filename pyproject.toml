@@ -74,5 +74,9 @@ testpaths = ["libs", "services", "tools"]
 # query and under-reports by ~30 points. Do not remove.
 concurrency = ["thread", "greenlet"]
 
+[tool.coverage.report]
+# The suite sits at 100% (make cov); hold the line rather than drift down.
+fail_under = 100
+
 [tool.uv]
 package = false

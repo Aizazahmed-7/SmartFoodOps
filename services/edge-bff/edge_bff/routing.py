@@ -8,14 +8,39 @@ Modes:
 Longest prefix wins, so /v1/auth/login (public) beats /v1/auth (auth).
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal, Protocol
+
+RouteMode = Literal["public", "public_read", "auth"]
 
 
 @dataclass(frozen=True)
 class Rule:
     prefix: str
-    upstream: str  # settings attribute name, resolved at startup
-    mode: str  # public | public_read | auth
+    upstream: str  # settings attribute name — bind with resolve() at startup
+    mode: RouteMode
+
+
+@dataclass(frozen=True)
+class ResolvedRule:
+    """A Rule with its upstream attribute bound to a concrete base URL —
+    built ONCE in create_app so the proxy never getattr()s per request."""
+
+    prefix: str
+    base_url: str
+    mode: RouteMode
+
+
+class _HasPrefix(Protocol):
+    @property
+    def prefix(self) -> str: ...  # read-only: frozen dataclasses qualify
+
+
+def resolve(rules: "Sequence[Rule]", settings: object) -> list[ResolvedRule]:
+    return [
+        ResolvedRule(rule.prefix, getattr(settings, rule.upstream), rule.mode) for rule in rules
+    ]
 
 
 RULES = [
@@ -36,16 +61,16 @@ RULES = [
 ]
 
 
-def match(path: str) -> Rule | None:
-    best: Rule | None = None
-    for rule in RULES:
+def match[R: _HasPrefix](path: str, rules: Sequence[R]) -> R | None:
+    best: R | None = None
+    for rule in rules:
         if path == rule.prefix or path.startswith(rule.prefix + "/"):
             if best is None or len(rule.prefix) > len(best.prefix):
                 best = rule
     return best
 
 
-def needs_auth(rule: Rule, method: str) -> bool:
+def needs_auth(rule: "Rule | ResolvedRule", method: str) -> bool:
     if rule.mode == "public":
         return False
     if rule.mode == "public_read":

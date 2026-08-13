@@ -944,6 +944,8 @@ dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "smartfood-api" },
+    { name = "smartfood-otel" },
 ]
 
 [package.metadata]
@@ -952,6 +954,8 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.9" },
+    { name = "smartfood-api", editable = "libs/smartfood-api" },
+    { name = "smartfood-otel", editable = "libs/smartfood-otel" },
 ]
 
 [[package]]

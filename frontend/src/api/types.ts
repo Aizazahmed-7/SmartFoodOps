@@ -136,6 +136,18 @@ export const CANCELLABLE_STATUSES: OrderStatus[] = [
   "PLACED", "VALIDATED", "PAYMENT_CLEARED", "CONFIRMED", "ACCEPTED", "PREPARING", "READY",
 ];
 
+/** The cancel branch of the machine — an order here never reaches DELIVERED. */
+export const CANCEL_FAMILY: OrderStatus[] = ["CANCELLING", "CANCELLED", "REFUNDED"];
+
+/** Why an order died — mirror of the saga's cancel_reason vocabulary. */
+export type CancelReason =
+  | "item_unavailable"
+  | "at_capacity"
+  | "payment_declined"
+  | "restaurant_rejected"
+  | "restaurant_timeout"
+  | "customer_cancelled";
+
 export interface Totals {
   subtotal_cents: number;
   discount_cents: number;

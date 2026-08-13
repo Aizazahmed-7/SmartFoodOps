@@ -1,5 +1,7 @@
 """Payment settings — all overridable by environment (compose sets the URLs)."""
 
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,10 +15,16 @@ class Settings(BaseSettings):
     mock_psp_base_url: str = "http://localhost:9080"
 
     # Event backbone: outbox → c1.payments.events.
-    outbox_mode: str = "off"  # poller | off
+    outbox_mode: Literal["poller", "debezium", "off"] = "off"
     kafka_bootstrap: str = "localhost:19092"
     schema_registry_url: str = "http://localhost:8086"
     cell_id: str = "c1"
 
     # Tests use sqlite + create_all; containers run Alembic migrations.
     create_all: bool = False
+
+    # Internal HTTP calls: per-attempt total / connect budgets. Payment's
+    # total is semantically load-bearing (it is what turns tok_timeout into
+    # the ambiguous-outcome case), so it must be tunable without a deploy.
+    internal_timeout_seconds: float = 5.0
+    internal_connect_timeout_seconds: float = 3.0

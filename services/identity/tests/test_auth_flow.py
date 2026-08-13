@@ -1,24 +1,8 @@
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from identity.config import Settings
-from identity.main import create_app
 from smartfood_auth import JwksVerifier, headers_for
 from smartfood_auth.stamp import context_from_claims
-
-
-@pytest.fixture()
-def client(tmp_path):
-    settings = Settings(
-        database_url="sqlite+aiosqlite://",
-        create_all=True,
-        signing_key_path=str(tmp_path / "key.pem"),
-        token_issuer="http://identity.test",
-    )
-    app = create_app(settings)
-    with TestClient(app) as c:  # `with` runs the lifespan (create_all)
-        yield c
-
 
 REG = {"email": "ali@example.com", "password": "hunter2hunter2"}
 
@@ -267,7 +251,12 @@ async def _domain_service(tmp_path, **overrides):
         audience=settings.token_audience,
         ttl_seconds=settings.access_ttl_seconds,
     )
-    return IdentityService(sessions, issuer, settings), sessions
+    return IdentityService(
+        sessions,
+        issuer,
+        access_ttl_seconds=settings.access_ttl_seconds,
+        refresh_ttl_days=settings.refresh_ttl_days,
+    ), sessions
 
 
 async def test_expired_refresh_token_rejected(tmp_path):

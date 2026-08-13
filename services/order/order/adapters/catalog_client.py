@@ -9,22 +9,13 @@ import asyncio
 from typing import Any
 
 import httpx
-from smartfood_auth import AuthContext, headers_for
-from smartfood_otel import current_traceparent
+from smartfood_auth import internal_headers
 
 from ..domain.ports import RestaurantNotFound, SnapshotUnavailable
 
-_HEADERS = {
-    **headers_for(AuthContext(sub="svc:order", role="system")),
-    "X-Internal-Caller": "order",
-}
-
 
 def _headers() -> dict[str, str]:
-    headers = dict(_HEADERS)
-    if traceparent := current_traceparent():
-        headers["traceparent"] = traceparent
-    return headers
+    return internal_headers("order")
 
 
 class CatalogClient:

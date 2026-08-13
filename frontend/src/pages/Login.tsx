@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { login } from "../api/client";
 import { ErrorNote } from "../components/ui";
 
 export default function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<unknown>(null);
@@ -16,7 +17,10 @@ export default function Login() {
     setError(null);
     try {
       await login(email, password);
-      navigate("/");
+      // Resume where sign-in interrupted (cart → checkout must land back on
+      // checkout, not Browse); "/" only when the user came here directly.
+      const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
+      navigate(from ?? "/");
     } catch (err) {
       setError(err);
     } finally {

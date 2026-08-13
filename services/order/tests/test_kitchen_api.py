@@ -7,17 +7,12 @@ the real transition() helper against the same FILE-backed sqlite the app
 uses — the tests move state the same way the saga does, never by raw
 UPDATE."""
 
-import asyncio
-import uuid
-
 import pytest
 from fastapi.testclient import TestClient
 from order.config import Settings
 from order.domain.ports import SagaGone, SagaUnavailable
-from order.domain.transitions import transition
 from order.main import create_app
 from smartfood_auth import AuthContext, headers_for
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
 OWNER = headers_for(AuthContext(sub="usr_9", role="restaurant_admin", restaurant_id="rst_1"))
@@ -32,88 +27,35 @@ TO_CONFIRMED = [
 TO_ACCEPTED = [*TO_CONFIRMED, ("CONFIRMED", "ACCEPTED")]
 
 
-def snapshot():
-    return {
-        "restaurant": {
-            "id": "rst_1",
-            "name": "Biryani House",
-            "city": "springfield",
-            "status": "open",
-            "version": 3,
-        },
-        "items": [
-            {
-                "id": "itm_a",
-                "name": "Chicken Biryani",
-                "price_cents": 1200,
-                "currency": "USD",
-                "available": True,
-                "modifier_groups": [],
-            }
-        ],
-        "missing_item_ids": [],
-    }
-
-
 @pytest.fixture()
-def db_url(tmp_path):
-    # FILE-backed so the test's seeding engine and the app share one DB.
-    return f"sqlite+aiosqlite:///{tmp_path}/order.db"
-
-
-@pytest.fixture()
-def client(catalog, identity, saga, db_url):
-    catalog.snapshot = snapshot()
+def client(catalog, identity, saga, db_url, make_snapshot):
+    catalog.snapshot = make_snapshot()
     settings = Settings(database_url=db_url, create_all=True)
     app = create_app(settings, catalog=catalog, identity=identity, saga=saga)
     with TestClient(app) as c:
         yield c
 
 
-def place(client) -> str:
-    r = client.post(
-        "/v1/orders",
-        json={
-            "restaurant_id": "rst_1",
-            "menu_version": 3,
-            "address_id": "adr_1",
-            "card_token": "tok_ok",
-            "lines": [{"item_id": "itm_a", "qty": 2}],
-        },
-        headers={**CUSTOMER, "Idempotency-Key": uuid.uuid4().hex},
-    )
-    assert r.status_code == 202
-    return r.json()["order_id"]
+@pytest.fixture()
+def place(place_order):
+    # The feed assertions below expect qty=2 lines.
+    def _place(client):
+        return place_order(client, qty=2)
+
+    return _place
 
 
-def advance(db_url, order_id, moves, *, reason=None):
-    """Walk the order through legal guarded transitions (the same writer
-    the saga uses); `reason` lands on the final move."""
+@pytest.fixture()
+def cancelled(advance_order):
+    def _cancelled(db_url, order_id, reason, *, upto=TO_CONFIRMED):
+        advance_order(
+            db_url,
+            order_id,
+            [*upto, (upto[-1][1], "CANCELLING"), ("CANCELLING", "CANCELLED")],
+            reason=reason,
+        )
 
-    async def _go():
-        engine = create_async_engine(db_url)
-        sessions = async_sessionmaker(engine, expire_on_commit=False)
-        for index, (expected, target) in enumerate(moves):
-            final = index == len(moves) - 1
-            await transition(
-                sessions,
-                order_id,
-                expected=expected,
-                target=target,
-                cancel_reason=reason if final else None,
-            )
-        await engine.dispose()
-
-    asyncio.run(_go())
-
-
-def cancelled(db_url, order_id, reason, *, upto=TO_CONFIRMED):
-    advance(
-        db_url,
-        order_id,
-        [*upto, (upto[-1][1], "CANCELLING"), ("CANCELLING", "CANCELLED")],
-        reason=reason,
-    )
+    return _cancelled
 
 
 # ── the feed ───────────────────────────────────────────────────────
@@ -125,10 +67,10 @@ def test_feed_requires_a_valid_status(client):
     assert r.status_code == 422
 
 
-def test_feed_is_a_fifo_queue_with_batched_items(client, db_url):
+def test_feed_is_a_fifo_queue_with_batched_items(client, db_url, place, advance_order):
     ids = [place(client) for _ in range(3)]
     for order_id in ids:
-        advance(db_url, order_id, TO_CONFIRMED)
+        advance_order(db_url, order_id, TO_CONFIRMED)
     placed_only = place(client)  # stays PLACED — must not appear in this queue
 
     r = client.get("/v1/restaurant/orders", params={"status": "CONFIRMED"}, headers=OWNER)
@@ -144,10 +86,10 @@ def test_feed_is_a_fifo_queue_with_batched_items(client, db_url):
     assert entry["total_cents"] > 0 and entry["currency"] == "USD"
 
 
-def test_feed_keyset_pagination_never_overlaps(client, db_url):
+def test_feed_keyset_pagination_never_overlaps(client, db_url, place, advance_order):
     ids = {place(client) for _ in range(3)}
     for order_id in ids:
-        advance(db_url, order_id, TO_CONFIRMED)
+        advance_order(db_url, order_id, TO_CONFIRMED)
 
     first = client.get(
         "/v1/restaurant/orders", params={"status": "CONFIRMED", "limit": 2}, headers=OWNER
@@ -163,8 +105,8 @@ def test_feed_keyset_pagination_never_overlaps(client, db_url):
     assert seen == ids
 
 
-def test_feed_is_scoped_to_the_admins_claim(client, db_url):
-    advance(db_url, place(client), TO_CONFIRMED)
+def test_feed_is_scoped_to_the_admins_claim(client, db_url, place, advance_order):
+    advance_order(db_url, place(client), TO_CONFIRMED)
     r = client.get("/v1/restaurant/orders", params={"status": "CONFIRMED"}, headers=OTHER)
     assert r.json() == {"items": [], "next_cursor": None}
     assert (
@@ -193,9 +135,9 @@ def test_kitchen_surface_rejects_customers(client):
 # ── accept / reject: the decision matrix ───────────────────────────
 
 
-def test_confirmed_decision_signals_the_saga_202(client, db_url, saga):
+def test_confirmed_decision_signals_the_saga_202(client, db_url, saga, place, advance_order):
     order_id = place(client)
-    advance(db_url, order_id, TO_CONFIRMED)
+    advance_order(db_url, order_id, TO_CONFIRMED)
     r = client.post(f"/v1/restaurant/orders/{order_id}/accept", headers=OWNER)
     assert r.status_code == 202
     assert r.json() == {"order_id": order_id, "decision": "accept", "status": "CONFIRMED"}
@@ -206,9 +148,11 @@ def test_confirmed_decision_signals_the_saga_202(client, db_url, saga):
     assert saga.decisions == [(order_id, "accept"), (order_id, "reject")]
 
 
-def test_same_verdict_after_apply_is_200_without_resignalling(client, db_url, saga):
+def test_same_verdict_after_apply_is_200_without_resignalling(
+    client, db_url, saga, place, advance_order, cancelled
+):
     order_id = place(client)
-    advance(db_url, order_id, TO_ACCEPTED)
+    advance_order(db_url, order_id, TO_ACCEPTED)
     r = client.post(f"/v1/restaurant/orders/{order_id}/accept", headers=OWNER)
     assert r.status_code == 200
     assert r.json()["status"] == "ACCEPTED"
@@ -221,9 +165,9 @@ def test_same_verdict_after_apply_is_200_without_resignalling(client, db_url, sa
     assert r.json()["status"] == "CANCELLED"
 
 
-def test_opposite_verdict_is_409_already_decided(client, db_url):
+def test_opposite_verdict_is_409_already_decided(client, db_url, place, advance_order, cancelled):
     accepted = place(client)
-    advance(db_url, accepted, TO_ACCEPTED)
+    advance_order(db_url, accepted, TO_ACCEPTED)
     r = client.post(f"/v1/restaurant/orders/{accepted}/reject", headers=OWNER)
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "ORDER_ALREADY_DECIDED"
@@ -235,7 +179,7 @@ def test_opposite_verdict_is_409_already_decided(client, db_url):
     assert r.json()["error"]["code"] == "ORDER_ALREADY_DECIDED"
 
 
-def test_timer_cancelled_order_is_409_for_both_verdicts(client, db_url):
+def test_timer_cancelled_order_is_409_for_both_verdicts(client, db_url, place, cancelled):
     order_id = place(client)
     cancelled(db_url, order_id, "restaurant_timeout")
     for verdict in ("accept", "reject"):
@@ -244,12 +188,14 @@ def test_timer_cancelled_order_is_409_for_both_verdicts(client, db_url):
         assert r.json()["error"]["code"] == "ORDER_ALREADY_DECIDED"
 
 
-def test_customer_cancelled_order_is_already_decided_not_state_conflict(client, db_url):
+def test_customer_cancelled_order_is_already_decided_not_state_conflict(
+    client, db_url, place, advance_order, cancelled
+):
     """S7: the customer can moot the fork — even after this kitchen's own
     accept was submitted. Its retry hears 'window closed', never 'your
     action does not fit' (which reads as a client bug)."""
     unwinding = place(client)  # mid-unwind AND terminal must both classify
-    advance(
+    advance_order(
         db_url,
         unwinding,
         [*TO_CONFIRMED, ("CONFIRMED", "CANCELLING")],
@@ -265,7 +211,7 @@ def test_customer_cancelled_order_is_already_decided_not_state_conflict(client, 
             assert "customer" in r.json()["error"]["message"]
 
 
-def test_orders_that_died_before_the_kitchen_are_state_conflicts(client, db_url):
+def test_orders_that_died_before_the_kitchen_are_state_conflicts(client, db_url, place, cancelled):
     declined = place(client)
     cancelled(db_url, declined, "payment_declined", upto=[("PLACED", "VALIDATED")])
     r = client.post(f"/v1/restaurant/orders/{declined}/accept", headers=OWNER)
@@ -279,9 +225,11 @@ def test_orders_that_died_before_the_kitchen_are_state_conflicts(client, db_url)
     assert r.json()["error"]["details"] == [{"field": "status", "issue": "order is PLACED"}]
 
 
-def test_decisions_are_scoped_not_found_and_not_yours_alike(client, db_url, saga):
+def test_decisions_are_scoped_not_found_and_not_yours_alike(
+    client, db_url, saga, place, advance_order
+):
     order_id = place(client)
-    advance(db_url, order_id, TO_CONFIRMED)
+    advance_order(db_url, order_id, TO_CONFIRMED)
     for headers in (OTHER, NO_CLAIM):
         r = client.post(f"/v1/restaurant/orders/{order_id}/accept", headers=headers)
         assert r.status_code == 404
@@ -289,20 +237,20 @@ def test_decisions_are_scoped_not_found_and_not_yours_alike(client, db_url, saga
     assert saga.decisions == []
 
 
-def test_decision_window_closing_underfoot_is_409(client, db_url, saga):
+def test_decision_window_closing_underfoot_is_409(client, db_url, saga, place, advance_order):
     """DB said CONFIRMED, but the workflow finished before the signal
     landed (timer beat the click) — SagaGone maps to ALREADY_DECIDED."""
     order_id = place(client)
-    advance(db_url, order_id, TO_CONFIRMED)
+    advance_order(db_url, order_id, TO_CONFIRMED)
     saga.fail_with = SagaGone(f"ord::{order_id}")
     r = client.post(f"/v1/restaurant/orders/{order_id}/accept", headers=OWNER)
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "ORDER_ALREADY_DECIDED"
 
 
-def test_temporal_down_is_503_with_retry_after(client, db_url, saga):
+def test_temporal_down_is_503_with_retry_after(client, db_url, saga, place, advance_order):
     order_id = place(client)
-    advance(db_url, order_id, TO_CONFIRMED)
+    advance_order(db_url, order_id, TO_CONFIRMED)
     saga.fail_with = SagaUnavailable("boom")
     r = client.post(f"/v1/restaurant/orders/{order_id}/accept", headers=OWNER)
     assert r.status_code == 503
@@ -313,26 +261,28 @@ def test_temporal_down_is_503_with_retry_after(client, db_url, saga):
 # ── preparing / ready ──────────────────────────────────────────────
 
 
-def test_preparing_moves_accepted_and_replays_200(client, db_url):
+def test_preparing_moves_accepted_and_replays_200(client, db_url, place, advance_order):
     order_id = place(client)
-    advance(db_url, order_id, TO_ACCEPTED)
+    advance_order(db_url, order_id, TO_ACCEPTED)
     for _ in range(2):  # fresh apply, then transition()'s idempotent no-op
         r = client.post(f"/v1/restaurant/orders/{order_id}/preparing", headers=OWNER)
         assert r.status_code == 200
         assert r.json() == {"order_id": order_id, "status": "PREPARING"}
 
 
-def test_preparing_before_accept_is_409(client, db_url):
+def test_preparing_before_accept_is_409(client, db_url, place, advance_order):
     order_id = place(client)
-    advance(db_url, order_id, TO_CONFIRMED)
+    advance_order(db_url, order_id, TO_CONFIRMED)
     r = client.post(f"/v1/restaurant/orders/{order_id}/preparing", headers=OWNER)
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "ORDER_STATE_CONFLICT"
 
 
-def test_ready_signals_the_courier_and_resignals_on_replay(client, db_url, saga):
+def test_ready_signals_the_courier_and_resignals_on_replay(
+    client, db_url, saga, place, advance_order
+):
     order_id = place(client)
-    advance(db_url, order_id, [*TO_ACCEPTED, ("ACCEPTED", "PREPARING")])
+    advance_order(db_url, order_id, [*TO_ACCEPTED, ("ACCEPTED", "PREPARING")])
     r = client.post(f"/v1/restaurant/orders/{order_id}/ready", headers=OWNER)
     assert r.status_code == 200
     assert r.json() == {"order_id": order_id, "status": "READY"}
@@ -345,32 +295,36 @@ def test_ready_signals_the_courier_and_resignals_on_replay(client, db_url, saga)
     assert saga.food_ready == [order_id, order_id]
 
 
-def test_ready_skipping_preparing_is_409(client, db_url, saga):
+def test_ready_skipping_preparing_is_409(client, db_url, saga, place, advance_order):
     order_id = place(client)
-    advance(db_url, order_id, TO_ACCEPTED)
+    advance_order(db_url, order_id, TO_ACCEPTED)
     r = client.post(f"/v1/restaurant/orders/{order_id}/ready", headers=OWNER)
     assert r.status_code == 409
     assert saga.food_ready == []  # refused BEFORE any signal
 
 
-def test_ready_when_delivery_is_gone_still_answers_the_committed_truth(client, db_url, saga):
+def test_ready_when_delivery_is_gone_still_answers_the_committed_truth(
+    client, db_url, saga, place, advance_order
+):
     """The READY move committed before the signal — a vanished delivery
     workflow (operator kill; S7 cancel) must not make the API deny an
     applied transition. 200 + the true status; the gap is ops' page."""
     order_id = place(client)
-    advance(db_url, order_id, [*TO_ACCEPTED, ("ACCEPTED", "PREPARING")])
+    advance_order(db_url, order_id, [*TO_ACCEPTED, ("ACCEPTED", "PREPARING")])
     saga.fail_with = SagaGone(f"dlv::{order_id}")
     r = client.post(f"/v1/restaurant/orders/{order_id}/ready", headers=OWNER)
     assert r.status_code == 200
     assert r.json() == {"order_id": order_id, "status": "READY"}
 
 
-def test_ready_signal_failure_is_503_and_the_retry_heals(client, db_url, saga):
+def test_ready_signal_failure_is_503_and_the_retry_heals(
+    client, db_url, saga, place, advance_order
+):
     """The crash-heal contract, failure half: the transition commits, the
     signal dies -> 503; the kitchen's retry replays the (now no-op) move
     and delivers the signal that was lost."""
     order_id = place(client)
-    advance(db_url, order_id, [*TO_ACCEPTED, ("ACCEPTED", "PREPARING")])
+    advance_order(db_url, order_id, [*TO_ACCEPTED, ("ACCEPTED", "PREPARING")])
     saga.fail_with = SagaUnavailable("temporal down")
     r = client.post(f"/v1/restaurant/orders/{order_id}/ready", headers=OWNER)
     assert r.status_code == 503
@@ -381,12 +335,14 @@ def test_ready_signal_failure_is_503_and_the_retry_heals(client, db_url, saga):
     assert saga.food_ready == [order_id]
 
 
-def test_decisions_during_the_unwind_classify_from_the_stamped_reason(client, db_url, saga):
+def test_decisions_during_the_unwind_classify_from_the_stamped_reason(
+    client, db_url, saga, place, advance_order
+):
     """begin_cancel stamps cancel_reason at CANCELLING, so the matrix
     answers correctly even while compensations are still retrying."""
     rejected = place(client)
     unwind = [*TO_CONFIRMED, ("CONFIRMED", "CANCELLING")]
-    advance(db_url, rejected, unwind, reason="restaurant_rejected")
+    advance_order(db_url, rejected, unwind, reason="restaurant_rejected")
     r = client.post(f"/v1/restaurant/orders/{rejected}/reject", headers=OWNER)
     assert r.status_code == 200  # same verdict, mid-unwind: still a replay
     assert r.json()["status"] == "CANCELLING"
@@ -396,15 +352,15 @@ def test_decisions_during_the_unwind_classify_from_the_stamped_reason(client, db
     assert saga.decisions == []  # the fork is behind us; nothing signalled
 
     timed_out = place(client)
-    advance(db_url, timed_out, unwind, reason="restaurant_timeout")
+    advance_order(db_url, timed_out, unwind, reason="restaurant_timeout")
     r = client.post(f"/v1/restaurant/orders/{timed_out}/accept", headers=OWNER)
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "ORDER_ALREADY_DECIDED"
 
 
-def test_prep_routes_are_scoped(client, db_url):
+def test_prep_routes_are_scoped(client, db_url, place, advance_order):
     order_id = place(client)
-    advance(db_url, order_id, TO_ACCEPTED)
+    advance_order(db_url, order_id, TO_ACCEPTED)
     for route in ("preparing", "ready"):
         assert (
             client.post(f"/v1/restaurant/orders/{order_id}/{route}", headers=OTHER).status_code

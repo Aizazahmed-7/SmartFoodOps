@@ -15,7 +15,7 @@ Related: [repo-structure.md](repo-structure.md) · `docs/ARCHITECTURE.md` · pla
 | `uv` | latest | Python package/workspace manager — the only Python tooling you install globally |
 | Python | 3.12 (proposed) | `uv` fetches it automatically; no pyenv needed |
 | `make`, `git`, `curl`, `jq` | any | Demo scripts use `curl` + `jq` |
-| VS Code (optional) | — | Checked-in launch configs for debugpy attach (§10) |
+| VS Code (optional) | — | Launch configs for debugpy attach are planned *(W3)* — see §10 |
 
 No AWS account, no credentials. DynamoDB is LocalStack; payments are the mock PSP; Temporal is the dev server.
 
@@ -30,8 +30,7 @@ A numbered walkthrough of the plan's "first 30 minutes". Outputs shown are repre
 ```console
 $ git clone <repo> smartfoodops && cd smartfoodops
 $ make up
-» generating local JWT keypair (make bootstrap)        # auto-run on first up (proposed)
-» starting profile: core (postgres redis rabbitmq kafka schema-registry
+» starting profile: core (postgres redis kafka schema-registry
   temporal localstack mock-psp nginx)
 » creating kafka topics ......... 8/8
 » registering avro schemas ...... 8/8
@@ -64,17 +63,17 @@ $ ./tools/demo/place-order.sh
 
 **4. Watch the saga in Temporal UI.** Open http://localhost:8233 and search for workflow `ord::{order_id}`. You'll see the activity chain: `PriceOrder (local) → ValidateAndReserve → AuthorizePayment → ConfirmOrder`, then the durable wait on the `restaurant_decision` signal — restaurant notification is not an activity; it flows via the Notification consumer of `OrderConfirmed` (action budget, ADR-0018).
 
-**5. Bring up observability and find the trace.**
+**5. Bring up observability and find the trace** *(W3 — the `obs` profile and `make up-obs` are not built yet)*.
 
 ```console
-$ make up-obs        # otel-collector, Jaeger, Prometheus, Grafana
+$ make up-obs        # otel-collector, Jaeger, Prometheus, Grafana (W3)
 ```
 
 Jaeger (http://localhost:16686) → search tag `order_id={order_id}`. The trace stitches edge-bff → order → Temporal activities → Kafka consumers, because outbox rows carry `traceparent` and the publisher lifts it into Kafka headers.
 
-**6. Inspect the raw event.** `make up-ui` (proposed target for the `ui` profile) starts Redpanda Console (http://localhost:8085). Browse `orders.events` and open the Avro-decoded `OrderPlaced` fact — note `event_id`, `aggregate_version`, `cell_id: c1`.
+**6. Inspect the raw event.** `make up-ui` starts Redpanda Console (http://localhost:8085). Browse `orders.events` and open the Avro-decoded `OrderPlaced` fact — note `event_id`, `aggregate_version`, `cell_id: c1`.
 
-**7. Start fake riders and watch dispatch.**
+**7. Start fake riders and watch dispatch** *(W3 — dispatch and `rider-sim` are not built yet)*.
 
 ```console
 $ uv run rider-sim --city SPR --riders 10
@@ -83,7 +82,7 @@ $ uv run rider-sim --city SPR --riders 10
 
 Place another order (step 3); in Temporal UI the `DeliveryWorkflow` child appears, an offer goes out, a sim rider accepts, and `dispatch.events` shows `RiderAssigned`.
 
-**8. Stream live tracking as the customer would.**
+**8. Stream live tracking as the customer would** *(W3 — tracking-gateway is not built yet)*.
 
 ```console
 $ curl -N localhost:8080/sse/track/{order_id}
@@ -96,8 +95,10 @@ event: location   data: {"lat":...,"lng":...}        # every 2s en-route
 **9. Break things on purpose.**
 
 ```console
-$ make chaos                       # sets PSP failure knobs high, see §9
-$ uv run order-gen --rate 1 --card-mix "ok:0.2,tok_decline:0.4,tok_timeout:0.4"
+$ make chaos                       # sets PSP failure knobs high, see §9 (make chaos-off restores)
+$ uv run order-gen --rate 1 --card-mix "ok:0.2,tok_decline:0.4,tok_timeout:0.4"   # (W3 — order-gen
+                                   # is not built yet; until then, re-run make demo or pay with
+                                   # tok_decline/tok_timeout by hand)
 ```
 
 In Temporal UI, watch failed workflows run their compensation stack (`VoidAuthorization → ReleaseReservation → CANCELLED`) instead of corrupting state.
@@ -114,24 +115,24 @@ Runs the order service natively on your host with hot reload against the compose
 
 ## 3. Compose profiles & port map
 
-Profiles: **core** (infra), **cdc** (Debezium — deliberately split out, it costs 1–1.5 GB), **obs**, **apps**, **ui**.
+Profiles: **core** (infra), **apps** (services), **ui** (consoles), **chores** (rabbitmq — parked until Celery lands), plus the planned **cdc** *(W3 — Debezium, deliberately split out at 1–1.5 GB)* and **obs** *(W3)*.
 
 | Profile | Component | Host port | Notes |
 |---|---|---|---|
 | core | postgres:15 | 5432 | One database per service, created by `initdb/` scripts |
 | core | redis:7 | 6380 | Host port (6379 squatted locally); in-network `redis:6379`. Single node; identical keys/TTLs/Lua as prod |
-| core | rabbitmq:3-management | 5672 / 15672 | Celery broker / management UI |
+| chores | rabbitmq:3-management | 5672 / 15672 | Future Celery broker — nothing speaks AMQP yet, so it sits outside `core` |
 | core | Kafka (KRaft, single broker) | **19092** | Dual listeners: `kafka:9092` in-network, `localhost:19092` from host — see §12 |
 | core | Confluent Schema Registry | **8086** (host) → 8081 (in-network) | host-remapped: another local project intermittently serves 8081 on this machine; services use `http://schema-registry:8081` unchanged |
 | core | Temporal dev server + UI | 7233 / 8233 | SQLite-persisted history (survives restarts) |
 | core | LocalStack (DynamoDB + Streams) | 4566 | |
 | core | mock-psp | 9080 | Failure-injection knobs, §9 |
 | core | nginx gateway (emulates ALB path rules) | **8080** | The single client entrypoint |
-| cdc | Kafka Connect + Debezium | 8083 | Only needed for `OUTBOX_MODE=debezium` (§5) |
-| obs | otel-collector | 4317 | OTLP gRPC |
-| obs | Jaeger | 16686 | |
-| obs | Prometheus | 9090 | |
-| obs | Grafana | 3000 | |
+| cdc *(W3)* | Kafka Connect + Debezium | 8083 | Only needed for `OUTBOX_MODE=debezium` (§5) |
+| obs *(W3)* | otel-collector | 4317 | OTLP gRPC |
+| obs *(W3)* | Jaeger | 16686 | |
+| obs *(W3)* | Prometheus | 9090 | |
+| obs *(W3)* | Grafana | 3000 | |
 | ui | Redpanda Console | 8085 | Kafka + Schema Registry browser |
 
 **App services** (profile `apps`) — each service's debugpy port is **app port + 1000**:
@@ -161,8 +162,8 @@ The full stack is ≈ 8–9 GB, so **slim mode is the default**, not the excepti
 | `make dev SVC=order` | Run one service **natively on the host**, `uvicorn --reload`, wired to compose infra | +~150 MB |
 | `make up-apps ONLY="payment inventory"` | Add just the containerized neighbors your flow needs | ~4 GB typical |
 | `make up-m2` | The W2 order-lifecycle set: core + temporal, mock-psp, identity, catalog, edge-bff, inventory, order, order-worker, payment (~6–7 GB) |
-| `make up-cdc` | Add the `cdc` profile (Kafka Connect + Debezium) — needed for `OUTBOX_MODE=debezium` (§5) | +1–1.5 GB |
-| `make up-obs` | Add the `obs` profile (otel-collector, Jaeger, Prometheus, Grafana) | — |
+| `make up-cdc` *(W3)* | Add the `cdc` profile (Kafka Connect + Debezium) — needed for `OUTBOX_MODE=debezium` (§5) | +1–1.5 GB |
+| `make up-obs` *(W3)* | Add the `obs` profile (otel-collector, Jaeger, Prometheus, Grafana) | — |
 | `make up-ui` | Add the `ui` profile (Redpanda Console) | — |
 | `make up-full` | Everything (all profiles) | 8–9 GB |
 | `make down` / `make nuke` | Stop / stop + destroy volumes | — |
@@ -173,7 +174,7 @@ The full stack is ≈ 8–9 GB, so **slim mode is the default**, not the excepti
 - If the same service is running containerized, `make dev` stops that container; the nginx gateway falls back to `host.docker.internal:<port>` for that upstream so routed traffic reaches your host process (proposed mechanism).
 - Typical order-path session: `make up && make up-apps ONLY="edge-bff identity catalog inventory payment" && make dev SVC=order`. Pricing needs no container — editing `libs/smartfood-pricing` hot-reloads inside the natively-run Order workers, which makes pricing rules unusually pleasant to iterate on.
 
-Other daily targets: `make logs SVC=payment`, `make psql DB=orders`, `make ddb` (DynamoDB shell against LocalStack), `make test`, `make test-int`, `make chaos`, `make bootstrap` (regenerate local JWT keypair).
+Other daily targets: `make logs SVC=payment`, `make psql DB=order_db`, `make test`, `make cov` (adds the enforced 100% coverage gate), `make demo`, `make chaos` / `make chaos-off`. Planned *(W3)*: `make ddb` (DynamoDB shell against LocalStack), `make test-int`, `make bootstrap` (regenerate local JWT keypair).
 
 ---
 
@@ -205,7 +206,7 @@ flowchart LR
 Rules of thumb:
 
 - Day-to-day: leave both on `poller`; you never start the `cdc` profile.
-- Touching the outbox library, Debezium SMTs, or envelope code: `make up-cdc && OUTBOX_MODE=debezium make dev SVC=order` and verify both modes locally before pushing — CI will run `debezium` regardless.
+- Touching the outbox library, Debezium SMTs, or envelope code *(W3 — the `cdc` profile and `make up-cdc` are not built yet)*: `make up-cdc && OUTBOX_MODE=debezium make dev SVC=order` and verify both modes locally before pushing — CI will run `debezium` regardless.
 - **No service ever writes Kafka directly** in either mode — producers are outbox/forwarder only. The dual-write gap stays closed on laptops too.
 
 ---
@@ -234,9 +235,9 @@ No `cdklocal`, no CloudFormation emulation — both are slow and flaky, and the 
 
 ---
 
-## 8. Simulators
+## 8. Simulators *(W3 — neither simulator is built yet; they arrive with dispatch)*
 
-Dispatch is undevelopable without fake phones. Both simulators are `tools/` workspace packages, run with `uv run`.
+Dispatch is undevelopable without fake phones. Both simulators will be `tools/` workspace packages, run with `uv run`.
 
 **`rider-sim`** — N WebSocket riders replaying GPS polylines at 1 Hz through the real rider-gateway, auto-accepting offers:
 
@@ -269,7 +270,7 @@ The payment service talks to a hexagonal `PaymentGateway` port; locally the adap
 | `UNKNOWN_OUTCOME_RATE` | Fraction returning ambiguous outcome — later resolved via webhook, exercising reconciliation locally |
 | `LATENCY_MS_P50` / `LATENCY_MS_P99` | Latency shaping |
 
-**Magic card tokens** (deterministic; good for tests and demos): pay with `tok_decline`, `tok_timeout`, or `tok_unknown` and that transaction fails that way, regardless of the knobs. `order-gen --card-mix` drives these.
+**Magic card tokens** (deterministic; good for tests and demos): pay with `tok_decline`, `tok_timeout`, or `tok_unknown` and that transaction fails that way, regardless of the knobs — e.g. `CARD_TOKEN=tok_decline make demo`. (`order-gen --card-mix` will drive these at volume — *W3*.)
 
 The invariant this machinery exists to prove (and CI asserts): **N injected timeouts must still yield ≤1 authorization per order** — the `{order_id}:auth` idempotency key and the read-before-execute handler make unknown-outcome retries safe.
 
@@ -278,10 +279,10 @@ The invariant this machinery exists to prove (and CI asserts): **N injected time
 ## 10. Debugging
 
 - **Hot reload**: containerized apps mount `app/` + `libs/` and run `uvicorn --reload`; native (`make dev`) does the same. A lib edit reloads every consumer.
-- **debugpy**: start any service with `DEBUGPY=1` (works for both `make dev` and containers) — it listens on **app port + 1000** (order = 9006). Checked-in `.vscode/launch.json` has an attach configuration per service; set breakpoints, F5, pick the service.
+- **debugpy**: start any service with `DEBUGPY=1` (works for both `make dev` and containers) — it listens on **app port + 1000** (order = 9006). A checked-in `.vscode/launch.json` with an attach configuration per service is planned *(W3)*; until then add your own attach config pointing at the port.
 - **Temporal**: the dev server persists SQLite history, so **workers replay in-flight workflows after restart** — you can kill and restart the order service mid-saga and watch it resume. Use the UI (8233) to inspect activity failures/retries and to send signals manually (e.g. fake a `restaurant_decision`).
-- **Data poking**: `make psql DB=orders` (also `payments`, `catalog`, …), `make ddb` for LocalStack DynamoDB, Redpanda Console (8085) for topics + schemas, `make logs SVC=x` for container logs.
-- **Tracing locally**: `make up-obs` then find any request in Jaeger by `order_id` tag; edge-bff stamps `X-Request-ID` and the root span.
+- **Data poking**: `make psql DB=order_db` (also `payment_db`, `catalog_db`, …), Redpanda Console (8085) for topics + schemas, `make logs SVC=x` for container logs. `make ddb` for LocalStack DynamoDB is planned *(W3)*.
+- **Tracing locally** *(W3 — needs the `obs` profile / `make up-obs`)*: find any request in Jaeger by `order_id` tag; edge-bff stamps `X-Request-ID` and the root span.
 
 ---
 
@@ -289,13 +290,14 @@ The invariant this machinery exists to prove (and CI asserts): **N injected time
 
 | Target | Scope | Infra needed |
 |---|---|---|
-| `make test` | Unit tests, all packages (`uv run pytest` per workspace member) | none |
-| `make test` — workflow tier *(W2)* | Temporal `WorkflowEnvironment` **time-skipping** tests: every workflow branch exercised, timers skipped not slept — a 10-minute restaurant-decision timeout runs in milliseconds | none |
-| `make test-int` | Integration tests against compose (`core` + `cdc`, **`OUTBOX_MODE=debezium`** — same file CI runs) | compose |
-| `make test-int` — consumer scaffold *(W3)* | Per-consumer **duplicate-delivery + poison-message** tests, scaffolded by the `smartfood-kafka` test helpers; the scaffold ships with every new consumer, the asserts are yours | compose |
-| `make chaos` | The chaos suite, runnable locally; CI runs it nightly | compose |
+| `make test` / `make cov` | Unit tests, all packages; `cov` adds the **enforced 100% coverage gate** (also what CI runs) | none |
+| `make cov` — workflow tier | Temporal `WorkflowEnvironment` **time-skipping** tests: every workflow branch exercised, timers skipped not slept — a 10-minute restaurant-decision timeout runs in milliseconds | none |
+| `make demo` + `tools/demo/verify-live.sh` | **Manual live verification** against the real stack: `place-order.sh` drives the happy path to SETTLED; `verify-live.sh` is the cancel-path tier — customer cancel from PREPARING (202 → `customer_cancelled`) and owner reject (→ `restaurant_rejected`), asserting `cancel_reason` both times | `make up-m2` + `make seed` |
+| `make test-int` *(W3)* | Integration tests against compose (`core` + `cdc`, **`OUTBOX_MODE=debezium`** — same file CI runs) | compose |
+| `make test-int` — consumer scaffold *(W3)* | Per-consumer **duplicate-delivery + poison-message** tests, scaffolded by planned `smartfood-kafka` test helpers *(W3 — the helpers do not exist yet)*; the scaffold ships with every new consumer, the asserts are yours | compose |
+| `make chaos` / `make chaos-off` | Raise/restore the mock-psp failure knobs and self-verify them on the container; drive orders and watch compensations manually (an automated suite + nightly CI run is W3) | compose |
 
-Two more tiers ride along with `make test`: **contract tests** — DTO/OpenAPI snapshot tests, so any changed response shape appears as a reviewed snapshot diff, never a silent client break — and the **coverage gate**: 85% on `libs/` and every service's `domain/` (activates W3; until then coverage is reported, not enforced).
+Two notes on tiers: **contract tests** (DTO/OpenAPI snapshot tests, so a changed response shape is a reviewed diff, never a silent client break) are planned *(W3)*. The **coverage gate is already at 100%** across all workspace packages — enforced by `make cov` (`--cov-fail-under=100` + `fail_under` in the root pyproject) and by CI, not the once-planned 85%-at-W3 staging.
 
 The chaos suite's three headline scenarios (plan §11):
 

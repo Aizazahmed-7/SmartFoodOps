@@ -10,8 +10,12 @@ from smartfood_pricing import Line, PricingConfig
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+# Deliberately distinct from conftest's fakes — these carry DIFFERENT
+# contracts (static canned answers; a saga that refuses every signal),
+# so they carry different names.
 
-class FakeCatalog:
+
+class StaticCatalog:
     def __init__(self, snapshot):
         self.snapshot = snapshot
 
@@ -19,7 +23,7 @@ class FakeCatalog:
         return self.snapshot
 
 
-class FakeIdentity:
+class StaticIdentity:
     async def get_address(self, user_id, address_id):
         return {
             "id": address_id,
@@ -31,7 +35,7 @@ class FakeIdentity:
         }
 
 
-class RecordingSaga:
+class NeverSignalsSaga:
     def __init__(self):
         self.started: list[str] = []
 
@@ -48,50 +52,41 @@ class RecordingSaga:
         raise AssertionError("placement never signals")  # pragma: no cover
 
 
-def snapshot():
-    return {
-        "restaurant": {
-            "id": "rst_1",
-            "name": "Biryani House",
-            "city": "springfield",
-            "status": "open",
-            "version": 3,
-        },
-        "items": [
-            {
-                "id": "itm_a",
-                "name": "Chicken Biryani",
-                "price_cents": 1200,
-                "currency": "USD",
-                "available": True,
-                "modifier_groups": [
-                    {
-                        "id": "grp_size",
-                        "name": "Size",
-                        "min_select": 1,
-                        "max_select": 1,
-                        "options": [{"id": "opt_lg", "name": "Large", "price_delta_cents": 300}],
-                    }
-                ],
-            }
-        ],
-        "missing_item_ids": [],
-    }
+def _menu_items():
+    """itm_a with a required Size group — pricing must fold the option in."""
+    return [
+        {
+            "id": "itm_a",
+            "name": "Chicken Biryani",
+            "price_cents": 1200,
+            "currency": "USD",
+            "available": True,
+            "modifier_groups": [
+                {
+                    "id": "grp_size",
+                    "name": "Size",
+                    "min_select": 1,
+                    "max_select": 1,
+                    "options": [{"id": "opt_lg", "name": "Large", "price_delta_cents": 300}],
+                }
+            ],
+        }
+    ]
 
 
-async def _service():
+async def _service(make_snapshot):
     engine = create_async_engine(
         "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
     async with engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    saga = RecordingSaga()
+    saga = NeverSignalsSaga()
     service = OrderService(
-        FakeCatalog(snapshot()),
+        StaticCatalog(make_snapshot(items=_menu_items())),
         pricing=PricingConfig(delivery_fee_cents=199, tax_basis_points=825),
         sessions=sessions,
-        identity=FakeIdentity(),
+        identity=StaticIdentity(),
         saga=saga,
         idempotency=IdempotencyStore(sessions, idempotency_keys),
     )
@@ -123,8 +118,8 @@ async def _place(service, key="k1"):
     )
 
 
-async def test_placement_writes_all_four_artifacts_in_one_commit():
-    service, sessions, saga = await _service()
+async def test_placement_writes_all_four_artifacts_in_one_commit(make_snapshot):
+    service, sessions, saga = await _service(make_snapshot)
     outcome = await _place(service)
     assert isinstance(outcome, Placed)
 
@@ -169,8 +164,8 @@ async def test_placement_writes_all_four_artifacts_in_one_commit():
     assert saga.started == [order.order_id]
 
 
-async def test_replay_never_touches_the_database_again():
-    service, sessions, saga = await _service()
+async def test_replay_never_touches_the_database_again(make_snapshot):
+    service, sessions, saga = await _service(make_snapshot)
     first = await _place(service)
     replay = await _place(service)  # same key, same hash
     from smartfood_idempotency import Replay

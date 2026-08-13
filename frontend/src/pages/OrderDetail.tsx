@@ -1,8 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { ApiError, cancelOrder, getOrder } from "../api/client";
-import { CANCELLABLE_STATUSES, TERMINAL_STATUSES, type OrderStatus } from "../api/types";
-import { ErrorNote, Money, Spinner, StatusTag } from "../components/ui";
+import { cancelOrder, getOrder } from "../api/client";
+import { hasCode } from "../api/errors";
+import {
+  CANCEL_FAMILY, CANCELLABLE_STATUSES, TERMINAL_STATUSES,
+  type CancelReason, type OrderStatus,
+} from "../api/types";
+import { ErrorNote, Money, Note, Spinner, StatusTag } from "../components/ui";
 
 /** The happy chain as the customer sees it (internal hops folded away). */
 const JOURNEY: { at: OrderStatus[]; label: string }[] = [
@@ -18,7 +22,7 @@ const JOURNEY: { at: OrderStatus[]; label: string }[] = [
 // never held money — saying "released" there would be inventing a refund.
 const HOLD_WAS_RELEASED = new Set(["restaurant_rejected", "restaurant_timeout", "customer_cancelled"]);
 
-const REASONS: Record<string, string> = {
+const REASONS: Record<CancelReason, string> = {
   item_unavailable: "some items ran out of stock",
   at_capacity: "the kitchen is at capacity",
   payment_declined: "your card was declined",
@@ -66,7 +70,7 @@ export default function OrderDetail() {
   // error out when we have nothing to show.
   if (order.error && !order.data) return <ErrorNote error={order.error} />;
   const o = order.data!;
-  const cancelled = ["CANCELLING", "CANCELLED", "REFUNDED"].includes(o.status);
+  const cancelled = CANCEL_FAMILY.includes(o.status);
   const cancellable = CANCELLABLE_STATUSES.includes(o.status);
 
   return (
@@ -77,13 +81,14 @@ export default function OrderDetail() {
       </div>
 
       {cancelled ? (
-        <div className="rounded-xl border border-red-900 bg-red-950/50 px-4 py-3 text-sm text-red-200">
+        <Note tone="error">
           Order {o.status === "CANCELLING" ? "is being cancelled" : "was cancelled"}
-          {o.cancel_reason ? ` — ${REASONS[o.cancel_reason] ?? o.cancel_reason}` : ""}.
+          {/* Unknown reasons (a newer backend) fall back to the raw slug. */}
+          {o.cancel_reason ? ` — ${REASONS[o.cancel_reason as CancelReason] ?? o.cancel_reason}` : ""}.
           {o.cancel_reason && HOLD_WAS_RELEASED.has(o.cancel_reason)
             ? " Your card hold has been released."
             : " Your card was never charged."}
-        </div>
+        </Note>
       ) : (
         <Journey status={o.status} />
       )}
@@ -126,7 +131,7 @@ export default function OrderDetail() {
           {cancel.isPending ? "Cancelling…" : "Cancel order"}
         </button>
       )}
-      {cancel.error instanceof ApiError && cancel.error.code === "ORDER_NOT_CANCELLABLE" ? (
+      {hasCode(cancel.error, "ORDER_NOT_CANCELLABLE") ? (
         <p className="text-sm text-amber-300">
           Too late to cancel — the courier already has your food.
         </p>

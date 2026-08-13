@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Request, Response
 from pydantic import Field
 from smartfood_api import ApiError, ErrorCode, StrictModel
-from smartfood_auth import AuthContext, require_role
+from smartfood_auth import AuthContext, Role, require_role, require_system
 
 from ..domain.models import Reservation, ReservationLine
 from ..domain.service import (
@@ -23,8 +23,10 @@ from ..domain.service import (
 
 router = APIRouter()
 
-RestaurantAdmin = Annotated[AuthContext, Depends(require_role("restaurant_admin", "system_admin"))]
-SystemOnly = Annotated[AuthContext, Depends(require_role())]  # only role=system passes
+RestaurantAdmin = Annotated[
+    AuthContext, Depends(require_role(Role.RESTAURANT_ADMIN, Role.SYSTEM_ADMIN))
+]
+SystemOnly = Annotated[AuthContext, Depends(require_system())]
 
 _SCOPE_EXEMPT = {"system", "system_admin"}
 

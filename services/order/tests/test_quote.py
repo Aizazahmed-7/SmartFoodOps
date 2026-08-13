@@ -8,46 +8,38 @@ CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
 RIDER = headers_for(AuthContext(sub="usr_2", role="rider"))
 
 
-def snapshot(*, status="open", version=3):
-    return {
-        "restaurant": {
-            "id": "rst_1",
-            "name": "Biryani House",
-            "city": "springfield",
-            "status": status,
-            "version": version,
+def _menu_items():
+    """Quoting needs a richer menu than the shared default: itm_a grows a
+    required Size group, and a second item exercises multi-line pricing."""
+    return [
+        {
+            "id": "itm_a",
+            "name": "Chicken Biryani",
+            "price_cents": 1200,
+            "currency": "USD",
+            "available": True,
+            "modifier_groups": [
+                {
+                    "id": "grp_size",
+                    "name": "Size",
+                    "min_select": 1,
+                    "max_select": 1,
+                    "options": [
+                        {"id": "opt_reg", "name": "Regular", "price_delta_cents": 0},
+                        {"id": "opt_lg", "name": "Large", "price_delta_cents": 300},
+                    ],
+                }
+            ],
         },
-        "items": [
-            {
-                "id": "itm_a",
-                "name": "Chicken Biryani",
-                "price_cents": 1200,
-                "currency": "USD",
-                "available": True,
-                "modifier_groups": [
-                    {
-                        "id": "grp_size",
-                        "name": "Size",
-                        "min_select": 1,
-                        "max_select": 1,
-                        "options": [
-                            {"id": "opt_reg", "name": "Regular", "price_delta_cents": 0},
-                            {"id": "opt_lg", "name": "Large", "price_delta_cents": 300},
-                        ],
-                    }
-                ],
-            },
-            {
-                "id": "itm_b",
-                "name": "Raita",
-                "price_cents": 200,
-                "currency": "USD",
-                "available": True,
-                "modifier_groups": [],
-            },
-        ],
-        "missing_item_ids": [],
-    }
+        {
+            "id": "itm_b",
+            "name": "Raita",
+            "price_cents": 200,
+            "currency": "USD",
+            "available": True,
+            "modifier_groups": [],
+        },
+    ]
 
 
 def body(lines=None):
@@ -65,8 +57,8 @@ def body(lines=None):
     }
 
 
-def test_quote_happy_path(client, catalog):
-    catalog.snapshot = snapshot()
+def test_quote_happy_path(client, catalog, make_snapshot):
+    catalog.snapshot = make_snapshot(items=_menu_items())
     r = client.post("/v1/quote", json=body(), headers=CUSTOMER)
     assert r.status_code == 200
     priced = r.json()
@@ -85,8 +77,8 @@ def test_quote_happy_path(client, catalog):
     assert priced["lines"][0]["options"][0]["name"] == "Large"
 
 
-def test_quote_dedupes_item_ids_for_catalog(client, catalog):
-    catalog.snapshot = snapshot()
+def test_quote_dedupes_item_ids_for_catalog(client, catalog, make_snapshot):
+    catalog.snapshot = make_snapshot(items=_menu_items())
     lines = [
         {
             "item_id": "itm_a",
@@ -111,15 +103,15 @@ def test_unknown_restaurant_404(client, catalog):
     assert r.json()["error"]["code"] == "NOT_FOUND"
 
 
-def test_paused_restaurant_maps_to_restaurant_closed(client, catalog):
-    catalog.snapshot = snapshot(status="paused")
+def test_paused_restaurant_maps_to_restaurant_closed(client, catalog, make_snapshot):
+    catalog.snapshot = make_snapshot(status="paused", items=_menu_items())
     r = client.post("/v1/quote", json=body(), headers=CUSTOMER)
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "RESTAURANT_CLOSED"
 
 
-def test_unavailable_items_map_with_details(client, catalog):
-    snap = snapshot()
+def test_unavailable_items_map_with_details(client, catalog, make_snapshot):
+    snap = make_snapshot(items=_menu_items())
     snap["items"][0]["available"] = False
     catalog.snapshot = snap
     r = client.post("/v1/quote", json=body(), headers=CUSTOMER)
@@ -129,8 +121,8 @@ def test_unavailable_items_map_with_details(client, catalog):
     assert error["details"] == [{"item_id": "itm_a", "issue": "unavailable"}]
 
 
-def test_invalid_selection_maps_to_422(client, catalog):
-    catalog.snapshot = snapshot()
+def test_invalid_selection_maps_to_422(client, catalog, make_snapshot):
+    catalog.snapshot = make_snapshot(items=_menu_items())
     lines = [{"item_id": "itm_a", "qty": 1}]  # required Size unpicked
     r = client.post("/v1/quote", json=body(lines), headers=CUSTOMER)
     assert r.status_code == 422
@@ -147,8 +139,8 @@ def test_catalog_down_maps_to_503_with_retry_after(client, catalog):
     assert r.headers["retry-after"] == "1"
 
 
-def test_role_gates(client, catalog):
-    catalog.snapshot = snapshot()
+def test_role_gates(client, catalog, make_snapshot):
+    catalog.snapshot = make_snapshot(items=_menu_items())
     assert client.post("/v1/quote", json=body(), headers=RIDER).status_code == 403
     system = headers_for(AuthContext(sub="svc:x", role="system"))
     assert client.post("/v1/quote", json=body(), headers=system).status_code == 200
@@ -157,8 +149,8 @@ def test_role_gates(client, catalog):
     assert client.post("/v1/quote", json=body(), headers=owner).status_code == 200
 
 
-def test_dto_bounds(client, catalog):
-    catalog.snapshot = snapshot()
+def test_dto_bounds(client, catalog, make_snapshot):
+    catalog.snapshot = make_snapshot(items=_menu_items())
     bad = body()
     bad["lines"] = []
     assert client.post("/v1/quote", json=bad, headers=CUSTOMER).status_code == 422

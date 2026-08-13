@@ -5,6 +5,9 @@
 
 import { decodeClaims, useAuth } from "../state/auth";
 import type { CartLine } from "../state/cart";
+// Type-only import — erased at compile time, so no runtime cycle with
+// errors.ts (which imports the ApiError class from this file).
+import type { ErrorCode } from "./errors";
 import type {
   Address,
   BrowseResult,
@@ -31,6 +34,9 @@ export class ApiError extends Error {
     message: string,
     public status: number,
     public details?: { field: string; issue: string }[],
+    /** Gateway correlation id — surfaced in the UI so a bug report can be
+     * matched to the backend's logs (absent on client-made errors). */
+    public requestId?: string,
   ) {
     super(message);
   }
@@ -82,12 +88,20 @@ async function request<T>(
   if (resp.status === 204) return undefined as T;
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    const err = data?.error ?? {};
+    // The gateway envelope. `code` is typed as ErrorCode so comparisons here
+    // are spell-checked; codes outside the union still pass through as-is.
+    const err = (data?.error ?? {}) as {
+      code?: ErrorCode;
+      message?: string;
+      request_id?: string;
+      details?: { field: string; issue: string }[];
+    };
     if (err.code === "AUTH_TOKEN_EXPIRED" && retry) {
       await refreshTokens();
       return request<T>(method, path, body, { headers, retry: false });
     }
-    throw new ApiError(err.code ?? "UNKNOWN", err.message ?? resp.statusText, resp.status, err.details);
+    throw new ApiError(
+      err.code ?? "UNKNOWN", err.message ?? resp.statusText, resp.status, err.details, err.request_id);
   }
   return data as T;
 }

@@ -1,12 +1,14 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
-  ApiError, clearIdemKey, getQuote, listAddresses, placeOrder, toOrderLines,
+  ApiError, clearIdemKey, listAddresses, placeOrder, toOrderLines,
 } from "../api/client";
+import { hasCode } from "../api/errors";
+import { useQuote } from "../hooks/useQuote";
 import { useAuth } from "../state/auth";
 import { useCart } from "../state/cart";
-import { ErrorNote, Money, Section } from "../components/ui";
+import { ErrorNote, Money, Note, Section } from "../components/ui";
 
 /** The mock-PSP's magic tokens — failure injection is a dropdown away. */
 const CARDS = [
@@ -20,6 +22,7 @@ export default function Checkout() {
   const { claims } = useAuth();
   const cart = useCart();
   const navigate = useNavigate();
+  const location = useLocation();
   const [addressId, setAddressId] = useState<string | null>(null);
   const [cardToken, setCardToken] = useState(CARDS[0].token);
   const [priceChanged, setPriceChanged] = useState(false);
@@ -29,12 +32,9 @@ export default function Checkout() {
     queryFn: listAddresses,
     enabled: !!claims,
   });
-  const quote = useQuery({
-    queryKey: ["quote", cart.restaurantId, cart.lines],
-    queryFn: () => getQuote(cart.restaurantId!, cart.lines),
-    enabled: !!claims && cart.lines.length > 0,
-    retry: false,
-  });
+  // Quoting + menu_version re-pin live in useQuote, shared with Cart — the
+  // shown price and the version placement consents to can never diverge.
+  const quote = useQuote();
 
   const chosenAddress = addressId ?? addresses.data?.[0]?.id ?? null;
 
@@ -52,12 +52,12 @@ export default function Checkout() {
       cart.clear();
       navigate(`/orders/${placed.order_id}`);
     },
-    onError: async (error) => {
-      if (error instanceof ApiError && error.code === "PRICE_CHANGED") {
-        // Re-quote (fresh totals + version) and ask for one tap of consent.
+    onError: (error) => {
+      if (hasCode(error, "PRICE_CHANGED")) {
+        // Re-quote (fresh totals + version) and ask for one tap of consent;
+        // useQuote re-pins the cart's menu_version when the fresh quote lands.
         setPriceChanged(true);
-        const fresh = await quote.refetch();
-        if (fresh.data) cart.setMenuVersion(fresh.data.menu_version);
+        quote.refetch();
       }
     },
   });
@@ -66,7 +66,10 @@ export default function Checkout() {
     return (
       <div className="py-16 text-center">
         <p className="text-slate-400">Sign in to check out.</p>
-        <Link to="/login" className="btn-primary mt-4 inline-block">Sign in</Link>
+        {/* Carry the interrupted location — sign-in must land back HERE. */}
+        <Link to="/login" state={{ from: location }} className="btn-primary mt-4 inline-block">
+          Sign in
+        </Link>
       </div>
     );
   if (cart.lines.length === 0)
@@ -155,24 +158,24 @@ export default function Checkout() {
       </Section>
 
       {quote.error instanceof ApiError && (
-        <div className="rounded-xl border border-amber-900 bg-amber-950/60 px-4 py-3 text-sm text-amber-200">
+        <Note tone="warn">
           {"Couldn't price your cart: "}{quote.error.message}{" — "}
           <button className="underline" onClick={() => quote.refetch()}>try again</button>.
-        </div>
+        </Note>
       )}
       {priceChanged && totals && (
-        <div className="rounded-xl border border-amber-900 bg-amber-950/60 px-4 py-3 text-sm text-amber-200">
+        <Note tone="warn">
           The menu changed while you were deciding — the new total is{" "}
           <strong><Money cents={totals.total_cents} /></strong>. Placing the order
           confirms the new price.
-        </div>
+        </Note>
       )}
-      {place.error instanceof ApiError && place.error.code === "IDEMPOTENCY_IN_PROGRESS" ? (
+      {hasCode(place.error, "IDEMPOTENCY_IN_PROGRESS") ? (
         <p className="text-sm text-amber-300">
           Your previous attempt is still being processed — give it a moment,
           then check <Link to="/orders" className="underline">your orders</Link> before retrying.
         </p>
-      ) : !(place.error instanceof ApiError && place.error.code === "PRICE_CHANGED") ? (
+      ) : !hasCode(place.error, "PRICE_CHANGED") ? (
         <ErrorNote error={place.error} />
       ) : null}
 

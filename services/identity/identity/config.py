@@ -1,5 +1,7 @@
 """Identity settings — all overridable by environment (compose sets DATABASE_URL)."""
 
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,9 +17,9 @@ class Settings(BaseSettings):
     refresh_ttl_days: int = 30
 
     # Event backbone (task #6): the grant-convergence consumer (ADR-0020).
-    kafka_consumers: str = "off"  # on | off
+    kafka_consumers: Literal["on", "off"] = "off"
     kafka_bootstrap: str = "localhost:19092"
-    schema_registry_url: str = "http://localhost:8081"
+    schema_registry_url: str = "http://localhost:8086"
     cell_id: str = "c1"
 
     # Tests use sqlite + create_all; containers run Alembic migrations.

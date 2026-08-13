@@ -66,7 +66,11 @@ def create_app(
     # owns their clients' lifecycles in the lifespan below.
     own_http: httpx.AsyncClient | None = None
     if catalog is None or identity is None:
-        own_http = httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0))
+        own_http = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                settings.internal_timeout_seconds, connect=settings.internal_connect_timeout_seconds
+            )
+        )
         catalog = catalog or CatalogClient(settings.catalog_base_url, own_http)
         identity = identity or IdentityClient(settings.identity_base_url, own_http)
     if saga is None:

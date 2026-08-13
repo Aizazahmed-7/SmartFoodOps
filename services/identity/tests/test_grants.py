@@ -2,25 +2,11 @@
 
 import jwt as pyjwt
 import pytest
-from fastapi.testclient import TestClient
 from identity.config import Settings
-from identity.main import create_app
 from smartfood_auth import AuthContext, headers_for
 
 SYSTEM = headers_for(AuthContext(sub="svc:catalog", role="system"))
 REG = {"email": "owner@example.com", "password": "hunter2hunter2"}
-
-
-@pytest.fixture()
-def client(tmp_path):
-    settings = Settings(
-        database_url="sqlite+aiosqlite://",
-        create_all=True,
-        signing_key_path=str(tmp_path / "key.pem"),
-        token_issuer="http://identity.test",
-    )
-    with TestClient(create_app(settings)) as c:
-        yield c
 
 
 def _claims(client) -> dict:
@@ -134,7 +120,12 @@ async def test_grant_to_non_customer_role_conflicts(tmp_path):
         audience=settings.token_audience,
         ttl_seconds=settings.access_ttl_seconds,
     )
-    svc = IdentityService(sessions, issuer, settings)
+    svc = IdentityService(
+        sessions,
+        issuer,
+        access_ttl_seconds=settings.access_ttl_seconds,
+        refresh_ttl_days=settings.refresh_ttl_days,
+    )
 
     await svc.register(email=REG["email"], password=REG["password"], full_name=None)
     async with sessions() as s:

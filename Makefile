@@ -1,6 +1,6 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: up up-apps up-full down nuke logs psql test test-int dev seed demo chaos fmt lint migrate
+.PHONY: up up-apps up-ui up-lean up-m2 up-full down nuke logs psql test cov dev seed demo chaos chaos-off fmt lint migrate
 
 up: ## Start core infrastructure (postgres, redis, kafka, temporal, localstack, mock-psp, gateway)
 	$(COMPOSE) --profile core up -d --wait
@@ -16,7 +16,7 @@ endif
 up-ui: ## Start management consoles (Kafka console :8085, Redis UI :8087); Postgres → desktop pgAdmin on localhost:5432
 	$(COMPOSE) --profile core --profile ui up -d kafka-console redis-commander
 
-up-lean: ## W1 working set (~4 GB) — skips temporal/localstack/rabbitmq/mock-psp until W2 needs them
+up-lean: ## W1 working set (~4 GB) — skips temporal/localstack/mock-psp until W2 needs them
 	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry gateway identity catalog edge-bff
 	@echo "✔ lean stack up — gateway http://localhost:8080 · frontend proxies here"
 
@@ -58,6 +58,7 @@ cov: ## Unit tests + coverage report
 		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency \
 		--cov=identity --cov=edge_bff \
 		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=mock_psp --cov=seed \
+		--cov-fail-under=100 \
 		--cov-report=term-missing
 
 seed:
@@ -68,14 +69,20 @@ demo:
 
 chaos: ## Raise mock-psp failure knobs and restart it
 	TIMEOUT_RATE=0.5 DECLINE_RATE=0.2 $(COMPOSE) --profile core up -d mock-psp
+	$(COMPOSE) exec mock-psp env | grep -E "DECLINE_RATE|TIMEOUT_RATE"
 	@echo "✔ mock-psp now timing out 50% and declining 20% — place orders and watch compensations in Temporal UI"
+
+chaos-off: ## Restore mock-psp failure knobs to their defaults
+	$(COMPOSE) --profile core up -d mock-psp
+	$(COMPOSE) exec mock-psp env | grep -E "DECLINE_RATE|TIMEOUT_RATE"
+	@echo "✔ mock-psp back to defaults (DECLINE_RATE=0.0, TIMEOUT_RATE=0.0)"
 
 fmt:
 	uv run ruff check --fix . && uv run ruff format .
 
-lint: ## Static checks — ruff gates now; pyright reports (enforcement activates with Catalog)
+lint: ## Static checks — ruff + pyright, both gating (strict tier per pyproject [tool.pyright])
 	uv run ruff check . && uv run ruff format --check .
-	-@uv run --no-sync pyright || echo "pyright: informational until the Catalog milestone (repo-structure.md §5)"
+	uv run --no-sync pyright
 
 migrate: ## Apply one service's Alembic migrations: make migrate SVC=identity [DATABASE_URL=...]
 	uv run --package $(SVC) python -c "import os; from alembic import command; from alembic.config import Config; \

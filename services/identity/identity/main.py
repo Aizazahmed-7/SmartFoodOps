@@ -95,7 +95,12 @@ def create_app(
     # Composition root: repo ← service ← routes. The API layer only ever
     # sees app.state.service; the domain only sees the sessionmaker.
     app.state.key = key
-    app.state.service = IdentityService(sessions, issuer, settings)
+    app.state.service = IdentityService(
+        sessions,
+        issuer,
+        access_ttl_seconds=settings.access_ttl_seconds,
+        refresh_ttl_days=settings.refresh_ttl_days,
+    )
 
     app.include_router(router)
 

@@ -16,48 +16,20 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 
-class FakeGateway:
-    """Scripted PaymentGatewayPort (self-contained copy — importlib test
-    mode forbids cross-test-module imports)."""
-
-    def __init__(self):
-        self.script: list = []
-        self.authorize_calls: list[tuple[str, int, str]] = []
-        self.lifecycle_calls: list[tuple[str, str, str]] = []
-        self.fail_lifecycle: Exception | None = None
-
-    async def authorize(self, *, key, amount_cents, currency, card_token):
-        self.authorize_calls.append((key, amount_cents, card_token))
-        step = self.script.pop(0) if self.script else GatewayResult(True, "psp_abc")
-        if isinstance(step, Exception):
-            raise step
-        return step
-
-    async def capture(self, *, key, psp_ref):
-        self._lifecycle("capture", key, psp_ref)
-
-    async def void(self, *, key, psp_ref):
-        self._lifecycle("void", key, psp_ref)
-
-    async def refund(self, *, key, psp_ref):
-        self._lifecycle("refund", key, psp_ref)
-
-    def _lifecycle(self, op, key, psp_ref):
-        self.lifecycle_calls.append((op, key, psp_ref))
-        if self.fail_lifecycle is not None:
-            raise self.fail_lifecycle
-
-
-async def _service():
+async def _service(gateway):
+    """Bare PaymentService over in-memory sqlite. The scripted `gateway`
+    is conftest's fixture: importlib test mode only stops test MODULES
+    from importing one another — conftest FIXTURES are the sanctioned
+    sharing channel, so the fake travels by injection instead of by a
+    per-file copy."""
     engine = create_async_engine(
         "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
     async with engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    gateway = FakeGateway()
     service = PaymentService(sessions, gateway, IdempotencyStore(sessions, idempotency_keys))
-    return service, sessions, gateway
+    return service, sessions
 
 
 async def _authorize(service, order_id="ord_1", amount=3446):
@@ -66,8 +38,8 @@ async def _authorize(service, order_id="ord_1", amount=3446):
     )
 
 
-async def test_authorize_approved_writes_row_event_and_completion():
-    service, sessions, gateway = await _service()
+async def test_authorize_approved_writes_row_event_and_completion(gateway):
+    service, sessions = await _service(gateway)
     outcome = await _authorize(service)
     assert (outcome.status_code, outcome.replayed) == (200, False)
     assert outcome.body["status"] == "AUTHORIZED"
@@ -84,16 +56,16 @@ async def test_authorize_approved_writes_row_event_and_completion():
     assert entries == []  # a hold is NOT a money movement — no ledger rows
 
 
-async def test_authorize_replay_returns_stored_no_second_psp_call():
-    service, _, gateway = await _service()
+async def test_authorize_replay_returns_stored_no_second_psp_call(gateway):
+    service, _ = await _service(gateway)
     first = await _authorize(service)
     replay = await _authorize(service)
     assert replay.replayed and replay.body == first.body
     assert len(gateway.authorize_calls) == 1  # the PSP saw exactly one attempt
 
 
-async def test_decline_is_stored_and_replayed_as_402():
-    service, sessions, gateway = await _service()
+async def test_decline_is_stored_and_replayed_as_402(gateway):
+    service, sessions = await _service(gateway)
     gateway.script = [GatewayResult(False, "psp_x")]
     first = await _authorize(service)
     assert first.status_code == 402
@@ -107,10 +79,10 @@ async def test_decline_is_stored_and_replayed_as_402():
     assert events == []  # declines emit no PaymentAuthorized
 
 
-async def test_psp_unavailable_releases_key_then_retry_converges():
+async def test_psp_unavailable_releases_key_then_retry_converges(gateway):
     """FR-22 end to end: timeout → 503; the retry reuses the SAME gateway
     key, the (fake) PSP approves, exactly one payment exists."""
-    service, sessions, gateway = await _service()
+    service, sessions = await _service(gateway)
     gateway.script = [PspUnavailable("down"), GatewayResult(True, "psp_abc")]
     with pytest.raises(PspUnavailable):
         await _authorize(service)
@@ -122,10 +94,10 @@ async def test_psp_unavailable_releases_key_then_retry_converges():
     assert count == 1
 
 
-async def test_existing_row_convergence_on_reexecution(monkeypatch):
+async def test_existing_row_convergence_on_reexecution(monkeypatch, gateway):
     """Expired-key re-execution long after a committed attempt: the INSERT
     collides and we converge on the stored truth instead of crashing."""
-    service, sessions, gateway = await _service()
+    service, sessions = await _service(gateway)
     await _authorize(service)
     # wipe the idempotency row to simulate 24h expiry + takeover
     async with sessions() as s:
@@ -139,8 +111,8 @@ async def test_existing_row_convergence_on_reexecution(monkeypatch):
     assert count == 1  # still exactly one payment
 
 
-async def test_capture_moves_money_with_a_balanced_pair():
-    service, sessions, gateway = await _service()
+async def test_capture_moves_money_with_a_balanced_pair(gateway):
+    service, sessions = await _service(gateway)
     await _authorize(service)
     outcome = await service.capture("ord_1")
     assert outcome.body == {"order_id": "ord_1", "status": "CAPTURED"}
@@ -160,8 +132,8 @@ async def test_capture_moves_money_with_a_balanced_pair():
     assert gateway.lifecycle_calls == [("capture", "ord_1:capture", "psp_abc")]
 
 
-async def test_capture_replay_posts_no_second_ledger_pair():
-    service, sessions, _ = await _service()
+async def test_capture_replay_posts_no_second_ledger_pair(gateway):
+    service, sessions = await _service(gateway)
     await _authorize(service)
     await service.capture("ord_1")
     replay = await service.capture("ord_1")
@@ -171,12 +143,12 @@ async def test_capture_replay_posts_no_second_ledger_pair():
     assert count == 2  # one pair, forever
 
 
-async def test_capture_retry_beyond_the_replay_ttl_replays_from_state():
+async def test_capture_retry_beyond_the_replay_ttl_replays_from_state(gateway):
     """A capture retry arriving after the idempotency window (>24h; a very
     slow Temporal retry) finds an at-target row: that is its OWN success —
     200 CAPTURED, no gateway call, no second ledger pair — never a 409
     that would fail a workflow whose money is already in the till."""
-    service, sessions, gateway = await _service()
+    service, sessions = await _service(gateway)
     await _authorize(service)
     await service.capture("ord_1")
     async with sessions() as s:
@@ -191,9 +163,9 @@ async def test_capture_retry_beyond_the_replay_ttl_replays_from_state():
     assert [c[0] for c in gateway.lifecycle_calls].count("capture") == 1  # PSP untouched
 
 
-async def test_void_retry_beyond_the_replay_ttl_replays_from_state():
+async def test_void_retry_beyond_the_replay_ttl_replays_from_state(gateway):
     """Same state-replay rule for the compensations (uniform idiom)."""
-    service, sessions, _ = await _service()
+    service, sessions = await _service(gateway)
     await _authorize(service)
     await service.void("ord_1")
     async with sessions() as s:
@@ -204,8 +176,8 @@ async def test_void_retry_beyond_the_replay_ttl_replays_from_state():
     assert late.body["status"] == "VOIDED"
 
 
-async def test_refund_writes_the_reversing_pair():
-    service, sessions, _ = await _service()
+async def test_refund_writes_the_reversing_pair(gateway):
+    service, sessions = await _service(gateway)
     await _authorize(service)
     await service.capture("ord_1")
     outcome = await service.refund("ord_1")
@@ -222,8 +194,8 @@ async def test_refund_writes_the_reversing_pair():
     assert sum(e.debit_cents for e in entries) == sum(e.credit_cents for e in entries)
 
 
-async def test_void_releases_hold_no_ledger_no_event():
-    service, sessions, _ = await _service()
+async def test_void_releases_hold_no_ledger_no_event(gateway):
+    service, sessions = await _service(gateway)
     await _authorize(service)
     outcome = await service.void("ord_1")
     assert outcome.body["status"] == "VOIDED"
@@ -236,8 +208,8 @@ async def test_void_releases_hold_no_ledger_no_event():
     assert event_types == ["PaymentAuthorized"]  # no void event (plan)
 
 
-async def test_lifecycle_state_conflicts_release_the_key():
-    service, _, gateway = await _service()
+async def test_lifecycle_state_conflicts_release_the_key(gateway):
+    service, _ = await _service(gateway)
     with pytest.raises(PaymentStateConflict):
         await service.capture("ord_ghost")  # no auth at all
     await _authorize(service, "ord_ghost")  # key was released — this works
@@ -249,8 +221,8 @@ async def test_lifecycle_state_conflicts_release_the_key():
         await service.void("ord_ghost")
 
 
-async def test_lifecycle_psp_down_releases_key_then_retry_succeeds():
-    service, sessions, gateway = await _service()
+async def test_lifecycle_psp_down_releases_key_then_retry_succeeds(gateway):
+    service, sessions = await _service(gateway)
     await _authorize(service)
     gateway.fail_lifecycle = PspUnavailable("down")
     with pytest.raises(PspUnavailable):
@@ -263,11 +235,11 @@ async def test_lifecycle_psp_down_releases_key_then_retry_succeeds():
     assert count == 2  # exactly one pair despite the failed attempt
 
 
-async def test_concurrent_money_op_raises_in_progress():
+async def test_concurrent_money_op_raises_in_progress(gateway):
     from payment.domain.service import MONEY_SCOPE, MoneyOpInProgress, _op_hash
     from smartfood_idempotency import IdempotencyStore
 
-    service, sessions, _ = await _service()
+    service, sessions = await _service(gateway)
     await _authorize(service)
     # another worker holds the capture key right now (same op hash)
     store = IdempotencyStore(sessions, idempotency_keys)
@@ -276,9 +248,9 @@ async def test_concurrent_money_op_raises_in_progress():
         await service.capture("ord_1")
 
 
-async def test_declined_row_convergence_describes_the_402():
+async def test_declined_row_convergence_describes_the_402(gateway):
     """Expired-key re-execution against a DECLINED row replays the decline."""
-    service, sessions, gateway = await _service()
+    service, sessions = await _service(gateway)
     gateway.script = [GatewayResult(False, "psp_x")]
     await _authorize(service)
     async with sessions() as s:  # simulate 24h key expiry + takeover
@@ -289,18 +261,18 @@ async def test_declined_row_convergence_describes_the_402():
     assert outcome.body["error"]["code"] == "PAYMENT_DECLINED"
 
 
-async def test_psp_state_conflict_maps_to_payment_state_conflict():
-    service, _, gateway = await _service()
+async def test_psp_state_conflict_maps_to_payment_state_conflict(gateway):
+    service, _ = await _service(gateway)
     await _authorize(service)
     gateway.fail_lifecycle = PspStateConflict("psp says no")
     with pytest.raises(PaymentStateConflict):
         await service.capture("ord_1")
 
 
-async def test_transition_race_converges_on_winner(monkeypatch):
+async def test_transition_race_converges_on_winner(monkeypatch, gateway):
     """Between our state read and the guarded UPDATE, another instance
     captured: our 0-row update converges on the winner's state."""
-    service, sessions, _ = await _service()
+    service, sessions = await _service(gateway)
     await _authorize(service)
 
     real_transition = PaymentRepo.transition_payment

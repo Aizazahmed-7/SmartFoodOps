@@ -9,8 +9,9 @@ poller can never mint a second identity for the same fact.
 import uuid
 
 from .poller import OutboxPoller
+from .table import outbox_table, stage_event
 
-__all__ = ["OutboxPoller", "event_id"]
+__all__ = ["OutboxPoller", "event_id", "outbox_table", "stage_event"]
 
 # Fixed project namespace — NEVER change it: event ids must stay stable
 # across deploys, or every consumer's dedupe store silently resets.

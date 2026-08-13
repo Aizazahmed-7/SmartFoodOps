@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import {
   addCategory, addItem, deleteCategory, deleteItem, getMenu, patchItem,
   pauseRestaurant, resumeRestaurant, type ItemPayload,
@@ -125,6 +125,7 @@ function ItemForm({
 
 export default function PartnerDashboard() {
   const { claims } = useAuth();
+  const location = useLocation();
   const rid = claims?.restaurant_id;
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>("orders");
@@ -163,7 +164,7 @@ export default function PartnerDashboard() {
     onSuccess: refresh,
   });
 
-  if (!claims) return <Navigate to="/login" replace />;
+  if (!claims) return <Navigate to="/login" replace state={{ from: location }} />;
   if (!rid) return <Navigate to="/partner" replace />;
   if (menu.isLoading) return <Spinner />;
   if (menu.error) return <ErrorNote error={menu.error} />;

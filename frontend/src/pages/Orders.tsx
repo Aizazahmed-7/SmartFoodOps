@@ -1,12 +1,13 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { listOrders } from "../api/client";
 import { TERMINAL_STATUSES } from "../api/types";
 import { useAuth } from "../state/auth";
-import { ErrorNote, Spinner, StatusTag } from "../components/ui";
+import { ErrorNote, Money, Spinner, StatusTag } from "../components/ui";
 
 export default function Orders() {
   const { claims } = useAuth();
+  const location = useLocation();
   const orders = useInfiniteQuery({
     queryKey: ["orders"],
     queryFn: ({ pageParam }) => listOrders(pageParam),
@@ -26,7 +27,10 @@ export default function Orders() {
     return (
       <div className="py-16 text-center">
         <p className="text-slate-400">Sign in to see your orders.</p>
-        <Link to="/login" className="btn-primary mt-4 inline-block">Sign in</Link>
+        {/* Carry the interrupted location — sign-in must land back HERE. */}
+        <Link to="/login" state={{ from: location }} className="btn-primary mt-4 inline-block">
+          Sign in
+        </Link>
       </div>
     );
   if (orders.isLoading) return <Spinner />;
@@ -53,8 +57,8 @@ export default function Orders() {
             </div>
             <div className="text-right">
               <StatusTag status={o.status} />
-              <p className="mt-1 text-sm font-semibold tabular-nums">
-                ${(o.total_cents / 100).toFixed(2)}
+              <p className="mt-1 text-sm font-semibold">
+                <Money cents={o.total_cents} />
               </p>
             </div>
           </Link>

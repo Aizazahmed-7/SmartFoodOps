@@ -1,6 +1,9 @@
 name: smartfoodops
 
-# Profiles: core (infra), apps (services), obs (later), cdc (later — OUTBOX_MODE=poller is the dev default)
+# Profiles: core (infra), apps (services), ui (consoles), chores (rabbitmq — parked until
+# Celery lands), obs (later), cdc (later — OUTBOX_MODE=poller is the dev default)
+# Chaos/log knobs interpolate from the environment (defaults in .env.example) so
+# `make chaos` can raise them without editing this file.
 # Ports follow docs/local-dev.md exactly. Clients always enter via nginx on :8080.
 
 x-app-base: &app-base
@@ -16,7 +19,7 @@ x-app-base: &app-base
     REDIS_URL: redis://redis:6379/0
     KAFKA_BOOTSTRAP: kafka:9092
     TEMPORAL_ADDRESS: temporal:7233
-    OUTBOX_MODE: poller
+    OUTBOX_MODE: ${OUTBOX_MODE:-poller}
     SCHEMA_REGISTRY_URL: http://schema-registry:8081
     KAFKA_CONSUMERS: "on"
     AWS_ENDPOINT_URL: http://localstack:4566
@@ -76,8 +79,10 @@ services:
     ports: ["6380:6379"]
     command: ["redis-server", "--maxmemory-policy", "volatile-ttl"]
 
+  # Parked in `chores` until Celery/notification lands — nothing speaks AMQP
+  # today, so it has no business costing RAM in every `make up`.
   rabbitmq:
-    profiles: [core]
+    profiles: [chores]
     image: rabbitmq:3-management
     ports: ["5672:5672", "15672:15672"]
 
@@ -145,10 +150,10 @@ services:
     environment:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/mock-psp
-      DECLINE_RATE: "0.0"
-      TIMEOUT_RATE: "0.0"
-      UNKNOWN_OUTCOME_RATE: "0.0"
-      LATENCY_MS_P50: "40"
+      DECLINE_RATE: ${DECLINE_RATE:-0.0}
+      TIMEOUT_RATE: ${TIMEOUT_RATE:-0.0}
+      UNKNOWN_OUTCOME_RATE: ${UNKNOWN_OUTCOME_RATE:-0.0}
+      LATENCY_MS_P50: ${LATENCY_MS_P50:-40}
     command:
       [
         "uv",
@@ -176,6 +181,7 @@ services:
   identity:
     <<: *app-base
     profiles: [apps]
+    restart: unless-stopped
     ports: ["8001:8001"]
     environment:
       <<: *app-env
@@ -222,6 +228,7 @@ services:
   inventory:
     <<: *app-base
     profiles: [apps]
+    restart: unless-stopped
     ports: ["8005:8005"]
     environment:
       <<: *app-env
@@ -245,6 +252,7 @@ services:
   order:
     <<: *app-base
     profiles: [apps]
+    restart: unless-stopped
     ports: ["8006:8006"]
     environment:
       <<: *app-env
@@ -268,6 +276,7 @@ services:
   order-worker:
     <<: *app-base
     profiles: [apps]
+    restart: unless-stopped
     environment:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/order
@@ -277,6 +286,7 @@ services:
   payment:
     <<: *app-base
     profiles: [apps]
+    restart: unless-stopped
     ports: ["8007:8007"]
     environment:
       <<: *app-env

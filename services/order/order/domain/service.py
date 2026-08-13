@@ -84,6 +84,13 @@ class NotCancellable:
 CancelOutcome = CancelSubmitted | CancelAlreadyDone | NotCancellable
 
 
+def placement_response(order_id: str) -> dict[str, str]:
+    """THE 202 placement body. It is stored for idempotent replay AND
+    returned on the fresh path — with two authors the replay could drift
+    from the live shape; with one it cannot."""
+    return {"order_id": order_id, "status": "PLACED"}
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -154,7 +161,7 @@ class OrderService:
 
         order_id = f"ord_{uuid.uuid4().hex}"
         now = _now()
-        response_body = {"order_id": order_id, "status": "PLACED"}
+        response_body = placement_response(order_id)
         line_dicts = [
             {
                 "menu_item_id": line.item_id,

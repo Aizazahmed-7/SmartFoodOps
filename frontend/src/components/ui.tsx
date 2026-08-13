@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ApiError } from "../api/client";
 import type { OrderStatus } from "../api/types";
 
 const STATUS_STYLE: Partial<Record<OrderStatus, string>> = {
@@ -22,12 +23,32 @@ export function Money({ cents }: { cents: number }) {
   );
 }
 
+/** The ONE banner shape — pages compose their message, not their chrome. */
+const NOTE_TONE = {
+  warn: "border-amber-900 bg-amber-950/60 text-amber-200",
+  error: "border-red-900 bg-red-950/50 text-red-200",
+} as const;
+
+export function Note({ tone, children }: { tone: "warn" | "error"; children: ReactNode }) {
+  return (
+    <div className={`rounded-xl border px-4 py-3 text-sm ${NOTE_TONE[tone]}`}>
+      {children}
+    </div>
+  );
+}
+
 export function ErrorNote({ error }: { error: unknown }) {
   if (!error) return null;
   const message = error instanceof Error ? error.message : String(error);
+  // The gateway's correlation id — the one string that finds this failure
+  // in the backend logs, so it belongs in every screenshot of the error.
+  const requestId = error instanceof ApiError ? error.requestId : undefined;
   return (
     <p className="rounded-xl bg-red-950/60 border border-red-900 px-3 py-2 text-sm text-red-200">
       {message}
+      {requestId && (
+        <span className="mt-1 block text-xs text-red-400/80">ref: {requestId}</span>
+      )}
     </p>
   );
 }

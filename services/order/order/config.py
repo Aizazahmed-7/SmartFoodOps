@@ -1,5 +1,7 @@
 """Order settings — all overridable by environment (compose sets the URLs)."""
 
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,10 +30,20 @@ class Settings(BaseSettings):
 
     # Event backbone: outbox → c1.orders.events (poller runs in the API
     # process ONLY — single-instance ordering; the worker just stages rows).
-    outbox_mode: str = "off"  # poller | off
+    outbox_mode: Literal["poller", "debezium", "off"] = "off"
     kafka_bootstrap: str = "localhost:19092"
     schema_registry_url: str = "http://localhost:8086"
     cell_id: str = "c1"
 
     # Tests use sqlite + create_all; containers run Alembic migrations (S3).
     create_all: bool = False
+
+    # Internal HTTP calls: per-attempt total / connect budgets. Payment's
+    # total is semantically load-bearing (it is what turns tok_timeout into
+    # the ambiguous-outcome case), so it must be tunable without a deploy.
+    internal_timeout_seconds: float = 5.0
+    internal_connect_timeout_seconds: float = 3.0
+
+    # The worker's calls ride Temporal's retry policy, so a longer per-attempt
+    # budget is safe; the API's synchronous reads stay on the tighter one.
+    worker_http_timeout_seconds: float = 10.0

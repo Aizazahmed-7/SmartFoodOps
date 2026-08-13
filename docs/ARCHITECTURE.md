@@ -1,6 +1,6 @@
 # SmartFoodOps — Architecture (HLD)
 
-**Status**: Design phase — Part A (single region, single cell `c1`).
+**Status**: Part A, built through W2 (single region, single cell `c1`). *(As built, W2: six services + seven libs + React frontend are live — the order lifecycle runs PLACED→SETTLED end to end through the Temporal saga, outbox, and Kafka; 478 tests at an enforced 100% coverage bar. Sections describing dispatch, notification, and analytics remain design-forward; per-section "(As built, W2:)" notes mark where the code refines the design.)*
 **Audience**: engineers building or reviewing Part A.
 **Source of truth**: this document expands the approved design plan. Requirements live in [PRD.md](PRD.md); sizing math in [capacity-plan.md](capacity-plan.md); onboarding in [local-dev.md](local-dev.md); repo layout in [repo-structure.md](repo-structure.md); individual decisions with alternatives in [adr/](adr/).
 

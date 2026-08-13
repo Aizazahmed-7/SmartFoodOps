@@ -6,23 +6,14 @@ keys ({order_id}:{op}) make every retry converge on one truth (FR-22)."""
 
 import httpx
 from smartfood_api import ErrorCode
-from smartfood_auth import AuthContext, headers_for
-from smartfood_otel import current_traceparent
+from smartfood_auth import internal_headers
 
 from ..domain.ports import PaymentStateConflict
 from ..values import AuthResult
 
-_HEADERS = {
-    **headers_for(AuthContext(sub="svc:order-worker", role="system")),
-    "X-Internal-Caller": "order-worker",
-}
-
 
 def _headers() -> dict[str, str]:
-    headers = dict(_HEADERS)
-    if traceparent := current_traceparent():
-        headers["traceparent"] = traceparent
-    return headers
+    return internal_headers("order-worker")
 
 
 class PaymentUnavailable(Exception):
