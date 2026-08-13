@@ -9,22 +9,13 @@ from typing import Any
 
 import httpx
 from smartfood_api import ErrorCode
-from smartfood_auth import AuthContext, headers_for
-from smartfood_otel import current_traceparent
+from smartfood_auth import internal_headers
 
 from ..values import LineSpec, ReserveResult
 
-_HEADERS = {
-    **headers_for(AuthContext(sub="svc:order-worker", role="system")),
-    "X-Internal-Caller": "order-worker",
-}
-
 
 def _headers() -> dict[str, str]:
-    headers = dict(_HEADERS)
-    if traceparent := current_traceparent():
-        headers["traceparent"] = traceparent
-    return headers
+    return internal_headers("order-worker")
 
 
 class InventoryUnavailable(Exception):

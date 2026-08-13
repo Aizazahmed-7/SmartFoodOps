@@ -6,9 +6,17 @@ FTS expression indexes, ADR-0019) live in the migration, not here — this
 metadata must stay sqlite-compatible for the unit suite.
 """
 
+from typing import Literal, get_args
+
 import sqlalchemy as sa
+from smartfood_outbox import outbox_table
 
 metadata = sa.MetaData()
+
+# The Literal is the single source of truth (the W2 idiom, backported):
+# route signatures type against it and the CHECK below is derived from it.
+RestaurantStatus = Literal["open", "paused"]
+RESTAURANT_STATUSES: tuple[str, ...] = get_args(RestaurantStatus)
 
 restaurants = sa.Table(
     "restaurants",
@@ -23,7 +31,8 @@ restaurants = sa.Table(
     sa.Column("city", sa.Text, nullable=False, index=True),
     sa.Column("lat", sa.Float, nullable=True),
     sa.Column("lon", sa.Float, nullable=True),
-    sa.Column("status", sa.Text, nullable=False, server_default="open"),  # open | paused
+    sa.Column("status", sa.Text, nullable=False, server_default="open"),
+    sa.CheckConstraint(f"status IN {RESTAURANT_STATUSES!r}", name="ck_restaurants_status"),
     sa.Column("hours", sa.JSON, nullable=True),  # {"mon": ["11:00", "23:00"], ...}
     # cache version.
     sa.Column("version", sa.Integer, nullable=False, server_default="0"),
@@ -113,20 +122,5 @@ menu_versions = sa.Table(
     sa.Column("published_at", sa.TIMESTAMP(timezone=True), nullable=False),
 )
 
-# Staged from day 1 (same tx as every mutation); the W3 poller/Debezium drains it
-# to c1.catalog.changes. event id = deterministic UUIDv5 (ADR-0018).
-outbox = sa.Table(
-    "outbox",
-    metadata,
-    sa.Column("id", sa.Text, primary_key=True),
-    sa.Column("aggregate_type", sa.Text, nullable=False),  # "restaurant"
-    sa.Column("aggregate_id", sa.Text, nullable=False),
-    sa.Column("aggregate_version", sa.Integer, nullable=False),
-    sa.Column("event_type", sa.Text, nullable=False),
-    sa.Column("payload", sa.JSON, nullable=False),
-    sa.Column("occurred_at", sa.TIMESTAMP(timezone=True), nullable=False),
-    sa.Column("published_at", sa.TIMESTAMP(timezone=True), nullable=True, index=True),
-    # W3C trace context captured at staging; the poller lifts it into Kafka
-    # headers so the async hop stays stitched in Jaeger (docs §12).
-    sa.Column("traceparent", sa.Text, nullable=True),
-)
+# The 9-column contract lives with its reader (smartfood-outbox).
+outbox = outbox_table(metadata)

@@ -33,6 +33,8 @@ interface CartState {
     line: Omit<CartLine, "key" | "qty">,
   ) => "added" | "different-restaurant";
   setQty: (key: string, qty: number) => void;
+  /** Re-pin after a quote (self-heal) or a PRICE_CHANGED re-confirm. */
+  setMenuVersion: (version: number) => void;
   clear: () => void;
 }
 
@@ -73,6 +75,7 @@ export const useCart = create<CartState>()(
               ? state.lines.filter((l) => l.key !== key)
               : state.lines.map((l) => (l.key === key ? { ...l, qty } : l)),
         })),
+      setMenuVersion: (version) => set({ menuVersion: version }),
       clear: () =>
         set({ restaurantId: null, restaurantName: null, menuVersion: null, lines: [] }),
     }),

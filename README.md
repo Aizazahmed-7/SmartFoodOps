@@ -4,7 +4,7 @@ SmartFoodOps is QuickServe's greenfield backend for large-scale food ordering an
 
 ## Status
 
-**Design phase — Part A.** No code yet; the repo currently contains the design document set. Multi-region is explicitly deferred (single cell `c1`, with cheap day-1 hooks that keep multi-cell additive).
+**Built through W2 — Part A.** *(As built, W2:)* six services (edge-bff, identity, catalog, inventory, order + worker, payment) and seven shared libs run the full order lifecycle PLACED→SETTLED live through the real stack (Temporal saga, transactional outbox, Kafka facts), with a React frontend, 478 unit tests at an enforced 100% coverage bar (`make cov`), and live verification scripts (`make demo`, `tools/demo/verify-live.sh`). Multi-region is explicitly deferred (single cell `c1`, with cheap day-1 hooks that keep multi-cell additive).
 
 ## Document map
 

@@ -7,6 +7,7 @@ dependencies = []
 
 [tool.uv.workspace]
 members = ["libs/*", "services/*", "tools/*"]
+exclude = ["tools/demo"]  # shell scripts, not a package
 
 [dependency-groups]
 dev = [
@@ -72,6 +73,10 @@ testpaths = ["libs", "services", "tools"]
 # tracing, coverage silently drops every line after a method's first awaited
 # query and under-reports by ~30 points. Do not remove.
 concurrency = ["thread", "greenlet"]
+
+[tool.coverage.report]
+# The suite sits at 100% (make cov); hold the line rather than drift down.
+fail_under = 100
 
 [tool.uv]
 package = false

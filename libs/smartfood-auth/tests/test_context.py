@@ -2,9 +2,13 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from smartfood_auth import Auth, AuthContext, headers_for, require_role
+from smartfood_api import install_error_handlers
+from smartfood_auth import Auth, AuthContext, Role, headers_for, require_role
 
 app = FastAPI()
+# The lib's refusals are ApiError subclasses: they render through the
+# standard handlers, which every service installs in create_app.
+install_error_handlers(app)
 
 
 @app.get("/me")
@@ -14,7 +18,7 @@ async def me(ctx: Auth) -> dict:
 
 @app.get("/admin-only")
 async def admin_only(
-    ctx: Annotated[AuthContext, Depends(require_role("restaurant_admin"))],
+    ctx: Annotated[AuthContext, Depends(require_role(Role.RESTAURANT_ADMIN))],
 ) -> dict:
     return {"restaurant_id": ctx.restaurant_id}
 
@@ -23,12 +27,15 @@ client = TestClient(app)
 
 
 def test_missing_headers_is_401():
-    assert client.get("/me").status_code == 401
+    r = client.get("/me")
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "AUTH_INVALID_CREDENTIALS"
 
 
 def test_invalid_role_is_401():
     r = client.get("/me", headers={"X-Auth-Sub": "u1", "X-Auth-Role": "superuser"})
     assert r.status_code == 401
+    assert r.json()["error"]["code"] == "AUTH_INVALID_CREDENTIALS"
 
 
 def test_headers_become_context():
@@ -59,3 +66,15 @@ def test_system_bypasses_role_gate():
         "/admin-only", headers={"X-Auth-Sub": "svc:order-worker", "X-Auth-Role": "system"}
     )
     assert r.status_code == 200
+
+
+def test_auth_refusals_render_the_exact_catalog_codes():
+    """The wire contract pin: 401 -> AUTH_INVALID_CREDENTIALS and 403 ->
+    FORBIDDEN_ROLE through the lib-owned exceptions, byte-compatible with
+    what the fallback table used to produce."""
+    from smartfood_auth import Forbidden, MissingIdentity
+
+    missing = MissingIdentity()
+    assert (missing.status, str(missing.code)) == (401, "AUTH_INVALID_CREDENTIALS")
+    forbidden = Forbidden()
+    assert (forbidden.status, str(forbidden.code)) == (403, "FORBIDDEN_ROLE")

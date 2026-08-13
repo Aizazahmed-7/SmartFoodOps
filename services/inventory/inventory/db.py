@@ -7,6 +7,7 @@ test create_all derive from. Must stay sqlite-compatible for the unit suite.
 from typing import Literal, get_args
 
 import sqlalchemy as sa
+from smartfood_outbox import outbox_table
 
 metadata = sa.MetaData()
 
@@ -60,17 +61,5 @@ reservations = sa.Table(
 )
 sa.Index("ix_reservations_reaper", reservations.c.status, reservations.c.expires_at)
 
-# Same column contract as catalog's outbox (smartfood_outbox poller docstring).
-outbox = sa.Table(
-    "outbox",
-    metadata,
-    sa.Column("id", sa.Text, primary_key=True),
-    sa.Column("aggregate_type", sa.Text, nullable=False),  # "stock" | "reservation"
-    sa.Column("aggregate_id", sa.Text, nullable=False),
-    sa.Column("aggregate_version", sa.Integer, nullable=False),
-    sa.Column("event_type", sa.Text, nullable=False),
-    sa.Column("payload", sa.JSON, nullable=False),
-    sa.Column("occurred_at", sa.TIMESTAMP(timezone=True), nullable=False),
-    sa.Column("published_at", sa.TIMESTAMP(timezone=True), nullable=True, index=True),
-    sa.Column("traceparent", sa.Text, nullable=True),
-)
+# The 9-column contract lives with its reader (smartfood-outbox).
+outbox = outbox_table(metadata)

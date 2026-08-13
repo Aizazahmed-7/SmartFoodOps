@@ -63,7 +63,11 @@ def create_app(
     # (and owns their clients' lifecycles in the lifespan below).
     own_http: httpx.AsyncClient | None = None
     if grants is None:
-        own_http = httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0))
+        own_http = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                settings.internal_timeout_seconds, connect=settings.internal_connect_timeout_seconds
+            )
+        )
         grants = IdentityGrantsClient(settings.identity_base_url, own_http)
     own_redis: aioredis.Redis | None = None
     if cache is None:

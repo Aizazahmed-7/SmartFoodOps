@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { ApiError, onboardRestaurant } from "../api/client";
 import { useAuth } from "../state/auth";
 import { ErrorNote } from "../components/ui";
@@ -12,6 +12,7 @@ const CUISINES = ["pakistani", "burgers", "italian", "japanese", "mexican", "ind
  * success → tokens already refreshed by the client, claims carry the grant. */
 export default function PartnerOnboard() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { claims, setPendingOnboarding } = useAuth();
   const [name, setName] = useState("");
   const [city, setCity] = useState("springfield");
@@ -20,7 +21,7 @@ export default function PartnerOnboard() {
   const [pendingNote, setPendingNote] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  if (!claims) return <Navigate to="/login" replace />;
+  if (!claims) return <Navigate to="/login" replace state={{ from: location }} />;
   if (claims.role === "restaurant_admin") return <Navigate to="/partner/dashboard" replace />;
 
   const toggle = (c: string) =>

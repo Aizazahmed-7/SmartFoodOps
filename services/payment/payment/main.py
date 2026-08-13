@@ -54,7 +54,11 @@ def create_app(
     if gateway is None:
         # Timeout is the adapter's clock: mock-psp's tok_timeout hangs 30s,
         # so 5s here is what turns it into the ambiguous-outcome case.
-        own_http = httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0))
+        own_http = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                settings.internal_timeout_seconds, connect=settings.internal_connect_timeout_seconds
+            )
+        )
         gateway = MockPspClient(settings.mock_psp_base_url, own_http)
 
     events_topic = topic(settings.cell_id, Topic.PAYMENTS_EVENTS)

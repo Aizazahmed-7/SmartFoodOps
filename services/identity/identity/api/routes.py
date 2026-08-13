@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from smartfood_api import ApiError, ErrorCode, StrictModel
-from smartfood_auth import Auth, AuthContext, jwks, require_role
+from smartfood_auth import Auth, AuthContext, jwks, require_system
 
 from ..domain.service import (
     AddressLimitReached,
@@ -21,6 +21,12 @@ from ..domain.service import (
 )
 
 router = APIRouter()
+
+
+def _not_found() -> ApiError:
+    """One message for every 404 on this surface — 'unknown user' vs
+    'not found' drift was two authors, not a distinction."""
+    return ApiError(ErrorCode.NOT_FOUND, "not found", 404)
 
 
 def _svc(request: Request) -> IdentityService:
@@ -125,7 +131,7 @@ async def me(ctx: Auth, request: Request) -> ProfileOut:
     try:
         profile = await _svc(request).get_profile(ctx.sub)
     except UnknownUser:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown user", 404) from None
+        raise _not_found() from None
     return ProfileOut.model_validate(profile)
 
 
@@ -142,37 +148,11 @@ async def update_me(body: ProfileUpdate, ctx: Auth, request: Request) -> dict:
             details=[{"field": "body", "issue": "at least one field required"}],
         ) from None
     except UnknownUser:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown user", 404) from None
+        raise _not_found() from None
     return {"status": "updated", **changes}
 
 
-# ── internal (never in the edge allowlist — unreachable from outside) ──
-
-# require_role() with no roles: ONLY role=system passes (service-to-service).
-SystemOnly = Annotated[AuthContext, Depends(require_role())]
-
-
-class GrantIn(StrictModel):
-    user_id: str = Field(max_length=64)
-    role: Literal["restaurant_admin"]  # the only grantable role today
-    restaurant_id: str = Field(max_length=64)
-
-
-@router.post("/v1/internal/grants")
-async def grant_role(body: GrantIn, ctx: SystemOnly, request: Request) -> dict:
-    """Catalog calls this during self-serve onboarding.
-    Idempotent — replaying an applied grant succeeds silently."""
-    try:
-        await _svc(request).grant_restaurant_admin(
-            user_id=body.user_id, restaurant_id=body.restaurant_id
-        )
-    except UnknownUser:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown user", 404) from None
-    except GrantConflict:
-        raise ApiError(
-            ErrorCode.GRANT_CONFLICT, "user cannot be granted this restaurant", 409
-        ) from None
-    return {"status": "granted", "user_id": body.user_id, "restaurant_id": body.restaurant_id}
+# ── saved addresses (public, /v1/me — edge-routed) ─────────────────
 
 
 @router.post("/v1/me/addresses", status_code=201)
@@ -199,7 +179,35 @@ async def delete_address(address_id: str, ctx: Auth, request: Request) -> None:
     try:
         await _svc(request).delete_address(ctx.sub, address_id)
     except AddressNotFound:
-        raise ApiError(ErrorCode.NOT_FOUND, "not found", 404) from None
+        raise _not_found() from None
+
+
+# ── internal (never in the edge allowlist — unreachable from outside) ──
+
+SystemOnly = Annotated[AuthContext, Depends(require_system())]
+
+
+class GrantIn(StrictModel):
+    user_id: str = Field(max_length=64)
+    role: Literal["restaurant_admin"]  # the only grantable role today
+    restaurant_id: str = Field(max_length=64)
+
+
+@router.post("/v1/internal/grants")
+async def grant_role(body: GrantIn, ctx: SystemOnly, request: Request) -> dict:
+    """Catalog calls this during self-serve onboarding.
+    Idempotent — replaying an applied grant succeeds silently."""
+    try:
+        await _svc(request).grant_restaurant_admin(
+            user_id=body.user_id, restaurant_id=body.restaurant_id
+        )
+    except UnknownUser:
+        raise _not_found() from None
+    except GrantConflict:
+        raise ApiError(
+            ErrorCode.GRANT_CONFLICT, "user cannot be granted this restaurant", 409
+        ) from None
+    return {"status": "granted", "user_id": body.user_id, "restaurant_id": body.restaurant_id}
 
 
 @router.get("/v1/internal/users/{user_id}/addresses/{address_id}")
@@ -211,5 +219,5 @@ async def internal_get_address(
     try:
         address = await _svc(request).get_address(user_id, address_id)
     except AddressNotFound:
-        raise ApiError(ErrorCode.NOT_FOUND, "not found", 404) from None
+        raise _not_found() from None
     return AddressOut.model_validate(address, from_attributes=True)

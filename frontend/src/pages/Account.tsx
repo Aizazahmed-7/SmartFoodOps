@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import {
   addAddress, deleteAddress, getProfile, listAddresses, updateProfile,
 } from "../api/client";
@@ -9,6 +9,7 @@ import { ErrorNote, Section, Spinner } from "../components/ui";
 
 export default function Account() {
   const { claims } = useAuth();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const [name, setName] = useState<string | null>(null);
   const [phone, setPhone] = useState<string | null>(null);
@@ -37,7 +38,7 @@ export default function Account() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["addresses"] }),
   });
 
-  if (!claims) return <Navigate to="/login" replace />;
+  if (!claims) return <Navigate to="/login" replace state={{ from: location }} />;
   if (profile.isLoading) return <Spinner />;
 
   return (

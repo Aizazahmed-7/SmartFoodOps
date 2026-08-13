@@ -51,7 +51,11 @@ async def main() -> None:  # pragma: no cover — live wiring (compose runs it)
 
     engine = create_async_engine(settings.database_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as http:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(
+            settings.worker_http_timeout_seconds, connect=settings.internal_connect_timeout_seconds
+        )
+    ) as http:
         activities = OrderActivities(
             sessions,
             InventoryClient(settings.inventory_base_url, http),

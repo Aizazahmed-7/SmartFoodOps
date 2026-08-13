@@ -1,5 +1,7 @@
 """Inventory settings — all overridable by environment (compose sets DATABASE_URL)."""
 
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,8 +13,8 @@ class Settings(BaseSettings):
     )
 
     # Event backbone: produce c1.inventory.events, consume c1.catalog.changes.
-    outbox_mode: str = "off"  # poller | off
-    kafka_consumers: str = "off"  # on | off
+    outbox_mode: Literal["poller", "debezium", "off"] = "off"
+    kafka_consumers: Literal["on", "off"] = "off"
     kafka_bootstrap: str = "localhost:19092"
     schema_registry_url: str = "http://localhost:8086"
     cell_id: str = "c1"

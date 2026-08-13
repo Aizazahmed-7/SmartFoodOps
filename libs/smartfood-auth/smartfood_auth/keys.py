@@ -17,6 +17,8 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from .context import Role
+
 
 def _b64url_uint(n: int) -> str:
     raw = n.to_bytes((n.bit_length() + 7) // 8, "big")
@@ -75,7 +77,7 @@ class TokenIssuer:
         self,
         *,
         sub: str,
-        role: str,
+        role: "Role | str",
         restaurant_id: str | None = None,
         rider_id: str | None = None,
     ) -> str:
@@ -84,7 +86,7 @@ class TokenIssuer:
             "iss": self._issuer,
             "aud": self._audience,
             "sub": sub,
-            "role": role,
+            "role": str(Role(role)),  # typos die HERE, never in a minted token
             "iat": now,
             "exp": now + self._ttl,
             "jti": uuid.uuid4().hex,

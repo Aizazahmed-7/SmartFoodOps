@@ -5,6 +5,7 @@ the test create_all both derive from.
 """
 
 import sqlalchemy as sa
+from smartfood_auth import ROLES
 
 metadata = sa.MetaData()
 
@@ -17,6 +18,8 @@ users = sa.Table(
     sa.Column("full_name", sa.Text, nullable=True),
     sa.Column("phone", sa.Text, nullable=True),
     sa.Column("role", sa.Text, nullable=False, server_default="customer"),
+    # Derived from the auth lib's closed vocabulary — one source of truth.
+    sa.CheckConstraint(f"role IN {tuple(sorted(ROLES))!r}", name="ck_users_role"),
     sa.Column("restaurant_id", sa.Text, nullable=True),
     sa.Column("rider_id", sa.Text, nullable=True),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),

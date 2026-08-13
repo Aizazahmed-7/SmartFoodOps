@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
 from smartfood_api import ApiError, ErrorCode, StrictModel
-from smartfood_auth import AuthContext, require_role
+from smartfood_auth import AuthContext, Role, require_role
 from smartfood_idempotency import BodyMismatch, InProgress, Replay, body_hash
 from smartfood_pricing import (
     InvalidSelection,
@@ -36,6 +36,7 @@ from ..domain.service import (
     OrderNotFound,
     OrderService,
     Placed,
+    placement_response,
 )
 
 router = APIRouter()
@@ -44,7 +45,7 @@ router = APIRouter()
 # orders dinner (the same single-role-claim lesson as catalog's onboarding
 # gate — found live when a demo owner got 403'd on /v1/quote). Riders stay
 # excluded until rider flows exist.
-Purchaser = Annotated[AuthContext, Depends(require_role("customer", "restaurant_admin"))]
+Purchaser = Annotated[AuthContext, Depends(require_role(Role.CUSTOMER, Role.RESTAURANT_ADMIN))]
 
 
 def _svc(request: Request) -> OrderService:
@@ -182,7 +183,7 @@ async def place_order(
         raise _map_pricing_errors(exc) from None
 
     if isinstance(outcome, Placed):
-        return {"order_id": outcome.order_id, "status": "PLACED"}
+        return placement_response(outcome.order_id)
     if isinstance(outcome, Replay):
         return JSONResponse(
             status_code=outcome.response_status,

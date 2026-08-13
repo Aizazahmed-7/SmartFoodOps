@@ -17,7 +17,6 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import IdentityRepo
-from ..config import Settings
 from ..security import (
     hash_password,
     hash_refresh_token,
@@ -86,11 +85,16 @@ class IdentityService:
         self,
         sessions: async_sessionmaker[AsyncSession],
         issuer: TokenIssuer,
-        settings: Settings,
+        *,
+        access_ttl_seconds: int,
+        refresh_ttl_days: int,
     ):
+        # Explicit values, not the Settings object: the domain must not
+        # depend on how configuration is sourced (env, files, tests).
         self._sessions = sessions
         self._issuer = issuer
-        self._settings = settings
+        self._access_ttl_seconds = access_ttl_seconds
+        self._refresh_ttl_days = refresh_ttl_days
 
     # ── registration & login ───────────────────────────────────────
 
@@ -166,13 +170,13 @@ class IdentityService:
             family_id=family_id or f"fam_{uuid.uuid4().hex}",
             user_id=user.id,
             token_sha256=token_hash,
-            expires_at=_now() + timedelta(days=self._settings.refresh_ttl_days),
+            expires_at=_now() + timedelta(days=self._refresh_ttl_days),
             now=_now(),
         )
         return TokenPairData(
             access_token=access,
             refresh_token=token,
-            expires_in=self._settings.access_ttl_seconds,
+            expires_in=self._access_ttl_seconds,
         )
 
     # ── internal grants ────────────────────────────────────────────

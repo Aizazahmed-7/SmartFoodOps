@@ -9,7 +9,6 @@ from inventory.db import metadata, outbox
 from inventory.domain.models import ReservationLine
 from inventory.domain.service import InventoryService
 from smartfood_outbox import event_id
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -52,15 +51,16 @@ async def test_set_stock_stages_full_state_event():
 
 
 async def _win_race_then_collide(sessions, restaurant_id: str, capacity: int):
-    """Build an insert_load stand-in that behaves like losing a real race:
-    a CONCURRENT session commits the row, then our insert collides."""
+    """Build an insert_load stand-in that loses a REAL race: a concurrent
+    session commits the row first, then the genuine conflict-safe insert
+    runs — and answers False through the actual ON CONFLICT path."""
     real_insert = InventoryRepo.insert_load  # captured BEFORE the patch
 
     async def racing_insert(self, rid, cap):
         async with sessions() as other:  # the winner — a different tx entirely
             await real_insert(InventoryRepo(other), restaurant_id, capacity)
             await other.commit()
-        raise IntegrityError("stmt", {}, Exception("duplicate"))
+        return await real_insert(self, rid, cap)  # the loser: False, no abort
 
     return racing_insert
 

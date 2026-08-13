@@ -8,12 +8,24 @@ from datetime import datetime
 from typing import Any, cast
 
 import sqlalchemy as sa
-from smartfood_otel import current_traceparent
-from smartfood_outbox import event_id
+from smartfood_outbox import stage_event as stage_outbox_event
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import ReservationStatus, outbox, reservations, restaurant_load, stock
+
+
+def _insert_ignoring_conflict(
+    table: sa.Table, values: dict[str, Any], conflict_cols: list[str], dialect: str
+) -> Any:
+    """Both dialects the suite runs on support ON CONFLICT DO NOTHING —
+    which is why this replaces try/except IntegrityError: PG aborts the
+    whole transaction on a constraint error, sqlite forgives it, and that
+    asymmetry bred three different hand-rolled recovery protocols."""
+    insert = pg_insert if dialect == "postgresql" else sqlite_insert
+    return insert(table).values(**values).on_conflict_do_nothing(index_elements=conflict_cols)
 
 
 class InventoryRepo:
@@ -50,16 +62,26 @@ class InventoryRepo:
 
     async def insert_stock(
         self, restaurant_id: str, item_id: str, available: int, now: datetime
-    ) -> None:
-        await self._s.execute(
-            stock.insert().values(
-                item_id=item_id,
-                restaurant_id=restaurant_id,
-                available=available,
-                version=0,
-                updated_at=now,
+    ) -> bool:
+        """INSERT … ON CONFLICT DO NOTHING (sqlite AND postgres dialects).
+        The insert-race idiom lives HERE, once: the transaction survives a
+        lost race — no aborted-tx rollback protocol for callers to copy,
+        and no discarded sibling work mid-batch. True = we inserted."""
+        result = await self._s.execute(
+            _insert_ignoring_conflict(
+                stock,
+                {
+                    "item_id": item_id,
+                    "restaurant_id": restaurant_id,
+                    "available": available,
+                    "version": 0,
+                    "updated_at": now,
+                },
+                ["item_id"],
+                self._s.bind.dialect.name if self._s.bind is not None else "sqlite",
             )
         )
+        return cast("CursorResult[Any]", result).rowcount == 1
 
     async def decrement_stock(self, restaurant_id: str, item_id: str, qty: int) -> bool:
         """The oversell guard (FR-15). False = not enough (or no row = 0)."""
@@ -90,12 +112,17 @@ class InventoryRepo:
         )
         return result.one_or_none()
 
-    async def insert_load(self, restaurant_id: str, capacity: int) -> None:
-        await self._s.execute(
-            restaurant_load.insert().values(
-                restaurant_id=restaurant_id, active=0, capacity=capacity, version=0
+    async def insert_load(self, restaurant_id: str, capacity: int) -> bool:
+        """Same conflict-safe idiom as insert_stock. True = we inserted."""
+        result = await self._s.execute(
+            _insert_ignoring_conflict(
+                restaurant_load,
+                {"restaurant_id": restaurant_id, "active": 0, "capacity": capacity, "version": 0},
+                ["restaurant_id"],
+                self._s.bind.dialect.name if self._s.bind is not None else "sqlite",
             )
         )
+        return cast("CursorResult[Any]", result).rowcount == 1
 
     async def set_capacity(self, restaurant_id: str, capacity: int) -> bool:
         result = await self._s.execute(
@@ -189,15 +216,13 @@ class InventoryRepo:
         payload: dict[str, Any],
         now: datetime,
     ) -> None:
-        await self._s.execute(
-            outbox.insert().values(
-                id=event_id(aggregate_type, aggregate_id, version, event_type),
-                aggregate_type=aggregate_type,
-                aggregate_id=aggregate_id,
-                aggregate_version=version,
-                event_type=event_type,
-                payload=payload,
-                occurred_at=now,
-                traceparent=current_traceparent(),
-            )
+        await stage_outbox_event(
+            self._s,
+            outbox,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            version=version,
+            event_type=event_type,
+            payload=payload,
+            now=now,
         )

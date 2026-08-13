@@ -9,24 +9,13 @@ linear backoff; any 4xx is permanent and surfaces as GrantRejected.
 import asyncio
 
 import httpx
-from smartfood_auth import AuthContext, headers_for
-from smartfood_otel import current_traceparent
+from smartfood_auth import internal_headers
 
 from ..domain.ports import GrantRejected, GrantUnavailable
 
-_HEADERS = {
-    **headers_for(AuthContext(sub="svc:catalog", role="system")),
-    "X-Internal-Caller": "catalog",
-}
-
 
 def _headers() -> dict[str, str]:
-    """Static identity headers + the caller's traceparent (when inside a
-    request) so the grant hop logs under the same trace_id at identity."""
-    headers = dict(_HEADERS)
-    if traceparent := current_traceparent():
-        headers["traceparent"] = traceparent
-    return headers
+    return internal_headers("catalog")
 
 
 class IdentityGrantsClient:

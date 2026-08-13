@@ -11,7 +11,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import Field, field_validator, model_validator
 from smartfood_api import ApiError, ErrorCode, StrictModel
-from smartfood_auth import AuthContext, require_role
+from smartfood_auth import AuthContext, Role, require_role, require_system
 
 from ..domain.models import Restaurant
 from ..domain.ports import GrantRejected, GrantUnavailable
@@ -89,20 +89,37 @@ class RestaurantOut(StrictModel):
     version: int
 
 
+def _unknown_restaurant() -> ApiError:
+    """Not-found and not-yours share one shape (no existence leaks) — and
+    one author, so seven call sites cannot drift apart."""
+    return ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404)
+
+
+def _nothing_to_update() -> ApiError:
+    return ApiError(
+        ErrorCode.VALIDATION_FAILED,
+        "nothing to update",
+        422,
+        details=[{"field": "body", "issue": "at least one field required"}],
+    )
+
+
 def _svc(request: Request) -> CatalogService:
     return request.app.state.service
 
 
 # system_admin is named explicitly (UC-15 admin CRUD): require_role only
 # auto-passes `system`, and _own() then exempts both from restaurant scoping.
-RestaurantAdmin = Annotated[AuthContext, Depends(require_role("restaurant_admin", "system_admin"))]
+RestaurantAdmin = Annotated[
+    AuthContext, Depends(require_role(Role.RESTAURANT_ADMIN, Role.SYSTEM_ADMIN))
+]
 
 _SCOPE_EXEMPT = {"system", "system_admin"}
 
 
 def _own(ctx: AuthContext, restaurant_id: str) -> None:
     if ctx.role not in _SCOPE_EXEMPT and ctx.restaurant_id != restaurant_id:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404)
+        raise _unknown_restaurant()
 
 
 def _out(restaurant: Restaurant) -> RestaurantOut:
@@ -115,7 +132,7 @@ def _out(restaurant: Restaurant) -> RestaurantOut:
 # stay excluded (Identity would refuse the grant anyway — fail at the gate,
 # not after committing a restaurant). Found by the seed tool's real-chain
 # test; the unit tests' hand-stamped headers had hidden it.
-Onboarder = Annotated[AuthContext, Depends(require_role("customer", "restaurant_admin"))]
+Onboarder = Annotated[AuthContext, Depends(require_role(Role.CUSTOMER, Role.RESTAURANT_ADMIN))]
 
 
 @router.post("/v1/restaurants", status_code=201)
@@ -154,7 +171,7 @@ async def get_restaurant(restaurant_id: str, request: Request) -> RestaurantOut:
     try:
         restaurant = await _svc(request).get_restaurant(restaurant_id)
     except RestaurantNotFound:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
+        raise _unknown_restaurant() from None
     return _out(restaurant)
 
 
@@ -168,14 +185,9 @@ async def update_restaurant(
     try:
         restaurant = await _svc(request).update_restaurant(restaurant_id, changes, cuisines)
     except NothingToUpdate:
-        raise ApiError(
-            ErrorCode.VALIDATION_FAILED,
-            "nothing to update",
-            422,
-            details=[{"field": "body", "issue": "at least one field required"}],
-        ) from None
+        raise _nothing_to_update() from None
     except RestaurantNotFound:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
+        raise _unknown_restaurant() from None
     return _out(restaurant)
 
 
@@ -186,7 +198,7 @@ async def _set_status(
     try:
         restaurant = await _svc(request).set_status(restaurant_id, status)
     except RestaurantNotFound:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
+        raise _unknown_restaurant() from None
     return _out(restaurant)
 
 
@@ -225,7 +237,7 @@ async def add_category(
     try:
         return await _svc(request).add_category(restaurant_id, name=body.name, rank=body.rank)
     except RestaurantNotFound:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
+        raise _unknown_restaurant() from None
 
 
 @router.patch("/v1/restaurants/{restaurant_id}/categories/{category_id}")
@@ -242,12 +254,7 @@ async def update_category(
             restaurant_id, category_id, body.model_dump(exclude_none=True)
         )
     except NothingToUpdate:
-        raise ApiError(
-            ErrorCode.VALIDATION_FAILED,
-            "nothing to update",
-            422,
-            details=[{"field": "body", "issue": "at least one field required"}],
-        ) from None
+        raise _nothing_to_update() from None
     except CategoryNotFound:
         raise ApiError(ErrorCode.NOT_FOUND, "unknown category", 404) from None
 
@@ -380,12 +387,7 @@ async def update_item(
             ),
         )
     except NothingToUpdate:
-        raise ApiError(
-            ErrorCode.VALIDATION_FAILED,
-            "nothing to update",
-            422,
-            details=[{"field": "body", "issue": "at least one field required"}],
-        ) from None
+        raise _nothing_to_update() from None
     except ItemNotFound:
         raise ApiError(ErrorCode.NOT_FOUND, "unknown item", 404) from None
     except CategoryNotFound:
@@ -405,8 +407,7 @@ async def delete_item(
 
 # ── internal (never in the edge allowlist — unreachable from outside) ──
 
-# require_role() with no roles: ONLY role=system passes (service-to-service).
-SystemOnly = Annotated[AuthContext, Depends(require_role())]
+SystemOnly = Annotated[AuthContext, Depends(require_system())]
 
 
 @router.get("/v1/internal/restaurants/{restaurant_id}/snapshot")
@@ -429,7 +430,7 @@ async def pricing_read(
     try:
         return await _svc(request).pricing_read(restaurant_id, item_ids)
     except RestaurantNotFound:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
+        raise _unknown_restaurant() from None
 
 
 # ── public reads: menu (blob/pointer cached) + browse (60s pages) ──
@@ -447,7 +448,7 @@ async def get_menu(
     try:
         menu = await _svc(request).get_menu(restaurant_id, version=v)
     except RestaurantNotFound:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404) from None
+        raise _unknown_restaurant() from None
     except StaleMenuVersion:
         raise ApiError(
             ErrorCode.NOT_FOUND, "menu version no longer available — refetch the menu", 404

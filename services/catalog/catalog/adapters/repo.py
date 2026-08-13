@@ -11,8 +11,7 @@ from datetime import datetime
 from typing import Any, cast
 
 import sqlalchemy as sa
-from smartfood_otel import current_traceparent
-from smartfood_outbox import event_id
+from smartfood_outbox import stage_event as stage_outbox_event
 from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -451,15 +450,13 @@ class CatalogRepo:
         payload: dict[str, Any],
         now: datetime,
     ) -> None:
-        await self._s.execute(
-            outbox.insert().values(
-                id=event_id("restaurant", restaurant_id, version, event_type),
-                aggregate_type="restaurant",
-                aggregate_id=restaurant_id,
-                aggregate_version=version,
-                event_type=event_type,
-                payload=payload,
-                occurred_at=now,
-                traceparent=current_traceparent(),
-            )
+        await stage_outbox_event(
+            self._s,
+            outbox,
+            aggregate_type="restaurant",
+            aggregate_id=restaurant_id,
+            version=version,
+            event_type=event_type,
+            payload=payload,
+            now=now,
         )

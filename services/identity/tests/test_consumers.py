@@ -37,7 +37,12 @@ async def _harness(tmp_path):
         audience=settings.token_audience,
         ttl_seconds=settings.access_ttl_seconds,
     )
-    service = IdentityService(sessions, issuer, settings)
+    service = IdentityService(
+        sessions,
+        issuer,
+        access_ttl_seconds=settings.access_ttl_seconds,
+        refresh_ttl_days=settings.refresh_ttl_days,
+    )
     await service.register(email=EMAIL, password=PASSWORD, full_name=None)
     async with sessions() as s:
         user_id = (await s.execute(sa.select(users.c.id))).scalar_one()
@@ -191,7 +196,7 @@ async def test_loop_rebinds_trace_context_from_kafka_headers():
     assert seen == ["ab" * 16, None, None]
 
 
-async def test_lifespan_runs_and_cancels_injected_consumer(tmp_path):
+async def test_lifespan_runs_and_cancels_injected_consumer(settings):
     """Same contract as catalog's poller: the consumer task lives and dies
     with the app."""
     from fastapi.testclient import TestClient
@@ -211,12 +216,6 @@ async def test_lifespan_runs_and_cancels_injected_consumer(tmp_path):
                 raise
 
     fake = FakeConsumer()
-    settings = Settings(
-        database_url="sqlite+aiosqlite://",
-        create_all=True,
-        signing_key_path=str(tmp_path / "key.pem"),
-        token_issuer="http://identity.test",
-    )
     with TestClient(create_app(settings, consumer=fake)):  # type: ignore[arg-type]
         pass
     assert fake.started and fake.cancelled

@@ -11,6 +11,7 @@ prove import purity for BOTH workflows.
 
 import asyncio
 import uuid
+from contextlib import asynccontextmanager
 
 import pytest
 import pytest_asyncio
@@ -163,6 +164,32 @@ async def _signal_food_ready(env, order_id, *, times=1):
     raise AssertionError("DeliveryWorkflow never appeared")
 
 
+@asynccontextmanager
+async def running_order(env, script=None, *, task_queue=None):
+    """A live worker plus a freshly started OrderWorkflow, for tests that
+    drive signals by hand: yields (handle, calls, order_id, task_queue).
+    Both workflows run on the unsandboxed runner, and the start always
+    carries accept_timeout_s=180."""
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    task_queue = task_queue or f"tq-{uuid.uuid4().hex[:8]}"
+    activities, calls = mock_activities(script)
+    worker = Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[OrderWorkflow, DeliveryWorkflow],
+        activities=activities,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+    async with worker:
+        handle = await env.client.start_workflow(
+            "OrderWorkflow",
+            WorkflowInput(order_id=order_id, accept_timeout_s=180),
+            id=f"ord::{order_id}",
+            task_queue=task_queue,
+        )
+        yield handle, calls, order_id, task_queue
+
+
 async def _run(
     env,
     script=None,
@@ -227,23 +254,7 @@ async def test_delivery_child_has_the_contract_id(env):
 
 async def test_duplicate_food_ready_signals_are_noops(env):
     """A triple food_ready collapses into one truth — the courier leaves once."""
-    order_id = f"ord_{uuid.uuid4().hex[:8]}"
-    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
-    activities, calls = mock_activities()
-    worker = Worker(
-        env.client,
-        task_queue=task_queue,
-        workflows=[OrderWorkflow, DeliveryWorkflow],
-        activities=activities,
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    )
-    async with worker:
-        handle = await env.client.start_workflow(
-            "OrderWorkflow",
-            WorkflowInput(order_id=order_id, accept_timeout_s=180),
-            id=f"ord::{order_id}",
-            task_queue=task_queue,
-        )
+    async with running_order(env) as (handle, calls, order_id, _):
         await handle.signal("restaurant_decision", "accept")
         await _signal_food_ready(env, order_id, times=3)
         result = await handle.result()
@@ -337,27 +348,11 @@ async def test_transient_activity_failure_retries_through(env):
 
 
 async def test_duplicate_start_is_rejected(env):
-    order_id = f"ord_{uuid.uuid4().hex[:8]}"
-    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
-    activities, _ = mock_activities()
-    worker = Worker(
-        env.client,
-        task_queue=task_queue,
-        workflows=[OrderWorkflow, DeliveryWorkflow],
-        activities=activities,
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    )
-    async with worker:
-        handle = await env.client.start_workflow(
-            "OrderWorkflow",
-            WorkflowInput(order_id=order_id),
-            id=f"ord::{order_id}",
-            task_queue=task_queue,
-        )
+    async with running_order(env) as (handle, _, order_id, task_queue):
         with pytest.raises(WorkflowAlreadyStartedError):
             await env.client.start_workflow(
                 "OrderWorkflow",
-                WorkflowInput(order_id=order_id),
+                WorkflowInput(order_id=order_id, accept_timeout_s=180),
                 id=f"ord::{order_id}",
                 task_queue=task_queue,
             )
@@ -385,23 +380,7 @@ async def test_customer_cancel_beats_a_simultaneous_accept(env):
 
 
 async def test_customer_cancel_mid_kitchen_cancels_the_courier(env):
-    order_id = f"ord_{uuid.uuid4().hex[:8]}"
-    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
-    activities, calls = mock_activities()
-    worker = Worker(
-        env.client,
-        task_queue=task_queue,
-        workflows=[OrderWorkflow, DeliveryWorkflow],
-        activities=activities,
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    )
-    async with worker:
-        handle = await env.client.start_workflow(
-            "OrderWorkflow",
-            WorkflowInput(order_id=order_id, accept_timeout_s=180),
-            id=f"ord::{order_id}",
-            task_queue=task_queue,
-        )
+    async with running_order(env) as (handle, calls, order_id, _):
         await handle.signal("restaurant_decision", "accept")
         await _wait_for_child(env, order_id)  # parent is now inside the delivery window
         await handle.signal("cancel_requested")  # kitchen never sends food_ready
@@ -420,23 +399,12 @@ async def test_customer_cancel_mid_kitchen_cancels_the_courier(env):
 
 
 async def test_customer_cancel_too_late_rides_to_settled(env):
-    order_id = f"ord_{uuid.uuid4().hex[:8]}"
-    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
-    activities, calls = mock_activities({"try_begin_cancel": "too_late"})
-    worker = Worker(
-        env.client,
-        task_queue=task_queue,
-        workflows=[OrderWorkflow, DeliveryWorkflow],
-        activities=activities,
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    )
-    async with worker:
-        handle = await env.client.start_workflow(
-            "OrderWorkflow",
-            WorkflowInput(order_id=order_id, accept_timeout_s=180),
-            id=f"ord::{order_id}",
-            task_queue=task_queue,
-        )
+    async with running_order(env, {"try_begin_cancel": "too_late"}) as (
+        handle,
+        calls,
+        order_id,
+        _,
+    ):
         await handle.signal("restaurant_decision", "accept")
         await _wait_for_child(env, order_id)
         await handle.signal("cancel_requested")  # courier "already picked up"
@@ -455,24 +423,8 @@ async def test_cancel_completes_even_if_the_child_fails_on_the_guard(env):
     cleanly cancelled — EITHER ending must leave the unwind completing.
     (mark_picked_up is scripted to fail as the guard would; whether this
     run's child dies on it or is cancelled first, CANCELLED must result.)"""
-    order_id = f"ord_{uuid.uuid4().hex[:8]}"
-    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
     guard = ApplicationError("order is CANCELLING", non_retryable=True, type="IllegalTransition")
-    activities, calls = mock_activities({"mark_picked_up": guard})
-    worker = Worker(
-        env.client,
-        task_queue=task_queue,
-        workflows=[OrderWorkflow, DeliveryWorkflow],
-        activities=activities,
-        workflow_runner=UnsandboxedWorkflowRunner(),
-    )
-    async with worker:
-        handle = await env.client.start_workflow(
-            "OrderWorkflow",
-            WorkflowInput(order_id=order_id, accept_timeout_s=180),
-            id=f"ord::{order_id}",
-            task_queue=task_queue,
-        )
+    async with running_order(env, {"mark_picked_up": guard}) as (handle, calls, order_id, _):
         await handle.signal("restaurant_decision", "accept")
         await _signal_food_ready(env, order_id)  # child heads for its timers
         await handle.signal("cancel_requested")

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from smartfood_api import ErrorCode, envelope
 from smartfood_idempotency import (
     BodyMismatch,
     IdempotencyStore,
@@ -54,6 +55,13 @@ class MoneyKeyMismatch(Exception):
 
 class PaymentStateConflict(Exception):
     """The operation doesn't fit the payment's state (capture w/o auth…)."""
+
+
+def _decline_body() -> dict[str, Any]:
+    """THE decline shape — built via envelope() (proper code + request_id)
+    and stored into idempotent replays, so it must have exactly one author:
+    a drifted copy would be baked into the replay store forever."""
+    return envelope(ErrorCode.PAYMENT_DECLINED, "card declined")
 
 
 def _now() -> datetime:
@@ -107,10 +115,7 @@ class PaymentService:
             )
             row_status: PaymentStatus = "AUTHORIZED"
         else:
-            status, body = (
-                402,
-                {"error": {"code": "PAYMENT_DECLINED", "message": "card declined"}},
-            )
+            status, body = 402, _decline_body()
             row_status = "DECLINED"
 
         now = _now()
@@ -295,7 +300,7 @@ class PaymentService:
     def _describe(row: Any) -> tuple[int, dict[str, Any]]:
         """A payment row as the response it implies (convergence paths)."""
         if row.status == "DECLINED":
-            return 402, {"error": {"code": "PAYMENT_DECLINED", "message": "card declined"}}
+            return 402, _decline_body()
         return 200, {
             "order_id": row.order_id,
             "status": row.status,

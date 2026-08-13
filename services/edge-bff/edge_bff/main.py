@@ -20,7 +20,7 @@ from smartfood_otel import RequestContextMiddleware, get_logger, setup_logging
 
 from .config import Settings
 from .openapi import merge_specs
-from .routing import RULES, match, needs_auth
+from .routing import RULES, match, needs_auth, resolve
 
 log = get_logger("edge-bff")
 
@@ -77,6 +77,7 @@ def create_app(
 
     # ── the FE's single API contract (edge_bff/openapi.py) ─────────
 
+    resolved_rules = resolve(RULES, settings)  # bind names -> URLs, once
     upstreams = sorted({rule.upstream for rule in RULES})  # allowlist = sources
 
     async def _build_spec() -> dict[str, Any]:
@@ -112,7 +113,7 @@ def create_app(
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
     )
     async def proxy(path: str, request: Request) -> Response:
-        rule = match("/" + path)
+        rule = match("/" + path, resolved_rules)
         if rule is None:
             raise ApiError(ErrorCode.NOT_FOUND, "no such route", 404)
 
@@ -157,8 +158,7 @@ def create_app(
             forward["traceparent"] = traceparent
 
         # 3. Forward and relay the response.
-        upstream_base = getattr(settings, rule.upstream)
-        url = upstream_base + "/" + path
+        url = rule.base_url + "/" + path
         try:
             upstream = await http_client.request(
                 request.method,
@@ -168,7 +168,7 @@ def create_app(
                 headers=forward,
             )
         except httpx.HTTPError:
-            log.warning("upstream unavailable", upstream=rule.upstream, path=path)
+            log.warning("upstream unavailable", upstream=rule.base_url, path=path)
             raise ApiError(
                 ErrorCode.DEPENDENCY_UNAVAILABLE,
                 "upstream unavailable",

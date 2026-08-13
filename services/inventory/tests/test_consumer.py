@@ -10,7 +10,6 @@ from inventory.adapters.repo import InventoryRepo
 from inventory.consumers import CatalogChangesConsumer, StockProvisioningHandler
 from inventory.db import metadata, restaurant_load, stock
 from inventory.domain.service import InventoryService
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -93,8 +92,7 @@ async def test_racing_admin_put_wins(monkeypatch):
             async with sessions() as other:  # the admin's PUT commits first
                 await real_insert(InventoryRepo(other), restaurant_id, item_id, 7, now)
                 await other.commit()
-            raise IntegrityError("stmt", {}, Exception("duplicate"))
-        await real_insert(self, restaurant_id, item_id, available, now)
+        return await real_insert(self, restaurant_id, item_id, available, now)
 
     monkeypatch.setattr(InventoryRepo, "insert_stock", racing_insert)
     handler = StockProvisioningHandler(sessions)
@@ -105,7 +103,31 @@ async def test_racing_admin_put_wins(monkeypatch):
     assert rows["itm_b"] == 0  # and the rest still provisioned
 
 
-async def test_load_row_race_rolls_back_cleanly(monkeypatch):
+async def test_mid_batch_race_never_discards_earlier_provisioning(monkeypatch):
+    """THE regression the old try/except/rollback protocol had: a conflict
+    on a LATER item rolled back the same batch's EARLIER uncommitted
+    inserts, silently dropping provisioning until the next full-menu event.
+    With conflict-safe inserts the transaction survives the lost race."""
+    svc, sessions = await _service()
+    real_insert = InventoryRepo.insert_stock
+
+    async def racing_insert(self, restaurant_id, item_id, available, now):
+        if item_id == "itm_b":  # the SECOND item loses a race…
+            async with sessions() as other:
+                await real_insert(InventoryRepo(other), restaurant_id, item_id, 9, now)
+                await other.commit()
+        return await real_insert(self, restaurant_id, item_id, available, now)
+
+    monkeypatch.setattr(InventoryRepo, "insert_stock", racing_insert)
+    handler = StockProvisioningHandler(sessions)
+    await handler.handle(_catalog_event(item_ids=("itm_a", "itm_b")))
+    async with sessions() as s:
+        rows = {r.item_id: r.available for r in (await s.execute(sa.select(stock))).all()}
+    assert rows["itm_a"] == 0  # …and itm_a's earlier provisioning SURVIVES
+    assert rows["itm_b"] == 9  # the racing winner's value stands
+
+
+async def test_load_row_race_winner_stands(monkeypatch):
     _, sessions = await _service()
     real_insert = InventoryRepo.insert_load
 
@@ -113,7 +135,7 @@ async def test_load_row_race_rolls_back_cleanly(monkeypatch):
         async with sessions() as other:
             await real_insert(InventoryRepo(other), restaurant_id, 3)
             await other.commit()
-        raise IntegrityError("stmt", {}, Exception("duplicate"))
+        return await real_insert(self, restaurant_id, capacity)
 
     monkeypatch.setattr(InventoryRepo, "insert_load", racing_insert)
     handler = StockProvisioningHandler(sessions)

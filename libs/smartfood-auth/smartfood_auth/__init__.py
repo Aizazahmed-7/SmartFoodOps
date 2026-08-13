@@ -9,11 +9,15 @@ from .context import (
     STRIP_HEADERS,
     Auth,
     AuthContext,
+    Forbidden,
+    MissingIdentity,
+    Role,
     get_auth_context,
     require_role,
+    require_system,
 )
 from .keys import RsaKey, TokenIssuer, generate_rsa_key, jwks
-from .stamp import context_from_claims, headers_for
+from .stamp import context_from_claims, headers_for, internal_headers
 from .verifier import JwksVerifier
 
 __all__ = [
@@ -21,6 +25,9 @@ __all__ = [
     "STRIP_HEADERS",
     "Auth",
     "AuthContext",
+    "Forbidden",
+    "MissingIdentity",
+    "Role",
     "JwksVerifier",
     "RsaKey",
     "TokenIssuer",
@@ -28,6 +35,8 @@ __all__ = [
     "generate_rsa_key",
     "get_auth_context",
     "headers_for",
+    "internal_headers",
     "jwks",
     "require_role",
+    "require_system",
 ]

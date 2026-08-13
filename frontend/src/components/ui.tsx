@@ -1,4 +1,18 @@
 import type { ReactNode } from "react";
+import { ApiError } from "../api/client";
+import type { OrderStatus } from "../api/types";
+
+const STATUS_STYLE: Partial<Record<OrderStatus, string>> = {
+  SETTLED: "bg-emerald-950 text-emerald-300",
+  DELIVERED: "bg-emerald-950 text-emerald-300",
+  CANCELLING: "bg-red-950 text-red-300",
+  CANCELLED: "bg-red-950 text-red-300",
+  REFUNDED: "bg-red-950 text-red-300",
+};
+
+export function StatusTag({ status }: { status: OrderStatus }) {
+  return <span className={`tag ${STATUS_STYLE[status] ?? ""}`}>{status.replace("_", " ")}</span>;
+}
 
 export function Money({ cents }: { cents: number }) {
   const sign = cents < 0 ? "-" : "";
@@ -9,25 +23,33 @@ export function Money({ cents }: { cents: number }) {
   );
 }
 
-export function ErrorNote({ error }: { error: unknown }) {
-  if (!error) return null;
-  const message = error instanceof Error ? error.message : String(error);
+/** The ONE banner shape — pages compose their message, not their chrome. */
+const NOTE_TONE = {
+  warn: "border-amber-900 bg-amber-950/60 text-amber-200",
+  error: "border-red-900 bg-red-950/50 text-red-200",
+} as const;
+
+export function Note({ tone, children }: { tone: "warn" | "error"; children: ReactNode }) {
   return (
-    <p className="rounded-xl bg-red-950/60 border border-red-900 px-3 py-2 text-sm text-red-200">
-      {message}
-    </p>
+    <div className={`rounded-xl border px-4 py-3 text-sm ${NOTE_TONE[tone]}`}>
+      {children}
+    </div>
   );
 }
 
-/** The honest stub banner for Week-2 seams. */
-export function ComingSoon({ children }: { children: ReactNode }) {
+export function ErrorNote({ error }: { error: unknown }) {
+  if (!error) return null;
+  const message = error instanceof Error ? error.message : String(error);
+  // The gateway's correlation id — the one string that finds this failure
+  // in the backend logs, so it belongs in every screenshot of the error.
+  const requestId = error instanceof ApiError ? error.requestId : undefined;
   return (
-    <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/60 px-4 py-3 text-sm text-slate-400">
-      <span className="mr-2 rounded bg-orange-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-orange-400">
-        Week 2
-      </span>
-      {children}
-    </div>
+    <p className="rounded-xl bg-red-950/60 border border-red-900 px-3 py-2 text-sm text-red-200">
+      {message}
+      {requestId && (
+        <span className="mt-1 block text-xs text-red-400/80">ref: {requestId}</span>
+      )}
+    </p>
   );
 }
 

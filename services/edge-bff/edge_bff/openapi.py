@@ -11,7 +11,7 @@ bearer security scheme derived from the same table.
 import json
 from typing import Any
 
-from .routing import match, needs_auth
+from .routing import RULES, match, needs_auth
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head"}
 
@@ -58,7 +58,7 @@ def merge_specs(specs: dict[str, dict[str, Any]], missing: list[str]) -> dict[st
             merged_schemas[renamed.get(name) or str(name)] = schema
 
         for path, operations in spec.get("paths", {}).items():
-            rule = match(path)  # templates keep their prefix: /v1/x/{id} matches /v1/x
+            rule = match(path, RULES)  # templates keep their prefix: /v1/x/{id} matches /v1/x
             if rule is None:
                 continue  # not in the allowlist → not callable → not documented
             for method, operation in operations.items():

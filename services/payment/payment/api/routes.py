@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
 from smartfood_api import ApiError, ErrorCode, StrictModel
-from smartfood_auth import AuthContext, require_role
+from smartfood_auth import AuthContext, require_system
 
 from ..domain.ports import PspUnavailable
 from ..domain.service import (
@@ -20,7 +20,7 @@ from ..domain.service import (
 
 router = APIRouter()
 
-SystemOnly = Annotated[AuthContext, Depends(require_role())]  # only role=system
+SystemOnly = Annotated[AuthContext, Depends(require_system())]
 
 
 def _svc(request: Request) -> PaymentService:

@@ -17,7 +17,6 @@ from typing import Any, cast
 
 from smartfood_kafka import EventType
 from smartfood_otel import get_logger
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import InventoryRepo
@@ -92,13 +91,11 @@ class InventoryService:
             repo = InventoryRepo(session)
             updated = await repo.update_stock(restaurant_id, item_id, available, now)
             if updated is None:
-                try:
-                    await repo.insert_stock(restaurant_id, item_id, available, now)
-                    version = 0
-                except IntegrityError:
+                if not await repo.insert_stock(restaurant_id, item_id, available, now):
                     # Row exists under ANOTHER restaurant (scoped update saw
-                    # nothing, PK insert collided) — not yours, 404.
-                    raise StockScopeMismatch from None
+                    # nothing, insert conflicted) — not yours, 404.
+                    raise StockScopeMismatch
+                version = 0
             else:
                 version = updated.version
             await repo.stage_event(
@@ -125,12 +122,8 @@ class InventoryService:
         async with self._sessions() as session:
             repo = InventoryRepo(session)
             if not await repo.set_capacity(restaurant_id, capacity):
-                try:
-                    await repo.insert_load(restaurant_id, capacity)
-                except IntegrityError:  # concurrent creation — take the update path.
-                    # PG aborts the tx on constraint failure: rollback FIRST
-                    # (sqlite forgives this; Postgres does not).
-                    await session.rollback()
+                if not await repo.insert_load(restaurant_id, capacity):
+                    # Concurrent creation won — take the update path.
                     await repo.set_capacity(restaurant_id, capacity)
             load = await repo.get_load(restaurant_id)
             assert load is not None  # just written
@@ -280,9 +273,6 @@ class InventoryService:
         """Runs BEFORE any write in reserve(): the rollback on the race path
         only discards reads, never a partial reservation."""
         if await repo.get_load(restaurant_id) is None:
-            try:
-                await repo.insert_load(restaurant_id, self._default_capacity)
-            except IntegrityError:  # concurrent creation — row now exists.
-                # PG aborts the tx on constraint failure: rollback before the
-                # caller's next statement (sqlite forgives this; PG does not).
-                await session.rollback()
+            # Lost race = row now exists = goal achieved; the conflict-safe
+            # insert never aborts the surrounding transaction.
+            await repo.insert_load(restaurant_id, self._default_capacity)
