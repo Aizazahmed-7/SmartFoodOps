@@ -1,4 +1,4 @@
-"""Kafka consumers — identity's asynchronous inbound edge.
+"""Grant convergence — identity's handler on the shared consumer runtime.
 
 GrantConvergenceHandler is ADR-0020's closure made real: ANY restaurant
 event on catalog.changes → apply the restaurant_admin grant idempotently
@@ -8,19 +8,20 @@ of them). With this running, a lost synchronous grant can no longer produce
 a permanent orphan — an event committed with the restaurant IS the durable
 to-do, and compaction cannot erase the to-do, only rename it.
 
-Delivery is at-least-once (offsets commit AFTER handling); safety comes from
-three layers: the processed_events dedupe, the grant's own idempotency, and
-deterministic event ids. Permanently un-appliable grants are logged and
-marked processed — the DLQ arrives with the rest of W3.
+The loop itself (at-least-once, trace rebinding, retry-then-DLQ) is
+smartfood_kafka.EventConsumer (ADR-0021); this module is only the handler.
+Safety comes from three layers: the processed_events dedupe, the grant's
+own idempotency, and deterministic event ids. Permanently un-appliable
+grants are logged and marked processed — parking them would make the DLQ
+a queue of things replay can never fix.
 """
 
 import json
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any
 
 import sqlalchemy as sa
-import structlog
-from smartfood_otel import get_logger, trace_id_of
+from smartfood_otel import get_logger
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -91,42 +92,3 @@ class GrantConvergenceHandler:
                 await session.commit()
             except IntegrityError:
                 await session.rollback()  # concurrent duplicate delivery — fine
-
-
-class _Decoder(Protocol):
-    async def decode(self, data: bytes) -> dict[str, Any]: ...
-
-
-class _Handler(Protocol):
-    async def handle(self, event: dict[str, Any]) -> None: ...
-
-
-class CatalogChangesConsumer:
-    """Thin loop around an aiokafka-shaped client (injectable for tests):
-    decode → handle → commit offset. Committing AFTER handling is what makes
-    delivery at-least-once — a crash mid-handle re-delivers."""
-
-    def __init__(self, client: Any, serde: _Decoder, handler: _Handler):
-        self._client = client
-        self._serde = serde
-        self._handler = handler
-
-    async def run(self) -> None:
-        await self._client.start()
-        try:
-            async for message in self._client:
-                # Rebind the producer's trace context from the Kafka headers:
-                # the consumer's log lines join the SAME trace_id the original
-                # HTTP request logged under — grep crosses the async hop.
-                structlog.contextvars.clear_contextvars()
-                traceparent = next(
-                    (v.decode() for k, v in (message.headers or []) if k == "traceparent"),
-                    None,
-                )
-                if traceparent and (trace_id := trace_id_of(traceparent)):
-                    structlog.contextvars.bind_contextvars(trace_id=trace_id)
-                event = await self._serde.decode(message.value)
-                await self._handler.handle(event)
-                await self._client.commit()
-        finally:
-            await self._client.stop()

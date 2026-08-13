@@ -16,6 +16,7 @@ import type {
   Feed,
   Menu,
   MenuItem,
+  NotificationList,
   OrderDetail,
   OrderList,
   OrderStatus,
@@ -286,5 +287,15 @@ export const setStock = (rid: string, itemId: string, available: number) =>
 export const setCapacity = (rid: string, capacity: number) =>
   request<{ restaurant_id: string; capacity: number; active: number }>(
     "PUT", `/v1/inventory/restaurants/${rid}/capacity`, { capacity });
+
+// ── notifications ──────────────────────────────────────────────────
+
+export const listNotifications = (cursor?: string) =>
+  request<NotificationList>(
+    "GET", `/v1/notifications${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+export const markNotificationRead = (id: string) =>
+  request<{ id: string; read_at: string }>("POST", `/v1/notifications/${id}/read`);
+export const markAllNotificationsRead = () =>
+  request<{ marked: number }>("POST", "/v1/notifications/read-all");
 
 export { decodeClaims };

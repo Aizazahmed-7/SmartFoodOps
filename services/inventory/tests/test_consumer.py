@@ -1,13 +1,13 @@
 """Stock provisioning from catalog.changes: NATURAL_KEY idempotency —
-replaying any event must be a no-op; admin counts must survive menu edits."""
+replaying any event must be a no-op; admin counts must survive menu edits.
+The loop that feeds this handler is smartfood_kafka.EventConsumer, tested
+in its own lib."""
 
 import json
-from types import SimpleNamespace
 
 import sqlalchemy as sa
-import structlog
 from inventory.adapters.repo import InventoryRepo
-from inventory.consumers import CatalogChangesConsumer, StockProvisioningHandler
+from inventory.consumers import StockProvisioningHandler
 from inventory.db import metadata, restaurant_load, stock
 from inventory.domain.service import InventoryService
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -143,57 +143,3 @@ async def test_load_row_race_winner_stands(monkeypatch):
     async with sessions() as s:
         load = (await s.execute(sa.select(restaurant_load))).one()
     assert load.capacity == 3  # winner's row stands
-
-
-# ── the thin consumer loop (same contract as identity's) ───────────
-
-
-class StubKafkaConsumer:
-    def __init__(self, values):
-        self._values = values
-        self.started = self.stopped = False
-        self.commits = 0
-
-    async def start(self):
-        self.started = True
-
-    async def stop(self):
-        self.stopped = True
-
-    async def commit(self):
-        self.commits += 1
-
-    def __aiter__(self):
-        async def gen():
-            for value in self._values:
-                payload, headers = value if isinstance(value, tuple) else (value, None)
-                yield SimpleNamespace(value=payload, headers=headers)
-
-        return gen()
-
-
-class StubSerde:
-    async def decode(self, data: bytes) -> dict:
-        return json.loads(data)
-
-
-async def test_loop_decodes_handles_commits_and_binds_trace():
-    tp = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
-    client = StubKafkaConsumer(
-        [
-            (b'{"event_id": "e1"}', [("traceparent", tp.encode())]),
-            b'{"event_id": "e2"}',
-        ]
-    )
-    seen: list[tuple[str, str | None]] = []
-
-    class Probe:
-        async def handle(self, event):
-            seen.append(
-                (event["event_id"], structlog.contextvars.get_contextvars().get("trace_id"))
-            )
-
-    await CatalogChangesConsumer(client, StubSerde(), Probe()).run()
-    assert seen == [("e1", "ab" * 16), ("e2", None)]
-    assert client.commits == 2
-    assert client.started and client.stopped

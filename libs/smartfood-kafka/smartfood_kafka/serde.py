@@ -39,13 +39,20 @@ class AvroSerde:
         return struct.pack(">bI", _MAGIC, schema_id) + buffer.getvalue()
 
     async def decode(self, data: bytes) -> dict[str, Any]:
+        """SerdeError = the BYTES are bad (poison — no retry can help).
+        Registry/transport errors propagate untouched: they mean WE are
+        degraded, not the message, and the consumer must treat them as
+        transient rather than park good events on the DLQ."""
         if len(data) < 5 or data[0] != _MAGIC:
             raise SerdeError("not Confluent wire format (bad magic byte)")
         (schema_id,) = struct.unpack(">I", data[1:5])
         if schema_id not in self._parsed:
             schema = await self._registry.schema_by_id(schema_id)
             self._parsed[schema_id] = parse_schema(schema)
-        return cast(
-            dict[str, Any],
-            schemaless_reader(io.BytesIO(data[5:]), self._parsed[schema_id]),
-        )
+        try:
+            return cast(
+                dict[str, Any],
+                schemaless_reader(io.BytesIO(data[5:]), self._parsed[schema_id]),
+            )
+        except Exception as exc:  # fastavro raises assorted types on corrupt bodies
+            raise SerdeError(f"undecodable Avro body for schema {schema_id}") from exc

@@ -42,6 +42,7 @@ def client(upstream):
         identity_base_url="http://identity.svc",
         catalog_base_url="http://catalog.svc",
         order_base_url="http://down.test",
+        notification_base_url="http://notification.svc",
         identity_jwks_url="http://identity.test/.well-known/jwks.json",
         token_issuer=ISS,
     )
@@ -209,3 +210,15 @@ def test_restaurant_surface_needs_a_token(client, upstream):
     r = client.get("/v1/restaurant/orders?status=CONFIRMED")
     assert r.status_code == 401
     assert upstream.requests == []  # died at the edge
+
+
+def test_notifications_need_a_token(client, upstream):
+    r = client.get("/v1/notifications")
+    assert r.status_code == 401
+    assert upstream.requests == []  # died at the edge
+
+
+def test_notifications_forward_to_notification_service(client, upstream):
+    r = client.get("/v1/notifications", headers=bearer())
+    assert r.status_code == 201
+    assert upstream.last.url == "http://notification.svc/v1/notifications"

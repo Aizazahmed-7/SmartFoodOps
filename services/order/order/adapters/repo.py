@@ -20,10 +20,15 @@ def encode_cursor(placed_at: datetime, order_id: str) -> str:
 
 
 def decode_cursor(cursor: str) -> tuple[datetime, str]:
-    """Raises ValueError on any malformed cursor — the route maps to 422."""
-    raw = base64.urlsafe_b64decode(cursor.encode())
-    placed_at_iso, order_id = json.loads(raw)
-    return datetime.fromisoformat(placed_at_iso), str(order_id)
+    """Raises ValueError on ANY malformed cursor — the route maps to 422.
+    Normalized: valid base64 of the wrong JSON shape raises TypeError
+    variants internally, and a cursor bug must never surface as a 500."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode())
+        placed_at_iso, order_id = json.loads(raw)
+        return datetime.fromisoformat(placed_at_iso), str(order_id)
+    except (TypeError, ValueError) as exc:  # binascii/JSON errors are ValueErrors
+        raise ValueError("malformed cursor") from exc
 
 
 class OrderRepo:

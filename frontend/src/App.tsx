@@ -3,6 +3,7 @@ import { Link, NavLink, Route, Routes, useLocation, useNavigate } from "react-ro
 import { onboardRestaurant } from "./api/client";
 import { useAuth } from "./state/auth";
 import { useCart } from "./state/cart";
+import NotificationBell from "./components/NotificationBell";
 import Account from "./pages/Account";
 import Browse from "./pages/Browse";
 import Cart from "./pages/Cart";
@@ -41,6 +42,7 @@ function Header() {
             <NavLink to="/partner" className={tab}>Become a partner</NavLink>
           )}
         </nav>
+        {claims && <NotificationBell />}
         <Link to="/cart" className="btn-ghost relative">
           Cart
           {count > 0 && (

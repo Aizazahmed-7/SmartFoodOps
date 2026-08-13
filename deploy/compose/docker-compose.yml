@@ -31,6 +31,7 @@ x-app-base: &app-base
     INVENTORY_BASE_URL: http://inventory:8005
     ORDER_BASE_URL: http://order:8006
     PAYMENT_BASE_URL: http://payment:8007
+    NOTIFICATION_BASE_URL: http://notification:8008
     MOCK_PSP_BASE_URL: http://mock-psp:9080
     IDENTITY_JWKS_URL: http://identity:8001/.well-known/jwks.json
   depends_on:
@@ -304,6 +305,30 @@ services:
         "0.0.0.0",
         "--port",
         "8007",
+        "--reload",
+      ]
+
+  notification:
+    <<: *app-base
+    profiles: [apps]
+    restart: unless-stopped
+    ports: ["8008:8008"]
+    environment:
+      <<: *app-env
+      UV_PROJECT_ENVIRONMENT: /venvs/notification
+      DATABASE_URL: postgresql+asyncpg://notification_svc:notification_svc@postgres:5432/notification_db
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "notification",
+        "uvicorn",
+        "notification.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8008",
         "--reload",
       ]
 

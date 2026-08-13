@@ -1,4 +1,4 @@
-"""Kafka consumer — inventory's asynchronous inbound edge.
+"""Stock provisioning — inventory's handler on the shared consumer runtime.
 
 StockProvisioningHandler makes STRICT stock livable: every catalog change
 event carries the restaurant's FULL menu snapshot, so on any event we upsert
@@ -6,17 +6,18 @@ a zero-stock row for every item we have never seen, plus a default capacity
 row for the restaurant. Existing stock is NEVER touched — an admin's counts
 survive every menu edit.
 
-Dedupe mode: NATURAL_KEY (DoD-2). The handler is a create-if-absent upsert —
-replaying any event is a no-op by construction, so no processed_events table
-(identity needed one because grants are not naturally idempotent).
+The loop itself is smartfood_kafka.EventConsumer (ADR-0021); this module is
+only the handler. Dedupe mode: NATURAL_KEY (DoD-2) — a create-if-absent
+upsert makes replaying any event a no-op by construction, so no
+processed_events table (identity needed one because grants are not
+naturally idempotent).
 """
 
 import json
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any
 
-import structlog
-from smartfood_otel import get_logger, trace_id_of
+from smartfood_otel import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .adapters.repo import InventoryRepo
@@ -68,39 +69,3 @@ class StockProvisioningHandler:
                 restaurant_id=restaurant_id,
                 new_items=len([i for i in item_ids if i not in known]),
             )
-
-
-class _Decoder(Protocol):
-    async def decode(self, data: bytes) -> dict[str, Any]: ...
-
-
-class _Handler(Protocol):
-    async def handle(self, event: dict[str, Any]) -> None: ...
-
-
-class CatalogChangesConsumer:
-    """Thin loop around an aiokafka-shaped client (injectable for tests):
-    decode → handle → commit offset. Commit AFTER handling = at-least-once.
-    Same shape as identity's — extracting a shared lib is a W3 chore."""
-
-    def __init__(self, client: Any, serde: _Decoder, handler: _Handler):
-        self._client = client
-        self._serde = serde
-        self._handler = handler
-
-    async def run(self) -> None:
-        await self._client.start()
-        try:
-            async for message in self._client:
-                structlog.contextvars.clear_contextvars()
-                traceparent = next(
-                    (v.decode() for k, v in (message.headers or []) if k == "traceparent"),
-                    None,
-                )
-                if traceparent and (trace_id := trace_id_of(traceparent)):
-                    structlog.contextvars.bind_contextvars(trace_id=trace_id)
-                event = await self._serde.decode(message.value)
-                await self._handler.handle(event)
-                await self._client.commit()
-        finally:
-            await self._client.stop()

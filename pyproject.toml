@@ -37,6 +37,7 @@ strict = [
     "services/identity/identity/domain",
     "services/catalog/catalog/domain",
     "services/inventory/inventory/domain",
+    "services/notification/notification/domain",
     "services/order/order/domain",
     "services/payment/payment/domain",
 ]

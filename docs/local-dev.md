@@ -61,7 +61,7 @@ $ ./tools/demo/place-order.sh
 ✔ order placed: order_id=c1-01J9GXA7... status=CONFIRMED total=$23.40
 ```
 
-**4. Watch the saga in Temporal UI.** Open http://localhost:8233 and search for workflow `ord::{order_id}`. You'll see the activity chain: `PriceOrder (local) → ValidateAndReserve → AuthorizePayment → ConfirmOrder`, then the durable wait on the `restaurant_decision` signal — restaurant notification is not an activity; it flows via the Notification consumer of `OrderConfirmed` (action budget, ADR-0018).
+**4. Watch the saga in Temporal UI.** Open http://localhost:8233 and search for workflow `ord::{order_id}`. You'll see the activity chain: `PriceOrder (local) → ValidateAndReserve → AuthorizePayment → ConfirmOrder`, then the durable wait on the `restaurant_decision` signal — restaurant notification is not an activity; it flows via the Notification consumer of `OrderConfirmed` (action budget, ADR-0018). *(As built, W3: this path is live — the notification service consumes `OrderConfirmed` and materializes the restaurant's "new order" inbox row, surfaced by the polled Alerts bell in the FE header.)*
 
 **5. Bring up observability and find the trace** *(W3 — the `obs` profile and `make up-obs` are not built yet)*.
 
@@ -139,10 +139,10 @@ Profiles: **core** (infra), **apps** (services), **ui** (consoles), **chores** (
 
 | Service | Port | Service | Port | Service | Port |
 |---|---|---|---|---|---|
-| edge-bff | 8000 | inventory | 8005 | notification | 8009 |
+| edge-bff | 8000 | inventory | 8005 | notification | 8008 |
 | identity | 8001 | order | 8006 | rider-gateway | 8010 |
 | catalog | 8002 | payment | 8007 | tracking-gateway | 8011 |
-| dispatch | 8008 | analytics | 8012 | | |
+| dispatch | 8009 | analytics | 8012 | | |
 
 Ports 8003 and 8004 are deliberately unused — the cart is client state (ADR-0017), and pricing is a library (`libs/smartfood-pricing`, ADR-0015) running inside the Order workers and the `/v1/quote` endpoint.
 
@@ -162,6 +162,7 @@ The full stack is ≈ 8–9 GB, so **slim mode is the default**, not the excepti
 | `make dev SVC=order` | Run one service **natively on the host**, `uvicorn --reload`, wired to compose infra | +~150 MB |
 | `make up-apps ONLY="payment inventory"` | Add just the containerized neighbors your flow needs | ~4 GB typical |
 | `make up-m2` | The W2 order-lifecycle set: core + temporal, mock-psp, identity, catalog, edge-bff, inventory, order, order-worker, payment (~6–7 GB) |
+| `make up-m3` | The `up-m2` set + notification |
 | `make up-cdc` *(W3)* | Add the `cdc` profile (Kafka Connect + Debezium) — needed for `OUTBOX_MODE=debezium` (§5) | +1–1.5 GB |
 | `make up-obs` *(W3)* | Add the `obs` profile (otel-collector, Jaeger, Prometheus, Grafana) | — |
 | `make up-ui` | Add the `ui` profile (Redpanda Console) | — |
@@ -218,7 +219,7 @@ Table definitions live as **plain Python dicts in `deploy/cdk/tables.py`** — t
 - On AWS, real CDK constructs consume the dicts.
 - Locally, `tools/seed/init_tables.py` feeds the same dicts to `boto3.create_table` against `localhost:4566` (invoked by `make up`).
 
-No `cdklocal`, no CloudFormation emulation — both are slow and flaky, and the dict indirection removes the need. Adding a table = edit `tables.py`, `make nuke && make up` (or run `init_tables.py` directly; it skips existing tables). Tables created locally (deployed names, per the convention in [service-ownership.md](service-ownership.md)): `sfo-order-history`, `sfo-order-tracking`, `sfo-dispatch-deliveries`, `sfo-dispatch-rider-state`, `sfo-rider-locations`, `sfo-notification-log`.
+No `cdklocal`, no CloudFormation emulation — both are slow and flaky, and the dict indirection removes the need. Adding a table = edit `tables.py`, `make nuke && make up` (or run `init_tables.py` directly; it skips existing tables). Tables created locally (deployed names, per the convention in [service-ownership.md](service-ownership.md)): `sfo-order-history`, `sfo-order-tracking`, `sfo-dispatch-deliveries`, `sfo-dispatch-rider-state`, `sfo-rider-locations`. *(This section is W3+ machinery — `tables.py`/`init_tables.py` land with dispatch, the first DynamoDB owner; today localstack runs with no tables. The planned `sfo-notification-log` is gone for good: notification shipped on PostgreSQL with natural-key dedupe, ADR-0021/service-ownership.)*
 
 ---
 
@@ -294,7 +295,7 @@ The invariant this machinery exists to prove (and CI asserts): **N injected time
 | `make cov` — workflow tier | Temporal `WorkflowEnvironment` **time-skipping** tests: every workflow branch exercised, timers skipped not slept — a 10-minute restaurant-decision timeout runs in milliseconds | none |
 | `make demo` + `tools/demo/verify-live.sh` | **Manual live verification** against the real stack: `place-order.sh` drives the happy path to SETTLED; `verify-live.sh` is the cancel-path tier — customer cancel from PREPARING (202 → `customer_cancelled`) and owner reject (→ `restaurant_rejected`), asserting `cancel_reason` both times | `make up-m2` + `make seed` |
 | `make test-int` *(W3)* | Integration tests against compose (`core` + `cdc`, **`OUTBOX_MODE=debezium`** — same file CI runs) | compose |
-| `make test-int` — consumer scaffold *(W3)* | Per-consumer **duplicate-delivery + poison-message** tests, scaffolded by planned `smartfood-kafka` test helpers *(W3 — the helpers do not exist yet)*; the scaffold ships with every new consumer, the asserts are yours | compose |
+| `make test-int` — consumer scaffold *(W3)* | Per-consumer **duplicate-delivery + poison-message** tests, scaffolded by the `smartfood_kafka.testing` helpers *(As built, W3: shipped — `StubKafkaConsumer`, `StubSerde`, `RecordingHandler`, `StubDlq`, `StubMessage`)*; the scaffold ships with every new consumer, the asserts are yours | compose |
 | `make chaos` / `make chaos-off` | Raise/restore the mock-psp failure knobs and self-verify them on the container; drive orders and watch compensations manually (an automated suite + nightly CI run is W3) | compose |
 
 Two notes on tiers: **contract tests** (DTO/OpenAPI snapshot tests, so a changed response shape is a reviewed diff, never a silent client break) are planned *(W3)*. The **coverage gate is already at 100%** across all workspace packages — enforced by `make cov` (`--cov-fail-under=100` + `fail_under` in the root pyproject) and by CI, not the once-planned 85%-at-W3 staging.

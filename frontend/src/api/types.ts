@@ -247,3 +247,21 @@ export interface StockRow {
   available: number;
   version: number;
 }
+
+// ── notifications ──────────────────────────────────────────────────
+
+export interface NotificationRow {
+  id: string;
+  order_id: string;
+  kind: string;
+  title: string;
+  body: string;
+  created_at: string;
+  read_at: string | null;
+}
+
+export interface NotificationList {
+  items: NotificationRow[];
+  next_cursor: string | null;
+  unread: number;
+}

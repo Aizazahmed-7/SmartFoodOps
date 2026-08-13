@@ -190,8 +190,8 @@ stateDiagram-v2
 
 | ID | Requirement | Pri | Acceptance criteria |
 |---|---|---|---|
-| FR-40 | Event-driven notifications for all lifecycle events | P0 | Notification service consumes all topics; restaurant notified on `OrderConfirmed`; customer notified on confirm/assign/pickup/deliver/cancel/refund |
-| FR-41 | Exactly-once user-visible delivery + log | P0 | `processed_events` dedupe; DDB `notification_log` TTL 90d; CI double-delivery chaos yields no duplicate notifications; senders fan out via Celery/SQS Lambda |
+| FR-40 | Event-driven notifications for all lifecycle events | P0 | Notification service consumes all topics; restaurant notified on `OrderConfirmed`; customer notified on confirm/assign/pickup/deliver/cancel/refund *(As built, W3: the notification service is live as a durable per-recipient inbox consuming `c1.orders.events` + `c1.payments.events` — restaurant + customer on `OrderConfirmed`; customer on cancel/deliver/refund, with the restaurant additionally notified on a customer-initiated cancel; deliberately none for placed/settled/authorized/captured; assign/pickup await the dispatch topics)* |
+| FR-41 | Exactly-once user-visible delivery + log | P0 | `processed_events` dedupe; DDB `notification_log` TTL 90d; CI double-delivery chaos yields no duplicate notifications; senders fan out via Celery/SQS Lambda *(As built, W3: dedupe is the notification's natural key — `ntf_<uuid5(event_id+recipient)>`, no `processed_events` table; the durable record is PG `notification_db.notifications`)* |
 | FR-42 | Delay notices | P1 | ~8-min dispatch escalation sends customer delay notice (data feeds Part B delay explanations) |
 
 ### 3.8 Analytics
@@ -314,7 +314,7 @@ Every FR maps to implementing component(s), workflow(s)/topic(s), and delivering
 | FR-38 | SSE ticket auth | edge-bff, tracking-gateway, Redis | — | 2 |
 | FR-39 | Geofence arrival | rider-gateway | `rider_arrived` signal → DeliveryWorkflow | 2 |
 | FR-40 | Lifecycle notifications | Notification, Celery/Lambda senders | all topics (esp. `orders.events` `OrderConfirmed`, `OrderPickedUp`) | 2 (restaurant notify in 1) |
-| FR-41 | Notification dedupe + log | Notification (`processed_events`, DDB `notification_log`) | all topics | 2 |
+| FR-41 | Notification dedupe + log | Notification (`processed_events`, DDB `notification_log`) *(As built, W3: PG `notification_db` natural-key dedupe — no `processed_events`/DDB log; consumes `c1.orders.events` + `c1.payments.events`)* | all topics | 2 |
 | FR-42 | Delay notices | Dispatch, Notification | DeliveryWorkflow escalation; `dispatch.events` | 2 |
 | FR-43 | Nine analytics metrics | Analytics (PG aggregates), Grafana | `orders.events`, `payments.events`, `dispatch.events`, `rider.status`, DLQ metrics | 2–3 |
 | FR-44 | Event lake + drift check | Kafka Connect → S3, Athena, Firehose+Lambda | all topics | 3 |

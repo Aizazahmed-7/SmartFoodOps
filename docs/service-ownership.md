@@ -121,7 +121,7 @@ Expected first candidate for its own Aurora cluster under ADR-0016's split trigg
 | Kafka | **produces** `payments.events` (outbox → Debezium) |
 | External | mock PSP behind the `PaymentGateway` port ([ADR-0010](adr/0010-mock-psp-behind-payment-gateway-port.md)) |
 
-## Dispatch — MS, :8008
+## Dispatch — MS, :8009
 
 The only DynamoDB-owned domain service, which is why its event path differs from everyone else's.
 
@@ -155,14 +155,15 @@ Owns no data at all. Pure fan-out.
 | Fallback | Temporal workflow query (rate-limit-guarded) when the read model lags >60s |
 | Protocol | SSE, one-way push |
 
-## Notification — MS, :8009
+## Notification — MS, :8008
+
+*(As built, W3: consumer-only durable inbox — this supersedes the planned rows this section carried (:8009, DDB `sfo-notification-log`, `dispatch.events`, RabbitMQ/λ sender fan-out); dedupe is the notification's natural key, no `processed_events` table.)*
 
 | | |
 |---|---|
-| DynamoDB | **`sfo-notification-log`**, TTL 90d — the dedupe record |
-| Kafka | **consumes** `orders.events`, `payments.events`, `dispatch.events` |
-| RabbitMQ | produces send jobs |
-| λ | notification senders (push/SMS/email fan-out) |
+| Postgres | **`notification_db`** — `notifications` (per-recipient inbox: `id ntf_<deterministic uuid5 of event_id+recipient>` — replay-safe natural-key dedupe; `recipient_type` customer\|restaurant, `recipient_id`, `order_id`, `kind`, `title`, `body`, `created_at` = event `occurred_at`, `read_at` nullable) + `order_recipients` projection (`order_id` PK, `user_id`, `restaurant_id` — upserted from every order event, because payment events carry no `user_id`) |
+| Kafka | **consumes** `c1.orders.events` + `c1.payments.events` — one `EventConsumer` loop per topic, groups `notification.inbox.orders` / `notification.inbox.payments` (separate loops: a payments backoff must not block the orders loop that feeds the recipients projection); **produces** nothing |
+| Serves | `GET /v1/notifications` (keyset cursor + unread count), `POST /v1/notifications/{id}/read` (ownership-in-WHERE, not-yours = 404), `POST /v1/notifications/read-all` — via edge, auth mode |
 
 ## Read-model projectors — W
 
