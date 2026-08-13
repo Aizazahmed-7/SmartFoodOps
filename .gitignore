@@ -21,3 +21,4 @@ deploy/compose/.volumes/
 # OS / editor
 .DS_Store
 .idea/
+.coverage

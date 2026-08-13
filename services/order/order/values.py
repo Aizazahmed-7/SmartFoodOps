@@ -63,6 +63,11 @@ Verdict = Literal["accept", "reject"]
 
 SIGNAL_RESTAURANT_DECISION = "restaurant_decision"
 SIGNAL_FOOD_READY = "food_ready"  # kitchen → DeliveryWorkflow (dlv::{order_id})
+SIGNAL_CANCEL_REQUESTED = "cancel_requested"  # customer → OrderWorkflow (S7)
+
+# The workflow refuses a customer cancel from here on: once the courier
+# holds the food, it is coming (FR-21). The API mirrors this set.
+CancelOutcome = Literal["ok", "too_late"]
 
 
 class ActivityName(StrEnum):
@@ -76,6 +81,7 @@ class ActivityName(StrEnum):
     CAPTURE_PAYMENT = "capture_payment"
     SETTLE_ORDER = "settle_order"
     BEGIN_CANCEL = "begin_cancel"
+    TRY_BEGIN_CANCEL = "try_begin_cancel"  # set-guarded: kitchen-window cancel vs courier race
     VOID_AUTHORIZATION = "void_authorization"
     RELEASE_RESERVATION = "release_reservation"
     FINISH_CANCEL = "finish_cancel"
@@ -87,3 +93,4 @@ class CancelReason(StrEnum):
     PAYMENT_DECLINED = "payment_declined"
     RESTAURANT_REJECTED = "restaurant_rejected"
     RESTAURANT_TIMEOUT = "restaurant_timeout"
+    CUSTOMER_CANCELLED = "customer_cancelled"

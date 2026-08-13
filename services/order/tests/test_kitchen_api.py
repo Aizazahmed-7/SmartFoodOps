@@ -244,6 +244,27 @@ def test_timer_cancelled_order_is_409_for_both_verdicts(client, db_url):
         assert r.json()["error"]["code"] == "ORDER_ALREADY_DECIDED"
 
 
+def test_customer_cancelled_order_is_already_decided_not_state_conflict(client, db_url):
+    """S7: the customer can moot the fork — even after this kitchen's own
+    accept was submitted. Its retry hears 'window closed', never 'your
+    action does not fit' (which reads as a client bug)."""
+    unwinding = place(client)  # mid-unwind AND terminal must both classify
+    advance(
+        db_url,
+        unwinding,
+        [*TO_CONFIRMED, ("CONFIRMED", "CANCELLING")],
+        reason="customer_cancelled",
+    )
+    done = place(client)
+    cancelled(db_url, done, "customer_cancelled")
+    for order_id in (unwinding, done):
+        for verdict in ("accept", "reject"):
+            r = client.post(f"/v1/restaurant/orders/{order_id}/{verdict}", headers=OWNER)
+            assert r.status_code == 409
+            assert r.json()["error"]["code"] == "ORDER_ALREADY_DECIDED"
+            assert "customer" in r.json()["error"]["message"]
+
+
 def test_orders_that_died_before_the_kitchen_are_state_conflicts(client, db_url):
     declined = place(client)
     cancelled(db_url, declined, "payment_declined", upto=[("PLACED", "VALIDATED")])

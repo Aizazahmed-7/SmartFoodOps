@@ -90,9 +90,11 @@ async def test_saga_signals_target_the_id_contracts():
     saga, signals = _signal_saga()
     await saga.signal_decision("ord_1", "accept")
     await saga.signal_food_ready("ord_1")
+    await saga.signal_cancel("ord_1")
     assert signals == [
         ("ord::ord_1", "restaurant_decision", ("accept",)),
         ("dlv::ord_1", "food_ready", ()),
+        ("ord::ord_1", "cancel_requested", ()),
     ]
 
 

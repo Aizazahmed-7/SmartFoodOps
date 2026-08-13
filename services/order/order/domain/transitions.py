@@ -92,6 +92,42 @@ async def transition(
     return TransitionResult(applied=True, version=version)
 
 
+async def begin_cancel_from(
+    sessions: async_sessionmaker[AsyncSession],
+    order_id: str,
+    *,
+    allowed: tuple[OrderStatus, ...],
+    reason: str,
+) -> bool:
+    """The SET-guarded move for races the caller cannot pin to one state:
+    a customer cancel arriving mid-kitchen may find ACCEPTED, PREPARING or
+    READY — any of them may become CANCELLING, but PICKED_UP may not (the
+    courier holds the food; FR-21). True = the order is now CANCELLING
+    (fresh apply, or an at-least-once replay finding it there — only this
+    order's own workflow ever writes CANCELLING, so a replay is always
+    ours); False = the courier won the race, cancellation refused."""
+    async with sessions() as session:
+        result = await session.execute(
+            orders.update()
+            .where((orders.c.order_id == order_id) & (orders.c.status.in_(allowed)))
+            .values(
+                status="CANCELLING",
+                cancel_reason=reason,
+                aggregate_version=orders.c.aggregate_version + 1,
+                updated_at=_now(),
+            )
+            .returning(orders.c.aggregate_version)
+        )
+        applied = result.one_or_none() is not None
+        await session.commit()
+        if applied:
+            return True
+        current = (
+            await session.execute(sa.select(orders.c.status).where(orders.c.order_id == order_id))
+        ).scalar_one_or_none()
+    return current == "CANCELLING"
+
+
 async def _full_state(
     session: AsyncSession,
     order_id: str,

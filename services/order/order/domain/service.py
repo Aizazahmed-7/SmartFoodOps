@@ -29,7 +29,8 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import OrderRepo, decode_cursor, encode_cursor
-from .ports import AddressNotFound, CatalogPort, IdentityPort, SagaPort
+from ..db import OrderStatus
+from .ports import AddressNotFound, CatalogPort, IdentityPort, SagaGone, SagaPort, SagaUnavailable
 
 
 class OrderNotFound(Exception):
@@ -46,6 +47,41 @@ class Placed:
 
 
 PlaceOutcome = Placed | Replay | InProgress | BodyMismatch
+
+
+# ── customer cancellation (S7) ─────────────────────────────────────
+
+# Cancellable until the courier holds the food (FR-21). The workflow's
+# set-guarded TRY_BEGIN_CANCEL is the authoritative, race-safe referee;
+# this set is the API's honest fast answer.
+CANCELLABLE_STATES = frozenset(
+    {"PLACED", "VALIDATED", "PAYMENT_CLEARED", "CONFIRMED", "ACCEPTED", "PREPARING", "READY"}
+)
+CANCELLED_FAMILY = frozenset({"CANCELLING", "CANCELLED", "REFUNDED"})
+
+
+@dataclass(frozen=True)
+class CancelSubmitted:
+    """Signal handed to the saga — 202; the tracking screen is the truth."""
+
+    status: OrderStatus
+
+
+@dataclass(frozen=True)
+class CancelAlreadyDone:
+    """The order is already cancelled (or being cancelled) — the desired
+    end state exists, whoever caused it: 200, never an error."""
+
+    status: OrderStatus
+    cancel_reason: str | None
+
+
+@dataclass(frozen=True)
+class NotCancellable:
+    status: OrderStatus
+
+
+CancelOutcome = CancelSubmitted | CancelAlreadyDone | NotCancellable
 
 
 def _now() -> datetime:
@@ -175,6 +211,39 @@ class OrderService:
 
         await self._saga.start(order_id)  # after commit; stub until S5
         return Placed(order_id=order_id)
+
+    # ── customer cancellation (S7) ─────────────────────────────────
+
+    async def request_cancel(self, user_id: str, order_id: str) -> CancelOutcome:
+        """Ownership-scoped read → classify → signal. The 202 is honest-async
+        like the kitchen's decisions: 'submitted', not 'done' — the workflow
+        referees the customer-vs-courier race against the DB row."""
+        assert self._sessions and self._saga
+        async with self._sessions() as session:
+            row = await OrderRepo(session).get_order(user_id=user_id, order_id=order_id)
+        if row is None:
+            raise OrderNotFound  # not-found and not-yours are the same 404
+        if row.status in CANCELLED_FAMILY:
+            return CancelAlreadyDone(row.status, row.cancel_reason)
+        if row.status not in CANCELLABLE_STATES:
+            return NotCancellable(row.status)  # the courier already has it
+
+        try:
+            await self._saga.signal_cancel(order_id)
+        except SagaGone:
+            # The workflow finished between our read and the signal —
+            # re-read and answer from the truth. A still-cancellable status
+            # with NO workflow means the placement→start gap: the only sane
+            # advice is retry (the sweeper story), so surface 503.
+            async with self._sessions() as session:
+                now = await OrderRepo(session).get_order(user_id=user_id, order_id=order_id)
+            assert now is not None  # orders are never deleted
+            if now.status in CANCELLED_FAMILY:
+                return CancelAlreadyDone(now.status, now.cancel_reason)
+            if now.status not in CANCELLABLE_STATES:
+                return NotCancellable(now.status)
+            raise SagaUnavailable("order workflow not yet running") from None
+        return CancelSubmitted(row.status)
 
     # ── reads (S3) ─────────────────────────────────────────────────
 
