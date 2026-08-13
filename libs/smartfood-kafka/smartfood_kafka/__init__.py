@@ -1,10 +1,12 @@
-"""smartfood-kafka — Avro serde, Schema Registry, and the event producer.
+"""smartfood-kafka — Avro serde, Schema Registry, producer, and consumer.
 
 The mandatory path for anything touching Kafka (docs §8): no service builds
-its own serializer, so wire-format and compatibility discipline have one
-implementation to audit.
+its own serializer or consumer loop, so wire-format, compatibility, and
+at-least-once discipline have one implementation to audit. Test doubles
+live in `smartfood_kafka.testing` (imported explicitly, never from here).
 """
 
+from .consumer import EventConsumer, EventHandler
 from .envelope import DOMAIN_EVENT_SCHEMA, DOMAIN_EVENT_SUBJECT
 from .producer import EventProducer, ensure_compacted_topic
 from .registry import SchemaRegistry, SchemaRegistryError
@@ -18,6 +20,8 @@ __all__ = [
     "SerdeError",
     "SchemaRegistry",
     "SchemaRegistryError",
+    "EventConsumer",
+    "EventHandler",
     "EventProducer",
     "EventType",
     "Topic",

@@ -1,6 +1,6 @@
 # Repository Structure
 
-**Status**: built through W2 — the tree below is the as-built layout (six services, seven libs, React frontend; 478 tests at the enforced 100% coverage bar; order lifecycle PLACED→SETTLED live). Entries the plan promises for later weeks are marked (W3). Read alongside [local-dev.md](local-dev.md).
+**Status**: built through W2 plus the first W3 slice (notifications) — the tree below is the as-built layout (seven services, seven libs, React frontend; 537 tests at the enforced 100% coverage bar; order lifecycle PLACED→SETTLED live). Entries the plan promises for later weeks are marked (W3). Read alongside [local-dev.md](local-dev.md).
 
 ---
 
@@ -11,7 +11,7 @@ smartfoodops/
 ├─ pyproject.toml            # uv workspace root: member list, shared lint/type/coverage config
 ├─ uv.lock                   # THE lockfile — one, for every service and lib
 ├─ Makefile                  # up / dev SVC=x / seed / cov / chaos / … (see local-dev.md)
-├─ services/                 # one FastAPI app per service — 6 built; W3 adds the rest
+├─ services/                 # one FastAPI app per service — 7 built; W3 adds the rest
 │  ├─ edge-bff/              # :8000  routing, merged OpenAPI, identity headers
 │  ├─ identity/              # :8001  auth, JWTs, roles, refresh-token families
 │  ├─ catalog/               # :8002  restaurants, menus, menu versions
@@ -25,11 +25,16 @@ smartfoodops/
 │  │  ├─ tests/              #   unit suite (runs infra-free via make cov)
 │  │  └─ pyproject.toml      #   workspace member; deps on libs by name
 │  ├─ payment/               # :8007  mock-PSP adapter behind PaymentGateway port, ledger
-│  └─ …                      # (W3) dispatch :8008, notification :8009, rider-gateway :8010,
+│  ├─ notification/          # :8008  consumer-only inbox: order/payment events → notifications
+│  │                         #        + order_recipients (notification_db)
+│  └─ …                      # (W3) dispatch :8009, rider-gateway :8010,
 │                            #      tracking-gateway :8011, analytics :8012
 ├─ libs/                     # seven shared workspace packages (the ONLY cross-service code path)
 │  ├─ smartfood-api/         # error envelope + code catalog, ApiError, shared DTO base models
-│  ├─ smartfood-kafka/       # Avro serde, typed consumer framework, retry/DLQ, per-sink dedupe
+│  ├─ smartfood-kafka/       # Avro serde + EventConsumer: supervised at-least-once loop, bounded
+│  │                         #   retry → <topic>.dlq (ADR-0021) + smartfood_kafka.testing stubs;
+│  │                         #   per-sink dedupe stays with each consumer (identity
+│  │                         #   processed_events, inventory/notification natural-key)
 │  ├─ smartfood-outbox/      # outbox writer + dual-mode publisher (OUTBOX_MODE=poller|debezium)
 │  ├─ smartfood-idempotency/ # idempotency-key table + Redis fast-path helpers
 │  ├─ smartfood-auth/        # AuthContext middleware consuming X-Auth-* headers

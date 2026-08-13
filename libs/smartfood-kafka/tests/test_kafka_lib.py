@@ -97,6 +97,17 @@ async def test_decode_rejects_garbage():
         await serde.decode(b"\x00\x00")  # too short
 
 
+async def test_corrupt_avro_body_is_serde_error_not_transport():
+    """A well-formed header over a mangled body must classify as POISON
+    (SerdeError → DLQ), while registry failures stay transport errors —
+    the consumer parks only what replay can never fix."""
+    registry, _ = make_registry(schema_id=7)
+    serde = AvroSerde(registry)
+    wire = await serde.encode(DOMAIN_EVENT_SUBJECT, DOMAIN_EVENT_SCHEMA, EVENT)
+    with pytest.raises(SerdeError, match="undecodable Avro body"):
+        await serde.decode(wire[:5] + b"\x9f\x9f\x9f")  # header intact, body mangled
+
+
 class StubKafka:
     def __init__(self):
         self.started = self.stopped = False

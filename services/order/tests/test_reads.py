@@ -69,6 +69,18 @@ def test_malformed_cursor_is_422(client, catalog, make_snapshot):
     assert r.json()["error"]["details"] == [{"field": "cursor", "issue": "not a valid cursor"}]
 
 
+def test_decodable_but_wrong_shape_cursor_is_still_422(client):
+    """Valid base64 of the wrong JSON shape raises TypeError internally —
+    the contract says ValueError→422, never a 500."""
+    import base64
+
+    for wrong in (b'"5"', b"[]", b'[123, "x"]'):
+        cursor = base64.urlsafe_b64encode(wrong).decode()
+        r = client.get(f"/v1/orders?cursor={cursor}", headers=CUSTOMER)
+        assert r.status_code == 422, wrong
+        assert r.json()["error"]["code"] == "VALIDATION_FAILED"
+
+
 def test_limit_bounds(client, catalog):
     assert client.get("/v1/orders?limit=0", headers=CUSTOMER).status_code == 422
     assert client.get("/v1/orders?limit=101", headers=CUSTOMER).status_code == 422

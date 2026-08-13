@@ -1,6 +1,6 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: up up-apps up-ui up-lean up-m2 up-full down nuke logs psql test cov dev seed demo chaos chaos-off fmt lint migrate
+.PHONY: up up-apps up-ui up-lean up-m2 up-m3 up-full down nuke logs psql test cov dev seed demo chaos chaos-off fmt lint migrate
 
 up: ## Start core infrastructure (postgres, redis, kafka, temporal, localstack, mock-psp, gateway)
 	$(COMPOSE) --profile core up -d --wait
@@ -23,6 +23,14 @@ up-lean: ## W1 working set (~4 GB) — skips temporal/localstack/mock-psp until 
 up-m2: ## Inventory+Orders milestone working set (~6-7 GB): W1 set + temporal, mock-psp, inventory, order(+worker), payment
 	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal mock-psp gateway identity catalog edge-bff inventory order order-worker payment
 	@echo "✔ m2 stack up — gateway :8080 · temporal-ui :8233 · mock-psp :9080"
+
+up-m3: ## Notifications milestone working set: the m2 set + notification
+	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal mock-psp gateway identity catalog edge-bff inventory order order-worker payment notification
+	@# initdb scripts only run on FRESH volumes; converge existing ones so a
+	@# newly added service's database appears without `make nuke`. The script
+	@# is idempotent; a crash-looping service recovers on its next restart.
+	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
+	@echo "✔ m3 stack up — gateway :8080 · temporal-ui :8233 · notifications :8008"
 
 up-full: up up-apps up-ui
 
@@ -57,7 +65,8 @@ cov: ## Unit tests + coverage report
 		--cov=smartfood_api --cov=smartfood_auth --cov=smartfood_kafka --cov=smartfood_otel \
 		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency \
 		--cov=identity --cov=edge_bff \
-		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=mock_psp --cov=seed \
+		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification \
+		--cov=mock_psp --cov=seed \
 		--cov-fail-under=100 \
 		--cov-report=term-missing
 

@@ -129,6 +129,9 @@ Live today:
 | POST `/v1/me/addresses` | auth | – | WRITE | identity | 201; not money — key not required |
 | DELETE `/v1/me/addresses/{id}` | auth | – | WRITE | identity | 204; becomes soft-delete with order snapshots (ADR-0018) |
 | GET `/.well-known/jwks.json` | *not routed* | – | – | identity | edge-bff fetches directly for JWT verification; never exposed through the gateway |
+| GET `/v1/notifications` | auth | – | READ | notification | keyset cursor + unread count |
+| POST `/v1/notifications/{id}/read` | auth | – | WRITE | notification | ownership is the WHERE clause; not-yours = 404 |
+| POST `/v1/notifications/read-all` | auth | – | WRITE | notification | naturally idempotent — re-POST is safe |
 
 Route-table prefixes already wired in `edge_bff/routing.py` but whose upstream endpoints are not yet built: `/v1/restaurants`, `/v1/menus` (catalog, public_read), `/v1/inventory` (auth), `/v1/orders`, `/v1/quote` (order, auth).
 

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     catalog_base_url: str = "http://localhost:8002"
     inventory_base_url: str = "http://localhost:8005"
     order_base_url: str = "http://localhost:8006"
+    notification_base_url: str = "http://localhost:8008"
 
     identity_jwks_url: str = "http://localhost:8001/.well-known/jwks.json"
     token_issuer: str = "http://identity:8001"

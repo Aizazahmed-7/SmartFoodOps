@@ -58,6 +58,7 @@ RULES = [
     # No collision with catalog's /v1/restaurants: the matcher requires a
     # "/" right after the prefix, and "restaurants"[10] is "s", not "/".
     Rule("/v1/restaurant", "order_base_url", "auth"),
+    Rule("/v1/notifications", "notification_base_url", "auth"),
 ]
 
 

@@ -95,7 +95,7 @@ def make_client(settings: Settings, fetches) -> TestClient:
 
 @pytest.fixture()
 def client(fetches):
-    """identity + catalog answer; inventory + order are DOWN."""
+    """identity + catalog answer; inventory + order + notification are DOWN."""
     return make_client(
         Settings(
             identity_base_url="http://identity.svc",
@@ -110,13 +110,14 @@ def client(fetches):
 
 @pytest.fixture()
 def healthy_client(fetches):
-    """Every upstream resolves (order/inventory aliased for the test)."""
+    """Every upstream resolves (order/inventory/notification aliased for the test)."""
     return make_client(
         Settings(
             identity_base_url="http://identity.svc",
             catalog_base_url="http://catalog.svc",
             order_base_url="http://identity.svc",
             inventory_base_url="http://catalog.svc",
+            notification_base_url="http://identity.svc",
             identity_jwks_url="http://identity.svc/.well-known/jwks.json",
             token_issuer="http://identity.svc",
         ),
@@ -165,7 +166,11 @@ def test_schema_collisions_rename_and_rewrite_refs(client):
 
 def test_partial_doc_flags_missing_and_is_not_cached(client, fetches):
     first = client.get("/openapi.json").json()
-    assert first["x-unavailable-upstreams"] == ["inventory_base_url", "order_base_url"]
+    assert first["x-unavailable-upstreams"] == [
+        "inventory_base_url",
+        "notification_base_url",
+        "order_base_url",
+    ]
     after_first = fetches["n"]
     client.get("/openapi.json")  # partial → rebuilt (self-heals when they return)
     assert fetches["n"] > after_first

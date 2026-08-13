@@ -1,12 +1,12 @@
-"""Grant-convergence branches (ADR-0020 made real) + the consumer loop."""
+"""Grant-convergence branches (ADR-0020 made real). The loop that feeds
+this handler is smartfood_kafka.EventConsumer, tested in its own lib."""
 
 import asyncio
 import json
-from types import SimpleNamespace
 
 import sqlalchemy as sa
 from identity.config import Settings
-from identity.consumers import CatalogChangesConsumer, GrantConvergenceHandler
+from identity.consumers import GrantConvergenceHandler
 from identity.db import metadata, processed_events, users
 from identity.domain.service import IdentityService
 from identity.keys import load_or_generate
@@ -138,79 +138,7 @@ async def test_unknown_owner_is_marked_not_poisonous(tmp_path):
     assert await _processed_count(sessions) == 1
 
 
-# ── the thin loop ──────────────────────────────────────────────────
-
-
-class StubKafkaConsumer:
-    def __init__(self, values: list[bytes | tuple[bytes, list[tuple[str, bytes]]]]):
-        self._values = values
-        self.started = self.stopped = False
-        self.commits = 0
-
-    async def start(self):
-        self.started = True
-
-    async def stop(self):
-        self.stopped = True
-
-    async def commit(self):
-        self.commits += 1
-
-    def __aiter__(self):
-        async def gen():
-            for value in self._values:
-                # bytes, or (bytes, kafka_headers) — mirrors ConsumerRecord,
-                # which always has a .headers attribute.
-                payload, headers = value if isinstance(value, tuple) else (value, None)
-                yield SimpleNamespace(value=payload, headers=headers)
-
-        return gen()
-
-
-class StubSerde:
-    async def decode(self, data: bytes) -> dict:
-        return json.loads(data)
-
-
-class RecordingHandler:
-    def __init__(self):
-        self.events: list[dict] = []
-
-    async def handle(self, event: dict) -> None:
-        self.events.append(event)
-
-
-async def test_loop_decodes_handles_then_commits():
-    client = StubKafkaConsumer([b'{"event_id": "e1"}', b'{"event_id": "e2"}'])
-    handler = RecordingHandler()
-    await CatalogChangesConsumer(client, StubSerde(), handler).run()
-    assert [e["event_id"] for e in handler.events] == ["e1", "e2"]
-    assert client.commits == 2  # committed AFTER each handle — at-least-once
-    assert client.started and client.stopped  # stop() even on normal exit
-
-
-async def test_loop_rebinds_trace_context_from_kafka_headers():
-    """The consumer's log lines must join the producing request's trace_id —
-    valid header binds it, absent/garbage headers bind nothing (and never
-    leak the previous message's id)."""
-    import structlog
-
-    tp = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
-    client = StubKafkaConsumer(
-        [
-            (b'{"event_id": "e1"}', [("traceparent", tp.encode())]),
-            b'{"event_id": "e2"}',  # no headers at all
-            (b'{"event_id": "e3"}', [("traceparent", b"garbage")]),
-        ]
-    )
-    seen: list[str | None] = []
-
-    class ContextProbe:
-        async def handle(self, event: dict) -> None:
-            seen.append(structlog.contextvars.get_contextvars().get("trace_id"))
-
-    await CatalogChangesConsumer(client, StubSerde(), ContextProbe()).run()
-    assert seen == ["ab" * 16, None, None]
+# ── app wiring ─────────────────────────────────────────────────────
 
 
 async def test_lifespan_runs_and_cancels_injected_consumer(settings):
