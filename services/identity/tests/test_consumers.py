@@ -98,9 +98,26 @@ async def test_losing_the_mark_race_is_harmless(tmp_path):
     assert await _processed_count(sessions) == 1
 
 
-async def test_foreign_event_types_are_ignored(tmp_path):
+async def test_any_surviving_event_converges_the_grant(tmp_path):
+    """THE compaction contract: catalog.changes keeps only the LAST event
+    per restaurant — which may be a menu edit, not RestaurantCreated. A
+    type-filtered consumer would lose its trigger forever; ours converges
+    from whatever event survives, because every payload carries the owner."""
     handler, sessions, user_id = await _harness(tmp_path)
-    await handler.handle(_event(user_id, event_type="ItemAdded"))
+    await handler.handle(_event(user_id, event_type="ItemAdded"))  # the survivor
+    user = await _user_row(sessions)
+    assert (user.role, user.restaurant_id) == ("restaurant_admin", "rst_9")
+    assert await _processed_count(sessions) == 1
+
+
+async def test_non_restaurant_or_ownerless_events_are_ignored(tmp_path):
+    handler, sessions, user_id = await _harness(tmp_path)
+    foreign = _event(user_id, event_type="StockAdjusted")
+    foreign["aggregate_type"] = "stock"  # another aggregate entirely
+    await handler.handle(foreign)
+    ownerless = _event(user_id)  # a pre-owner-field replay from history
+    ownerless["payload"] = json.dumps({"name": "Biryani House"})
+    await handler.handle(ownerless)
     assert await _processed_count(sessions) == 0  # not even marked
     assert (await _user_row(sessions)).role == "customer"
 

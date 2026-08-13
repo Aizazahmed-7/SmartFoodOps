@@ -11,6 +11,7 @@ from typing import Any
 @dataclass(frozen=True)
 class Restaurant:
     id: str
+    owner_user_id: str
     name: str
     city: str
     cuisines: list[str]

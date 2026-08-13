@@ -1,9 +1,12 @@
 """Kafka consumers — identity's asynchronous inbound edge.
 
-GrantConvergenceHandler is ADR-0020's closure made real: `RestaurantCreated`
-on catalog.changes → apply the restaurant_admin grant idempotently. With
-this running, a lost synchronous grant can no longer produce a permanent
-orphan — the event committed with the restaurant IS the durable to-do.
+GrantConvergenceHandler is ADR-0020's closure made real: ANY restaurant
+event on catalog.changes → apply the restaurant_admin grant idempotently
+(every full-state payload carries owner_user_id — deliberately type-agnostic
+because the topic is compacted and the surviving event per key may be any
+of them). With this running, a lost synchronous grant can no longer produce
+a permanent orphan — an event committed with the restaurant IS the durable
+to-do, and compaction cannot erase the to-do, only rename it.
 
 Delivery is at-least-once (offsets commit AFTER handling); safety comes from
 three layers: the processed_events dedupe, the grant's own idempotency, and
@@ -17,7 +20,6 @@ from typing import Any, Protocol
 
 import sqlalchemy as sa
 import structlog
-from smartfood_kafka import EventType
 from smartfood_otel import get_logger, trace_id_of
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -36,8 +38,16 @@ class GrantConvergenceHandler:
         self._service = service
 
     async def handle(self, event: dict[str, Any]) -> None:
-        if event.get("event_type") != EventType.RESTAURANT_CREATED:
-            return  # not ours — other consumers care, we don't
+        # Type-AGNOSTIC on purpose: catalog.changes is COMPACTED, so the one
+        # surviving event per restaurant may be ANY of them — a consumer that
+        # only reacted to RestaurantCreated would lose its trigger forever if
+        # a later menu edit compacted the birth event away. Every payload
+        # carries owner_user_id (full-state contract); the grant is
+        # idempotent, so converging repeatedly costs one no-op read.
+        payload = json.loads(event["payload"])
+        owner_user_id = payload.get("owner_user_id")
+        if event.get("aggregate_type") != "restaurant" or not owner_user_id:
+            return  # not a restaurant fact (or a pre-owner-field replay)
         event_id = str(event["event_id"])
         async with self._sessions() as session:
             seen = (
@@ -51,10 +61,9 @@ class GrantConvergenceHandler:
         if seen is not None:
             return  # replay of an already-processed delivery
 
-        payload = json.loads(event["payload"])
         try:
             await self._service.grant_restaurant_admin(
-                user_id=payload["owner_user_id"],
+                user_id=owner_user_id,
                 restaurant_id=str(event["aggregate_id"]),
             )
             log.info("grant converged from event", event_id=event_id)

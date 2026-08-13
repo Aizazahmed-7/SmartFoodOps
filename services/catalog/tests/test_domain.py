@@ -61,8 +61,11 @@ async def test_every_mutation_leaves_the_four_writes(grants, cache):
     # Deterministic identity: anyone can recompute the id of a fact.
     assert events[0].id == event_id("restaurant", r.id, 1, "RestaurantCreated")
     assert all(e.published_at is None for e in events)  # staged, drained in W3
-    # Snapshots stand alone (compacted topic): each carries full state.
-    assert events[0].payload["owner_user_id"] == "usr_1"
+    # Snapshots stand alone (compacted topic): each carries full state —
+    # INCLUDING the owner on EVERY event, not just the birth one. Identity's
+    # grant convergence must survive RestaurantCreated being compacted away
+    # in favor of any later event on the same key.
+    assert all(e.payload["owner_user_id"] == "usr_1" for e in events)
     assert events[1].payload["name"] == "Biryani Palace"
     assert events[2].payload["status"] == "paused"
     assert events[2].payload["cuisines"] == ["bbq", "pakistani"]

@@ -111,6 +111,7 @@ class CatalogService:
         cuisines = await repo.get_cuisines(restaurant_id)
         return Restaurant(
             id=row.id,
+            owner_user_id=row.owner_user_id,
             name=row.name,
             city=row.city,
             cuisines=cuisines,
@@ -124,6 +125,11 @@ class CatalogService:
     @staticmethod
     def _profile(restaurant: Restaurant) -> dict[str, Any]:
         return {
+            # In every event, not just RestaurantCreated: catalog.changes is
+            # COMPACTED, so any single surviving event per key must carry
+            # everything any consumer needs — identity's grant convergence
+            # must survive its trigger event being compacted away.
+            "owner_user_id": restaurant.owner_user_id,
             "name": restaurant.name,
             "city": restaurant.city,
             "cuisines": restaurant.cuisines,
@@ -278,10 +284,7 @@ class CatalogService:
                     )
                     await repo.set_cuisines(restaurant_id, cuisines)
                     restaurant = await self._publish(
-                        repo,
-                        restaurant_id,
-                        EventType.RESTAURANT_CREATED,
-                        {"owner_user_id": owner_user_id},
+                        repo, restaurant_id, EventType.RESTAURANT_CREATED
                     )
                     await session.commit()
                     created = True
