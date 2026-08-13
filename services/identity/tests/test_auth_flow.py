@@ -202,6 +202,23 @@ def test_profile_update_for_unknown_user_is_404(client):
     assert r.status_code == 404
 
 
+def test_load_or_generate_round_trips_the_same_kid(tmp_path):
+    """Generate on first boot, LOAD on every restart — the kid (and thus
+    every issued token) must survive the round trip. Hermetic on purpose:
+    the load branch used to be covered only via the machine's ambient
+    infra/local/keys file (absent in clean CI), which made the coverage
+    bar environment-dependent. Both branches are driven HERE."""
+    from identity.keys import load_or_generate
+
+    path = tmp_path / "keys" / "identity-rsa.pem"
+    born = load_or_generate(str(path))  # generate: file did not exist
+    assert path.exists()
+    reloaded = load_or_generate(str(path))  # load: same identity back
+    assert reloaded.kid == born.kid
+    assert reloaded.public_jwk == born.public_jwk
+    assert reloaded.private_pem == born.private_pem
+
+
 def test_non_rsa_key_file_rejected(tmp_path):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
