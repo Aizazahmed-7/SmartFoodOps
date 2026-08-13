@@ -54,11 +54,22 @@ async def test_lifecycle_ok_paths():
         assert calls["requests"][0].url.path == f"/v1/internal/payments/ord_1/{op}"
 
 
-async def test_state_conflict_converges_to_success():
-    """Voiding when there is no auth (or it was already voided) is a
-    compensation SUCCESS — nothing to undo is the desired end state."""
+async def test_state_conflict_converges_for_compensations():
+    """Voiding or refunding when there is nothing to undo is a compensation
+    SUCCESS — nothing-to-undo is the desired end state."""
+    for op in ("void", "refund"):
+        client, _ = make([(409, {"error": {"code": "ORDER_STATE_CONFLICT"}})])
+        await getattr(client, op)("ord_1")  # no raise
+
+
+async def test_capture_state_conflict_raises_never_converges():
+    """The forward-path asymmetry: capture finding nothing to take must
+    FAIL (food would ship for free), not converge like the undo ops."""
+    from order.domain.ports import PaymentStateConflict
+
     client, _ = make([(409, {"error": {"code": "ORDER_STATE_CONFLICT"}})])
-    await client.void("ord_1")  # no raise
+    with pytest.raises(PaymentStateConflict):
+        await client.capture("ord_1")
 
 
 async def test_other_conflicts_and_transport_failures_raise():

@@ -8,6 +8,8 @@ import sqlalchemy as sa
 from order.activities import OrderActivities
 from order.adapters.repo import OrderRepo
 from order.db import metadata, orders, outbox
+from order.domain.ports import PaymentStateConflict
+from order.domain.transitions import transition
 from order.values import AuthResult, CancelReason, LineSpec, PriceResult, ReserveResult
 from smartfood_kafka import EventType
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -35,6 +37,7 @@ class FakeInventory:
 class FakePayment:
     def __init__(self):
         self.auth_result: AuthResult = "ok"
+        self.capture_fail: Exception | None = None
         self.calls: list = []
 
     async def authorize(self, order_id, *, amount_cents, currency, card_token):
@@ -46,6 +49,8 @@ class FakePayment:
 
     async def capture(self, order_id):
         self.calls.append(("capture", order_id))
+        if self.capture_fail is not None:
+            raise self.capture_fail
 
     async def refund(self, order_id):
         self.calls.append(("refund", order_id))
@@ -165,7 +170,12 @@ async def test_confirm_stages_the_full_state_event():
 async def test_full_cancel_path_writes_reason_and_event():
     acts, sessions, inventory, payment = await _setup()
     await acts.validate_and_reserve("ord_1", _price())
-    await acts.begin_cancel("ord_1", "VALIDATED")
+    await acts.begin_cancel("ord_1", "VALIDATED", CancelReason.PAYMENT_DECLINED)
+    async with sessions() as s:
+        # the reason lands at BEGIN — the CANCELLING window must already
+        # carry it (the kitchen's decision matrix classifies from it)
+        mid = (await s.execute(sa.select(orders.c.cancel_reason))).scalar_one()
+    assert mid == "payment_declined"
     await acts.void_authorization("ord_1")
     await acts.release_reservation("ord_1")
     await acts.finish_cancel("ord_1", CancelReason.PAYMENT_DECLINED)
@@ -188,12 +198,91 @@ async def test_mark_accepted_from_confirmed():
     assert await _status(sessions) == "ACCEPTED"
 
 
+async def _to_ready(acts, sessions):
+    """Drive the real saga chain to ACCEPTED, then the kitchen's two moves
+    via the same transition() writer the API uses."""
+    await acts.validate_and_reserve("ord_1", _price())
+    await acts.authorize_payment("ord_1", _price())
+    await acts.confirm_order("ord_1")
+    await acts.mark_accepted("ord_1")
+    await transition(sessions, "ord_1", expected="ACCEPTED", target="PREPARING")
+    await transition(sessions, "ord_1", expected="PREPARING", target="READY")
+
+
+async def test_pickup_and_delivered_stage_the_delivery_event():
+    acts, sessions, _, _ = await _setup()
+    await _to_ready(acts, sessions)
+    await acts.mark_picked_up("ord_1")
+    assert await _status(sessions) == "PICKED_UP"
+    await acts.mark_delivered("ord_1")
+    assert await _status(sessions) == "DELIVERED"
+    async with sessions() as s:
+        types = [e.event_type for e in (await s.execute(sa.select(outbox))).all()]
+    assert EventType.ORDER_DELIVERED in types
+
+
+async def test_capture_payment_calls_the_gateway():
+    acts, _, _, payment = await _setup()
+    await acts.capture_payment("ord_1")
+    assert payment.calls == [("capture", "ord_1")]
+
+
+async def test_capture_state_conflict_is_non_retryable():
+    """No capturable auth = settling without money — fail the workflow,
+    never converge, never retry."""
+    acts, _, _, payment = await _setup()
+    payment.capture_fail = PaymentStateConflict("no auth")
+    with pytest.raises(ApplicationError) as exc:
+        await acts.capture_payment("ord_1")
+    assert exc.value.non_retryable
+    assert exc.value.type == "PaymentStateConflict"
+
+
+async def test_settle_consumes_the_reservation_and_closes_the_order():
+    acts, sessions, inventory, _ = await _setup()
+    await _to_ready(acts, sessions)
+    await acts.mark_picked_up("ord_1")
+    await acts.mark_delivered("ord_1")
+    await acts.settle_order("ord_1")
+    assert await _status(sessions) == "SETTLED"
+    assert ("commit", "ord_1") in inventory.calls
+    async with sessions() as s:
+        types = [e.event_type for e in (await s.execute(sa.select(outbox))).all()]
+    assert EventType.ORDER_SETTLED in types
+
+
+async def test_settle_replay_is_a_noop():
+    """At-least-once: a retried settle re-commits (downstream no-op) and
+    lands on the transition's idempotent-replay branch."""
+    acts, sessions, inventory, _ = await _setup()
+    await _to_ready(acts, sessions)
+    await acts.mark_picked_up("ord_1")
+    await acts.mark_delivered("ord_1")
+    await acts.settle_order("ord_1")
+    await acts.settle_order("ord_1")  # retry — no error, still SETTLED
+    assert await _status(sessions) == "SETTLED"
+    assert inventory.calls.count(("commit", "ord_1")) == 2  # idempotent downstream
+
+
 async def test_illegal_transition_is_non_retryable():
     acts, _, _, _ = await _setup()
     with pytest.raises(ApplicationError) as exc:
         await acts.mark_accepted("ord_1")  # PLACED, not CONFIRMED
     assert exc.value.non_retryable
     assert exc.value.type == "IllegalTransition"
+
+
+async def test_every_activity_name_is_registered_exactly_once():
+    """The tripwire the worker needs: workflows dispatch BY NAME, so a
+    registration dropped from all() fails only at invocation time in a
+    live stack — this pins all() to the ActivityName enum instead."""
+    from order.values import ActivityName
+    from temporalio import activity as temporal_activity
+
+    acts, _, _, _ = await _setup()
+    definitions = [temporal_activity._Definition.from_callable(fn) for fn in acts.all()]
+    registered = [d.name for d in definitions if d is not None and d.name is not None]
+    assert sorted(registered) == sorted(m.value for m in ActivityName)
 
 
 async def test_replayed_activity_transition_is_a_noop():

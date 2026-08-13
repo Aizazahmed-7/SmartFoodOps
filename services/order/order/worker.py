@@ -22,7 +22,7 @@ from .activities import OrderActivities
 from .adapters.inventory_client import InventoryClient
 from .adapters.payment_client import PaymentClient
 from .config import Settings
-from .workflows import OrderWorkflow
+from .workflows import DeliveryWorkflow, OrderWorkflow
 
 log = get_logger("order.worker")
 
@@ -32,7 +32,7 @@ def build_worker(client: Client, activities: OrderActivities, *, task_queue: str
     return Worker(
         client,
         task_queue=task_queue,
-        workflows=[OrderWorkflow],
+        workflows=[OrderWorkflow, DeliveryWorkflow],
         activities=activities.all(),
     )
 

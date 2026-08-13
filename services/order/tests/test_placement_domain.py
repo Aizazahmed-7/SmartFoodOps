@@ -38,6 +38,12 @@ class RecordingSaga:
     async def start(self, order_id):
         self.started.append(order_id)
 
+    async def signal_decision(self, order_id, verdict):
+        raise AssertionError("placement never signals")  # pragma: no cover
+
+    async def signal_food_ready(self, order_id):
+        raise AssertionError("placement never signals")  # pragma: no cover
+
 
 def snapshot():
     return {

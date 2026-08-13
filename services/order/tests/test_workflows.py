@@ -1,21 +1,25 @@
-"""OrderWorkflow against Temporal's time-skipping test server: the decision
-matrix, every compensation branch, retry behavior, duplicate signals, and
-the REJECT_DUPLICATE contract.
+"""OrderWorkflow + DeliveryWorkflow against Temporal's time-skipping test
+server: the decision matrix, the delivered→captured→settled tail, every
+compensation branch, retry behavior, duplicate signals, and the
+REJECT_DUPLICATE contract.
 
 Workflow-logic tests use MOCK activities (the real ones have their own
 sqlite suite) registered under the same names, and the unsandboxed runner
 so coverage traces workflow code. ONE test runs the default sandbox to
-prove workflows.py's import purity.
+prove import purity for BOTH workflows.
 """
 
+import asyncio
 import uuid
 
 import pytest
 import pytest_asyncio
 from order.values import ActivityName, LineSpec, PriceResult, WorkflowInput
-from order.workflows import OrderWorkflow
+from order.workflows import DeliveryWorkflow, OrderWorkflow
 from temporalio import activity
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
+from temporalio.service import RPCError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
@@ -76,9 +80,26 @@ def mock_activities(script: dict[str, object] | None = None):
     async def mark_accepted(order_id: str) -> None:
         calls.append(("mark_accepted", order_id))
 
+    @activity.defn(name=ActivityName.MARK_PICKED_UP)
+    async def mark_picked_up(order_id: str) -> None:
+        calls.append(("mark_picked_up", order_id))
+
+    @activity.defn(name=ActivityName.MARK_DELIVERED)
+    async def mark_delivered(order_id: str) -> None:
+        calls.append(("mark_delivered", order_id))
+
+    @activity.defn(name=ActivityName.CAPTURE_PAYMENT)
+    async def capture_payment(order_id: str) -> None:
+        calls.append(("capture_payment", order_id))
+        outcome("capture_payment", None)
+
+    @activity.defn(name=ActivityName.SETTLE_ORDER)
+    async def settle_order(order_id: str) -> None:
+        calls.append(("settle_order", order_id))
+
     @activity.defn(name=ActivityName.BEGIN_CANCEL)
-    async def begin_cancel(order_id: str, expected: str) -> None:
-        calls.append(("begin_cancel", order_id, expected))
+    async def begin_cancel(order_id: str, expected: str, reason: str) -> None:
+        calls.append(("begin_cancel", order_id, expected, reason))
 
     @activity.defn(name=ActivityName.VOID_AUTHORIZATION)
     async def void_authorization(order_id: str) -> None:
@@ -98,6 +119,10 @@ def mock_activities(script: dict[str, object] | None = None):
         authorize_payment,
         confirm_order,
         mark_accepted,
+        mark_picked_up,
+        mark_delivered,
+        capture_payment,
+        settle_order,
         begin_cancel,
         void_authorization,
         release_reservation,
@@ -105,7 +130,21 @@ def mock_activities(script: dict[str, object] | None = None):
     ], calls
 
 
-async def _run(env, script=None, *, signal=None, sandboxed=False, order_id=None):
+async def _signal_food_ready(env, order_id, *, times=1):
+    """The kitchen's cue, from outside: the child only exists once the
+    parent processed the accept — retry NOT_FOUND until it appears."""
+    handle = env.client.get_workflow_handle(f"dlv::{order_id}")
+    for _ in range(200):
+        try:
+            for _ in range(times):
+                await handle.signal("food_ready")
+            return
+        except RPCError:
+            await asyncio.sleep(0.05)
+    raise AssertionError("DeliveryWorkflow never appeared")
+
+
+async def _run(env, script=None, *, signal=None, deliver=False, sandboxed=False, order_id=None):
     order_id = order_id or f"ord_{uuid.uuid4().hex[:8]}"
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
     activities, calls = mock_activities(script)
@@ -113,7 +152,7 @@ async def _run(env, script=None, *, signal=None, sandboxed=False, order_id=None)
     worker = Worker(
         env.client,
         task_queue=task_queue,
-        workflows=[OrderWorkflow],
+        workflows=[OrderWorkflow, DeliveryWorkflow],
         activities=activities,
         workflow_runner=runner,
     )
@@ -127,20 +166,79 @@ async def _run(env, script=None, *, signal=None, sandboxed=False, order_id=None)
         if signal is not None:
             for verdict in signal if isinstance(signal, list) else [signal]:
                 await handle.signal("restaurant_decision", verdict)
+        if deliver:
+            await _signal_food_ready(env, order_id)
         result = await handle.result()
     return result, calls, order_id
 
 
-async def test_happy_path_accept(env):
-    result, calls, order_id = await _run(env, signal="accept")
-    assert result == "ACCEPTED"
+async def test_happy_path_runs_to_settled(env):
+    result, calls, order_id = await _run(env, signal="accept", deliver=True)
+    assert result == "SETTLED"
     assert [c[0] for c in calls] == [
         "price_order",
         "validate_and_reserve",
         "authorize_payment",
         "confirm_order",
         "mark_accepted",
+        "mark_picked_up",  # child: pickup timer fired
+        "mark_delivered",  # child: dropoff timer fired
+        "capture_payment",  # parent resumes: money becomes real
+        "settle_order",  # reservation consumed, order closed
     ]
+
+
+async def test_delivery_child_has_the_contract_id(env):
+    _, _, order_id = await _run(env, signal="accept", deliver=True)
+    child = await env.client.get_workflow_handle(f"dlv::{order_id}").describe()
+    assert child.status is not None and child.status.name == "COMPLETED"
+
+
+async def test_duplicate_food_ready_signals_are_noops(env):
+    """A triple food_ready collapses into one truth — the courier leaves once."""
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    activities, calls = mock_activities()
+    worker = Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[OrderWorkflow, DeliveryWorkflow],
+        activities=activities,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+    async with worker:
+        handle = await env.client.start_workflow(
+            "OrderWorkflow",
+            WorkflowInput(order_id=order_id, accept_timeout_s=180),
+            id=f"ord::{order_id}",
+            task_queue=task_queue,
+        )
+        await handle.signal("restaurant_decision", "accept")
+        await _signal_food_ready(env, order_id, times=3)
+        result = await handle.result()
+    assert result == "SETTLED"
+    names = [c[0] for c in calls]
+    assert names.count("mark_picked_up") == 1 and names.count("mark_delivered") == 1
+
+
+async def test_capture_conflict_fails_the_workflow_loudly(env):
+    """Nothing-to-capture is a page, not a shrug: the non-retryable
+    activity error fails the whole workflow and settle NEVER runs."""
+    conflict = ApplicationError(
+        "no capturable auth", non_retryable=True, type="PaymentStateConflict"
+    )
+    with pytest.raises(WorkflowFailureError):
+        await _run(env, {"capture_payment": conflict}, signal="accept", deliver=True)
+
+
+async def test_capture_transient_failure_retries_to_settled(env):
+    result, calls, _ = await _run(
+        env, {"capture_payment": [RuntimeError("psp blip"), None]}, signal="accept", deliver=True
+    )
+    assert result == "SETTLED"
+    names = [c[0] for c in calls]
+    assert names.count("capture_payment") == 2  # failed once, retried by policy
+    assert names[-1] == "settle_order"
 
 
 async def test_stock_failure_cancels_without_compensation(env):
@@ -148,7 +246,8 @@ async def test_stock_failure_cancels_without_compensation(env):
     assert result == "CANCELLED"
     names = [c[0] for c in calls]
     assert "void_authorization" not in names and "release_reservation" not in names
-    assert ("begin_cancel", calls[2][1], "PLACED") in calls  # from PLACED
+    # begin_cancel names the expected state AND stamps the reason up front
+    assert ("begin_cancel", calls[2][1], "PLACED", "item_unavailable") in calls
     assert calls[-1][2] == "item_unavailable"  # finish_cancel reason
 
 
@@ -190,15 +289,18 @@ async def test_timeout_unwinds_fully(env):
 
 
 async def test_first_verdict_wins(env):
-    result, calls, _ = await _run(env, signal=["accept", "reject"])
-    assert result == "ACCEPTED"  # the late reject was a no-op
+    result, calls, _ = await _run(env, signal=["accept", "reject"], deliver=True)
+    assert result == "SETTLED"  # the late reject was a no-op
 
 
 async def test_transient_activity_failure_retries_through(env):
     result, calls, _ = await _run(
-        env, {"validate_and_reserve": [RuntimeError("inventory hiccup"), "ok"]}, signal="accept"
+        env,
+        {"validate_and_reserve": [RuntimeError("inventory hiccup"), "ok"]},
+        signal="accept",
+        deliver=True,
     )
-    assert result == "ACCEPTED"
+    assert result == "SETTLED"
     reserve_attempts = [c for c in calls if c[0] == "validate_and_reserve"]
     assert len(reserve_attempts) == 2  # failed once, retried by policy
 
@@ -210,7 +312,7 @@ async def test_duplicate_start_is_rejected(env):
     worker = Worker(
         env.client,
         task_queue=task_queue,
-        workflows=[OrderWorkflow],
+        workflows=[OrderWorkflow, DeliveryWorkflow],
         activities=activities,
         workflow_runner=UnsandboxedWorkflowRunner(),
     )
@@ -228,15 +330,16 @@ async def test_duplicate_start_is_rejected(env):
                 id=f"ord::{order_id}",
                 task_queue=task_queue,
             )
-        await handle.signal("restaurant_decision", "accept")
-        await handle.result()
+        await handle.signal("restaurant_decision", "reject")  # unwind: no child needed
+        assert await handle.result() == "CANCELLED"
 
 
 async def test_workflow_survives_the_real_sandbox(env):
     """Import purity: the default sandboxed runner re-imports workflows.py;
-    heavyweight imports (sqlalchemy/httpx) would fail right here."""
-    result, _, _ = await _run(env, signal="accept", sandboxed=True)
-    assert result == "ACCEPTED"
+    heavyweight imports (sqlalchemy/httpx) would fail right here — and the
+    accept path drives DeliveryWorkflow through the same sandbox."""
+    result, _, _ = await _run(env, signal="accept", deliver=True, sandboxed=True)
+    assert result == "SETTLED"
 
 
 async def test_build_worker_registers_the_full_surface(env):

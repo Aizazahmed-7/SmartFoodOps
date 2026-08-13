@@ -9,6 +9,7 @@ from smartfood_api import ErrorCode
 from smartfood_auth import AuthContext, headers_for
 from smartfood_otel import current_traceparent
 
+from ..domain.ports import PaymentStateConflict
 from ..values import AuthResult
 
 _HEADERS = {
@@ -55,15 +56,16 @@ class PaymentClient:
         raise PaymentUnavailable(f"authorize answered {resp.status_code}")
 
     async def void(self, order_id: str) -> None:
-        await self._lifecycle(order_id, "void")
+        await self._lifecycle(order_id, "void", converge_on_conflict=True)
 
     async def capture(self, order_id: str) -> None:
-        await self._lifecycle(order_id, "capture")
+        # NOT convergent: capture-with-no-auth means settling without money.
+        await self._lifecycle(order_id, "capture", converge_on_conflict=False)
 
     async def refund(self, order_id: str) -> None:
-        await self._lifecycle(order_id, "refund")
+        await self._lifecycle(order_id, "refund", converge_on_conflict=True)
 
-    async def _lifecycle(self, order_id: str, op: str) -> None:
+    async def _lifecycle(self, order_id: str, op: str, *, converge_on_conflict: bool) -> None:
         try:
             resp = await self._http.post(
                 f"{self._base}/v1/internal/payments/{order_id}/{op}", headers=_headers()
@@ -75,8 +77,12 @@ class PaymentClient:
         if resp.status_code == 409:
             code = resp.json()["error"]["code"]
             if code == ErrorCode.ORDER_STATE_CONFLICT:
-                # Compensation convergence: voiding when no auth exists (or
-                # was already voided elsewhere) is success, not failure — a
-                # compensation must never wedge on "nothing to undo".
-                return
+                if converge_on_conflict:
+                    # Compensation convergence: voiding/refunding when no auth
+                    # or capture exists is success, not failure — a
+                    # compensation must never wedge on "nothing to undo".
+                    return
+                # Forward-path capture found nothing to take: retrying can
+                # never help, and settling anyway would ship food for free.
+                raise PaymentStateConflict(f"{op} on {order_id}: no capturable authorization")
         raise PaymentUnavailable(f"{op} answered {resp.status_code}")

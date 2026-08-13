@@ -25,6 +25,17 @@ class WorkflowInput:
 
 
 @dataclass(frozen=True)
+class DeliveryInput:
+    """DeliveryWorkflow (child) input — the simulated courier's timings.
+    Real dispatch replaces the timers next milestone; the id contract
+    (dlv::{order_id}) and signal names are the part that must not change."""
+
+    order_id: str
+    pickup_delay_s: int = 20
+    dropoff_delay_s: int = 30
+
+
+@dataclass(frozen=True)
 class LineSpec:
     item_id: str
     qty: int
@@ -51,6 +62,7 @@ AuthResult = Literal["ok", "declined"]
 Verdict = Literal["accept", "reject"]
 
 SIGNAL_RESTAURANT_DECISION = "restaurant_decision"
+SIGNAL_FOOD_READY = "food_ready"  # kitchen → DeliveryWorkflow (dlv::{order_id})
 
 
 class ActivityName(StrEnum):
@@ -59,6 +71,10 @@ class ActivityName(StrEnum):
     AUTHORIZE_PAYMENT = "authorize_payment"
     CONFIRM_ORDER = "confirm_order"
     MARK_ACCEPTED = "mark_accepted"
+    MARK_PICKED_UP = "mark_picked_up"
+    MARK_DELIVERED = "mark_delivered"
+    CAPTURE_PAYMENT = "capture_payment"
+    SETTLE_ORDER = "settle_order"
     BEGIN_CANCEL = "begin_cancel"
     VOID_AUTHORIZATION = "void_authorization"
     RELEASE_RESERVATION = "release_reservation"

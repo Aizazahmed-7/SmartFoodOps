@@ -57,6 +57,89 @@ async def test_temporal_saga_starts_by_name_and_swallows_duplicates():
     assert len(fake.calls) == 2
 
 
+def _signal_saga(fail_with=None):
+    from order.adapters.temporal_client import TemporalSaga
+
+    signals: list = []
+
+    class FakeHandle:
+        def __init__(self, workflow_id):
+            self._id = workflow_id
+
+        async def signal(self, name, *args):
+            if fail_with is not None:
+                raise fail_with
+            signals.append((self._id, name, args))
+
+    class FakeClient:
+        def get_workflow_handle(self, workflow_id):
+            return FakeHandle(workflow_id)
+
+    saga = TemporalSaga(
+        "unused:7233",
+        task_queue="order-tq",
+        accept_timeout_s=180,
+        pickup_delay_s=20,
+        dropoff_delay_s=30,
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+    return saga, signals
+
+
+async def test_saga_signals_target_the_id_contracts():
+    saga, signals = _signal_saga()
+    await saga.signal_decision("ord_1", "accept")
+    await saga.signal_food_ready("ord_1")
+    assert signals == [
+        ("ord::ord_1", "restaurant_decision", ("accept",)),
+        ("dlv::ord_1", "food_ready", ()),
+    ]
+
+
+async def test_saga_signal_rpc_errors_become_domain_answers():
+    import pytest
+    from order.domain.ports import SagaGone, SagaUnavailable
+    from temporalio.service import RPCError, RPCStatusCode
+
+    saga, _ = _signal_saga(RPCError("already completed", RPCStatusCode.NOT_FOUND, b""))
+    with pytest.raises(SagaGone):
+        await saga.signal_decision("ord_1", "accept")
+
+    saga, _ = _signal_saga(RPCError("conn refused", RPCStatusCode.UNAVAILABLE, b""))
+    with pytest.raises(SagaUnavailable):
+        await saga.signal_food_ready("ord_1")
+
+
+async def test_saga_signal_connect_failure_is_503_not_500(monkeypatch):
+    """The lazy first connect lives INSIDE the domain mapping: a signal
+    while Temporal is down must reach the kitchen as SagaUnavailable
+    (-> 503 Retry-After), never a raw exception (-> 500)."""
+    import pytest
+    from order.adapters import temporal_client
+    from order.adapters.temporal_client import TemporalSaga
+    from order.domain.ports import SagaUnavailable
+    from temporalio.service import RPCError, RPCStatusCode
+
+    for refusal in (
+        RPCError("connect refused", RPCStatusCode.UNAVAILABLE, b""),
+        OSError("dns says no"),  # socket-layer failure below the RPC layer
+    ):
+
+        async def refuse(address, *, _exc=refusal):
+            raise _exc
+
+        monkeypatch.setattr(temporal_client.Client, "connect", refuse)
+        saga = TemporalSaga(
+            "down:7233",
+            task_queue="order-tq",
+            accept_timeout_s=180,
+            pickup_delay_s=20,
+            dropoff_delay_s=30,
+        )
+        with pytest.raises(SagaUnavailable):
+            await saga.signal_decision("ord_1", "accept")
+
+
 def test_injected_poller_lives_and_dies_with_the_app():
     import asyncio
 

@@ -23,9 +23,11 @@ from sqlalchemy.pool import StaticPool
 from .adapters.catalog_client import CatalogClient
 from .adapters.identity_client import IdentityClient
 from .adapters.temporal_client import TemporalSaga
+from .api.restaurant import router as restaurant_router
 from .api.routes import router
 from .config import Settings
 from .db import idempotency_keys, metadata, outbox
+from .domain.kitchen import KitchenService
 from .domain.ports import CatalogPort, IdentityPort, SagaPort
 from .domain.service import OrderService
 
@@ -124,7 +126,9 @@ def create_app(
         saga=saga,
         idempotency=IdempotencyStore(sessions, idempotency_keys),
     )
+    app.state.kitchen = KitchenService(sessions, saga=saga)
     app.include_router(router)
+    app.include_router(restaurant_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

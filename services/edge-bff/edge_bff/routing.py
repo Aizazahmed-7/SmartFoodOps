@@ -30,6 +30,9 @@ RULES = [
     Rule("/v1/inventory", "inventory_base_url", "auth"),
     Rule("/v1/orders", "order_base_url", "auth"),
     Rule("/v1/quote", "order_base_url", "auth"),
+    # No collision with catalog's /v1/restaurants: the matcher requires a
+    # "/" right after the prefix, and "restaurants"[10] is "s", not "/".
+    Rule("/v1/restaurant", "order_base_url", "auth"),
 ]
 
 

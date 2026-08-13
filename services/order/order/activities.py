@@ -19,7 +19,7 @@ from temporalio.exceptions import ApplicationError
 
 from .adapters.repo import OrderRepo
 from .db import OrderStatus
-from .domain.ports import InventoryOpsPort, PaymentOpsPort
+from .domain.ports import InventoryOpsPort, PaymentOpsPort, PaymentStateConflict
 from .domain.transitions import IllegalTransition, transition
 from .values import (
     ActivityName,
@@ -96,13 +96,60 @@ class OrderActivities:
     async def mark_accepted(self, order_id: str) -> None:
         await self._transition(order_id, expected="CONFIRMED", target="ACCEPTED")
 
+    # ── delivery + settlement (S6) ─────────────────────────────────
+
+    @activity.defn(name=ActivityName.MARK_PICKED_UP)
+    async def mark_picked_up(self, order_id: str) -> None:
+        await self._transition(order_id, expected="READY", target="PICKED_UP")
+
+    @activity.defn(name=ActivityName.MARK_DELIVERED)
+    async def mark_delivered(self, order_id: str) -> None:
+        await self._transition(
+            order_id,
+            expected="PICKED_UP",
+            target="DELIVERED",
+            event=EventType.ORDER_DELIVERED,
+        )
+
+    @activity.defn(name=ActivityName.CAPTURE_PAYMENT)
+    async def capture_payment(self, order_id: str) -> None:
+        """Take the held funds ({order_id}:capture money key inside payment).
+        Nothing-to-capture is NOT convergent — settling without money would
+        ship food for free, so it fails the workflow loudly (a page)."""
+        try:
+            await self._payment.capture(order_id)
+        except PaymentStateConflict as exc:
+            raise ApplicationError(
+                str(exc), non_retryable=True, type="PaymentStateConflict"
+            ) from None
+
+    @activity.defn(name=ActivityName.SETTLE_ORDER)
+    async def settle_order(self, order_id: str) -> None:
+        """Consume the reservation (stock leaves the building for good),
+        then close the order. Both halves replay clean: commit on a
+        consumed reservation is a no-op, the transition is guarded."""
+        await self._inventory.commit(order_id)
+        await self._transition(
+            order_id,
+            expected="DELIVERED",
+            target="SETTLED",
+            event=EventType.ORDER_SETTLED,
+        )
+
     # ── the unwind (§7 compensation table) ─────────────────────────
 
     @activity.defn(name=ActivityName.BEGIN_CANCEL)
-    async def begin_cancel(self, order_id: str, expected: OrderStatus) -> None:
+    async def begin_cancel(
+        self, order_id: str, expected: OrderStatus, reason: CancelReason
+    ) -> None:
         """The workflow knows exactly where the order stands (deterministic
-        history), so it names the expected state."""
-        await self._transition(order_id, expected=expected, target="CANCELLING")
+        history), so it names the expected state — and stamps the reason NOW,
+        not at finish: the unwind can hold CANCELLING for an unbounded window
+        (compensations retry forever), and the kitchen's decision matrix
+        needs the reason to classify replies monotonically during it."""
+        await self._transition(
+            order_id, expected=expected, target="CANCELLING", cancel_reason=reason
+        )
 
     @activity.defn(name=ActivityName.VOID_AUTHORIZATION)
     async def void_authorization(self, order_id: str) -> None:
@@ -153,6 +200,10 @@ class OrderActivities:
             self.authorize_payment,
             self.confirm_order,
             self.mark_accepted,
+            self.mark_picked_up,
+            self.mark_delivered,
+            self.capture_payment,
+            self.settle_order,
             self.begin_cancel,
             self.void_authorization,
             self.release_reservation,

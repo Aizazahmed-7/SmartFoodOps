@@ -207,6 +207,17 @@ class PaymentService:
 
         async with self._sessions() as session:
             row = await PaymentRepo(session).get_payment(order_id)
+        if row is not None and row.status == target:
+            # At-target = replay from STATE, not just from the idempotency
+            # row: a retry that arrives after the replay TTL took the key
+            # over must still see its own success (a >24h-late capture
+            # retry answering 409 would fail a workflow whose money is
+            # already in the till). No gateway call, no ledger movement.
+            status, body = self._describe(row)
+            async with self._sessions() as session:
+                await self._store.complete(session, MONEY_SCOPE, key, status, body)
+                await session.commit()
+            return PaymentOutcome(status, body)
         if row is None or row.status != expected:
             await self._store.release(MONEY_SCOPE, key)
             raise PaymentStateConflict(f"cannot {op}: payment is {row.status if row else 'absent'}")

@@ -3,7 +3,7 @@ Protocols the adapters satisfy and tests fake."""
 
 from typing import Any, Protocol
 
-from ..values import AuthResult, LineSpec, ReserveResult
+from ..values import AuthResult, LineSpec, ReserveResult, Verdict
 
 
 class RestaurantNotFound(Exception):
@@ -20,6 +20,23 @@ class AddressNotFound(Exception):
 
 class AddressUnavailable(Exception):
     """Identity unreachable after retries — surfaces as 503."""
+
+
+class SagaGone(Exception):
+    """The target workflow already finished — the signal has nobody to
+    reach. For a decision this means the window closed (timer or a prior
+    verdict); the route maps it, never retries it."""
+
+
+class SagaUnavailable(Exception):
+    """Temporal unreachable — surfaces as 503 (the kitchen retries)."""
+
+
+class PaymentStateConflict(Exception):
+    """Capture refused because there is nothing to capture (no auth, or it
+    was voided). Unlike void/refund — where nothing-to-undo IS success —
+    a capture that finds no money is a real fault: retrying cannot help,
+    so the activity marks it non-retryable and the workflow fails loudly."""
 
 
 class CatalogPort(Protocol):
@@ -41,6 +58,15 @@ class SagaPort(Protocol):
         """Kick the order workflow. S3 stub logs; S5 starts Temporal.
         Runs AFTER the placement commit (never network inside the tx) —
         the commit→start gap is the accepted W3 sweeper exposure."""
+        ...
+
+    async def signal_decision(self, order_id: str, verdict: Verdict) -> None:
+        """Deliver the restaurant's verdict to ord::{order_id}. Raises
+        SagaGone (workflow finished — window closed) or SagaUnavailable."""
+        ...
+
+    async def signal_food_ready(self, order_id: str) -> None:
+        """Tell dlv::{order_id} the kitchen is done. Same exceptions."""
         ...
 
 

@@ -17,8 +17,15 @@ from smartfood_otel import get_logger
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
+from temporalio.service import RPCError, RPCStatusCode
 
-from ..values import WorkflowInput
+from ..domain.ports import SagaGone, SagaUnavailable
+from ..values import (
+    SIGNAL_FOOD_READY,
+    SIGNAL_RESTAURANT_DECISION,
+    Verdict,
+    WorkflowInput,
+)
 
 log = get_logger("order.saga")
 
@@ -69,3 +76,27 @@ class TemporalSaga:
         except WorkflowAlreadyStartedError:
             # The idempotent-replay path: the workflow exists; that IS the goal.
             log.info("saga already running", order_id=order_id)
+
+    async def signal_decision(self, order_id: str, verdict: Verdict) -> None:
+        await self._signal(f"ord::{order_id}", SIGNAL_RESTAURANT_DECISION, verdict)
+        log.info("decision signalled", order_id=order_id, verdict=verdict)
+
+    async def signal_food_ready(self, order_id: str) -> None:
+        await self._signal(f"dlv::{order_id}", SIGNAL_FOOD_READY)
+        log.info("food_ready signalled", order_id=order_id)
+
+    async def _signal(self, workflow_id: str, name: str, *args: object) -> None:
+        """RPC → domain translation: NOT_FOUND means the workflow already
+        finished (the window closed — a business answer the route maps);
+        anything else is transport trouble the caller may retry. The lazy
+        _connect sits INSIDE the try: a first-signal-while-Temporal-is-down
+        must surface as 503, not a raw 500."""
+        try:
+            client = await self._connect()
+            await client.get_workflow_handle(workflow_id).signal(name, *args)
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.NOT_FOUND:
+                raise SagaGone(workflow_id) from None
+            raise SagaUnavailable(str(exc)) from None
+        except OSError as exc:  # DNS/socket failures below the RPC layer
+            raise SagaUnavailable(str(exc)) from None
