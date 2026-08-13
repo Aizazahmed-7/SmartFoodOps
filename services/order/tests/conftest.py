@@ -39,11 +39,30 @@ class FakeIdentity:
 
 
 class RecordingSaga:
+    """In-memory SagaPort: records starts and signals; `fail_with` makes the
+    NEXT signal raise (SagaGone / SagaUnavailable injection), then clears."""
+
     def __init__(self):
         self.started: list[str] = []
+        self.decisions: list[tuple[str, str]] = []
+        self.food_ready: list[str] = []
+        self.fail_with: Exception | None = None
 
     async def start(self, order_id: str) -> None:
         self.started.append(order_id)
+
+    async def signal_decision(self, order_id: str, verdict: str) -> None:
+        self._maybe_fail()
+        self.decisions.append((order_id, verdict))
+
+    async def signal_food_ready(self, order_id: str) -> None:
+        self._maybe_fail()
+        self.food_ready.append(order_id)
+
+    def _maybe_fail(self) -> None:
+        if self.fail_with is not None:
+            exc, self.fail_with = self.fail_with, None
+            raise exc
 
 
 @pytest.fixture()

@@ -85,6 +85,12 @@ class OrderRepo:
         )
         return result.one_or_none()
 
+    async def get_order_any(self, order_id: str) -> Row[Any] | None:
+        """Unscoped read for saga activities — the system operating on its
+        own database, not a user request (no ownership clause by design)."""
+        result = await self._s.execute(sa.select(orders).where(orders.c.order_id == order_id))
+        return result.one_or_none()
+
     async def get_items(self, order_id: str) -> list[Row[Any]]:
         result = await self._s.execute(
             sa.select(order_items)
@@ -92,6 +98,42 @@ class OrderRepo:
             .order_by(order_items.c.line_no)
         )
         return list(result.all())
+
+    async def list_feed(
+        self,
+        *,
+        restaurant_id: str,
+        status: str,
+        limit: int,
+        after: tuple[datetime, str] | None,
+    ) -> list[Row[Any]]:
+        """Kitchen queue down ix_orders_feed — OLDEST first (a kitchen is a
+        FIFO; customer history is the newest-first mirror). `after` is the
+        exclusive continuation point; limit+1 rows = has_more probe."""
+        query = (
+            sa.select(orders)
+            .where((orders.c.restaurant_id == restaurant_id) & (orders.c.status == status))
+            .order_by(orders.c.placed_at.asc(), orders.c.order_id.asc())
+            .limit(limit + 1)
+        )
+        if after is not None:
+            query = query.where(sa.tuple_(orders.c.placed_at, orders.c.order_id) > after)
+        result = await self._s.execute(query)
+        return list(result.all())
+
+    async def get_items_for(self, order_ids: list[str]) -> dict[str, list[Row[Any]]]:
+        """One query for a whole feed page's lines (never per-order N+1)."""
+        if not order_ids:
+            return {}
+        result = await self._s.execute(
+            sa.select(order_items)
+            .where(order_items.c.order_id.in_(order_ids))
+            .order_by(order_items.c.order_id, order_items.c.line_no)
+        )
+        grouped: dict[str, list[Row[Any]]] = {}
+        for row in result.all():
+            grouped.setdefault(row.order_id, []).append(row)
+        return grouped
 
     async def list_orders(
         self,

@@ -171,6 +171,39 @@ async def test_capture_replay_posts_no_second_ledger_pair():
     assert count == 2  # one pair, forever
 
 
+async def test_capture_retry_beyond_the_replay_ttl_replays_from_state():
+    """A capture retry arriving after the idempotency window (>24h; a very
+    slow Temporal retry) finds an at-target row: that is its OWN success —
+    200 CAPTURED, no gateway call, no second ledger pair — never a 409
+    that would fail a workflow whose money is already in the till."""
+    service, sessions, gateway = await _service()
+    await _authorize(service)
+    await service.capture("ord_1")
+    async with sessions() as s:
+        await s.execute(idempotency_keys.delete())  # simulate TTL takeover
+        await s.commit()
+    late = await service.capture("ord_1")
+    assert late.status_code == 200
+    assert late.body["status"] == "CAPTURED"
+    async with sessions() as s:
+        count = (await s.execute(sa.select(sa.func.count()).select_from(ledger))).scalar_one()
+    assert count == 2  # still one pair
+    assert [c[0] for c in gateway.lifecycle_calls].count("capture") == 1  # PSP untouched
+
+
+async def test_void_retry_beyond_the_replay_ttl_replays_from_state():
+    """Same state-replay rule for the compensations (uniform idiom)."""
+    service, sessions, _ = await _service()
+    await _authorize(service)
+    await service.void("ord_1")
+    async with sessions() as s:
+        await s.execute(idempotency_keys.delete())
+        await s.commit()
+    late = await service.void("ord_1")
+    assert late.status_code == 200
+    assert late.body["status"] == "VOIDED"
+
+
 async def test_refund_writes_the_reversing_pair():
     service, sessions, _ = await _service()
     await _authorize(service)

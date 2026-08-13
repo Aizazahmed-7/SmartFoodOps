@@ -191,3 +191,21 @@ def test_internal_paths_are_unroutable(client, upstream):
     )
     assert snapshot.status_code == 404  # the pricing read is internal too
     assert upstream.requests == []  # nothing was forwarded anywhere
+
+
+def test_restaurant_singular_routes_to_order_not_catalog(client, upstream):
+    """/v1/restaurant (the kitchen surface, S6) is an ORDER route behind
+    auth; /v1/restaurants (catalog browse) stays anonymous — the prefix
+    matcher requires a '/' boundary, so the names never collide."""
+    r = client.post("/v1/restaurant/orders/ord_1/accept", headers=bearer(role="restaurant_admin"))
+    assert r.status_code == 503  # reached the ORDER upstream (down.test in this fixture)
+
+    r = client.get("/v1/restaurants/rst_1")
+    assert r.status_code == 201
+    assert upstream.last.url.host == "catalog.svc"
+
+
+def test_restaurant_surface_needs_a_token(client, upstream):
+    r = client.get("/v1/restaurant/orders?status=CONFIRMED")
+    assert r.status_code == 401
+    assert upstream.requests == []  # died at the edge

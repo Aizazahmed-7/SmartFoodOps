@@ -18,18 +18,126 @@ def test_app_builds_real_catalog_client_when_none_injected():
     # exiting the context ran the lifespan shutdown — own_http.aclose()
 
 
-def test_worker_skeleton_importable():
-    """The keep-alive skeleton's only contract until S5 lands the real
-    Temporal worker: importable, with a callable main."""
+def test_worker_module_importable():
+    """The worker module wires without a Temporal server present."""
     from order import worker
 
-    assert callable(worker.main)
+    assert callable(worker.main) and callable(worker.build_worker)
 
 
-async def test_saga_stub_logs_and_returns():
-    from order.adapters.saga_stub import SagaNotYetWired
+async def test_temporal_saga_starts_by_name_and_swallows_duplicates():
+    from order.adapters.temporal_client import TemporalSaga
+    from order.values import WorkflowInput
+    from temporalio.exceptions import WorkflowAlreadyStartedError
 
-    await SagaNotYetWired().start("ord_x")  # observable no-op until S5
+    class FakeClient:
+        def __init__(self):
+            self.calls: list = []
+
+        async def start_workflow(self, name, arg, *, id, task_queue, id_reuse_policy):
+            self.calls.append((name, arg, id, task_queue))
+            if len(self.calls) > 1:
+                raise WorkflowAlreadyStartedError(id, name)
+
+    fake = FakeClient()
+    saga = TemporalSaga(
+        "unused:7233",
+        task_queue="order-tq",
+        accept_timeout_s=180,
+        pickup_delay_s=20,
+        dropoff_delay_s=30,
+        client=fake,  # type: ignore[arg-type]
+    )
+    await saga.start("ord_1")
+    await saga.start("ord_1")  # duplicate — swallowed, not raised
+    name, arg, workflow_id, task_queue = fake.calls[0]
+    assert name == "OrderWorkflow"
+    assert isinstance(arg, WorkflowInput) and arg.order_id == "ord_1"
+    assert (workflow_id, task_queue) == ("ord::ord_1", "order-tq")
+    assert len(fake.calls) == 2
+
+
+def _signal_saga(fail_with=None):
+    from order.adapters.temporal_client import TemporalSaga
+
+    signals: list = []
+
+    class FakeHandle:
+        def __init__(self, workflow_id):
+            self._id = workflow_id
+
+        async def signal(self, name, *args):
+            if fail_with is not None:
+                raise fail_with
+            signals.append((self._id, name, args))
+
+    class FakeClient:
+        def get_workflow_handle(self, workflow_id):
+            return FakeHandle(workflow_id)
+
+    saga = TemporalSaga(
+        "unused:7233",
+        task_queue="order-tq",
+        accept_timeout_s=180,
+        pickup_delay_s=20,
+        dropoff_delay_s=30,
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+    return saga, signals
+
+
+async def test_saga_signals_target_the_id_contracts():
+    saga, signals = _signal_saga()
+    await saga.signal_decision("ord_1", "accept")
+    await saga.signal_food_ready("ord_1")
+    assert signals == [
+        ("ord::ord_1", "restaurant_decision", ("accept",)),
+        ("dlv::ord_1", "food_ready", ()),
+    ]
+
+
+async def test_saga_signal_rpc_errors_become_domain_answers():
+    import pytest
+    from order.domain.ports import SagaGone, SagaUnavailable
+    from temporalio.service import RPCError, RPCStatusCode
+
+    saga, _ = _signal_saga(RPCError("already completed", RPCStatusCode.NOT_FOUND, b""))
+    with pytest.raises(SagaGone):
+        await saga.signal_decision("ord_1", "accept")
+
+    saga, _ = _signal_saga(RPCError("conn refused", RPCStatusCode.UNAVAILABLE, b""))
+    with pytest.raises(SagaUnavailable):
+        await saga.signal_food_ready("ord_1")
+
+
+async def test_saga_signal_connect_failure_is_503_not_500(monkeypatch):
+    """The lazy first connect lives INSIDE the domain mapping: a signal
+    while Temporal is down must reach the kitchen as SagaUnavailable
+    (-> 503 Retry-After), never a raw exception (-> 500)."""
+    import pytest
+    from order.adapters import temporal_client
+    from order.adapters.temporal_client import TemporalSaga
+    from order.domain.ports import SagaUnavailable
+    from temporalio.service import RPCError, RPCStatusCode
+
+    for refusal in (
+        RPCError("connect refused", RPCStatusCode.UNAVAILABLE, b""),
+        OSError("dns says no"),  # socket-layer failure below the RPC layer
+    ):
+
+        async def refuse(address, *, _exc=refusal):
+            raise _exc
+
+        monkeypatch.setattr(temporal_client.Client, "connect", refuse)
+        saga = TemporalSaga(
+            "down:7233",
+            task_queue="order-tq",
+            accept_timeout_s=180,
+            pickup_delay_s=20,
+            dropoff_delay_s=30,
+        )
+        with pytest.raises(SagaUnavailable):
+            await saga.signal_decision("ord_1", "accept")
 
 
 def test_injected_poller_lives_and_dies_with_the_app():

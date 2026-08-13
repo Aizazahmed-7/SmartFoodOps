@@ -13,6 +13,15 @@ class Settings(BaseSettings):
     catalog_base_url: str = "http://localhost:8002"
     identity_base_url: str = "http://localhost:8001"
 
+    # Saga wiring (S5): the worker's activities call these.
+    inventory_base_url: str = "http://localhost:8005"
+    payment_base_url: str = "http://localhost:8007"
+    temporal_address: str = "localhost:7233"
+    task_queue: str = "order-tq"
+    accept_timeout_s: int = 180  # FR-18's restaurant-decision window
+    pickup_delay_s: int = 20  # S6's simulated delivery timers
+    dropoff_delay_s: int = 30
+
     # Money knobs for smartfood-pricing (integer cents / basis points).
     delivery_fee_cents: int = 199
     tax_basis_points: int = 825
