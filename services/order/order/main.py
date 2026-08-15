@@ -30,6 +30,7 @@ from .db import idempotency_keys, metadata, outbox
 from .domain.kitchen import KitchenService
 from .domain.ports import CatalogPort, IdentityPort, SagaPort
 from .domain.service import OrderService
+from .sweeper import Sweeper
 
 
 def _run_migrations(database_url: str) -> None:  # pragma: no cover — Postgres-only path,
@@ -52,6 +53,7 @@ def create_app(
     identity: IdentityPort | None = None,
     saga: SagaPort | None = None,
     poller: OutboxPoller | None = None,
+    sweeper: Sweeper | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("order")
@@ -83,6 +85,16 @@ def create_app(
             dropoff_delay_s=settings.dropoff_delay_s,
         )
 
+    if sweeper is None:
+        # Shares whatever saga port the app resolved above (real or fake),
+        # so a sweep and a placement can never disagree about Temporal.
+        sweeper = Sweeper(
+            sessions,
+            saga,
+            interval_seconds=settings.sweeper_interval_seconds,
+            min_age_seconds=settings.sweeper_min_age_seconds,
+        )
+
     events_topic = topic(settings.cell_id, Topic.ORDERS_EVENTS)
     own_producer: EventProducer | None = None
     if poller is None and settings.outbox_mode == "poller":  # pragma: no cover — live wiring
@@ -100,16 +112,18 @@ def create_app(
                 await conn.run_sync(metadata.create_all)
         else:
             await asyncio.to_thread(_run_migrations, settings.database_url)  # pragma: no cover
-        drain_task: asyncio.Task[None] | None = None
+        tasks: list[asyncio.Task[None]] = []
         if poller is not None:
             if own_producer is not None:  # pragma: no cover — live path
                 await own_producer.start()
-            drain_task = asyncio.create_task(poller.run())
+            tasks.append(asyncio.create_task(poller.run()))
+        tasks.append(asyncio.create_task(sweeper.run()))
         yield
-        if drain_task is not None:
-            drain_task.cancel()  # cancellation IS the poller's shutdown signal
+        for task in tasks:
+            task.cancel()  # cancellation IS the tasks' shutdown signal
+        for task in tasks:
             with suppress(asyncio.CancelledError):
-                await drain_task
+                await task
         if own_producer is not None:  # pragma: no cover — live path
             await own_producer.stop()
         await engine.dispose()

@@ -3,8 +3,8 @@
 Placement is the four-things-at-once transaction (FR-14/16): order row +
 line snapshots + OrderPlaced outbox row + the idempotency completion, all
 committing together. The saga start runs AFTER the commit — never network
-inside an open transaction; the commit→start gap is the accepted exposure
-the W3 sweeper closes (the outbox event IS the durable to-do).
+inside an open transaction; a crash in the commit→start gap leaves the
+committed row as a durable to-do that the sweeper (sweeper.py) heals.
 
 Repo-verified flag #2: the route prices synchronously (client gets
 PRICE_CHANGED immediately); S5's price_order activity will LOAD this
@@ -216,7 +216,7 @@ class OrderService:
             await self._idempotency.complete(session, user_id, idem_key, 202, response_body)
             await session.commit()
 
-        await self._saga.start(order_id)  # after commit; stub until S5
+        await self._saga.start(order_id)  # after commit; sweeper heals a crash here
         return Placed(order_id=order_id)
 
     # ── customer cancellation (S7) ─────────────────────────────────

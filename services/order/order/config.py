@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     schema_registry_url: str = "http://localhost:8086"
     cell_id: str = "c1"
 
+    # Placement sweeper (W3): heal PLACED orders whose saga start died in
+    # the commit→start gap. min_age must comfortably exceed a normal
+    # placement's own start latency so sweeps of healthy orders stay rare
+    # (they'd be no-ops anyway — REJECT_DUPLICATE referees).
+    sweeper_interval_seconds: float = 30.0
+    sweeper_min_age_seconds: float = 60.0
+
     # Tests use sqlite + create_all; containers run Alembic migrations (S3).
     create_all: bool = False
 

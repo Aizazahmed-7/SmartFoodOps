@@ -56,8 +56,9 @@ class IdentityPort(Protocol):
 class SagaPort(Protocol):
     async def start(self, order_id: str) -> None:
         """Kick the order workflow. S3 stub logs; S5 starts Temporal.
-        Runs AFTER the placement commit (never network inside the tx) —
-        the commit→start gap is the accepted W3 sweeper exposure."""
+        Runs AFTER the placement commit (never network inside the tx);
+        a crash in that gap is healed by the sweeper re-calling this —
+        so start MUST stay idempotent (REJECT_DUPLICATE + swallow)."""
         ...
 
     async def signal_decision(self, order_id: str, verdict: Verdict) -> None:
