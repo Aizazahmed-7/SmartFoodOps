@@ -58,7 +58,12 @@ class TemporalSaga:
                     self._client = await Client.connect(self._address)
         return self._client
 
-    async def start(self, order_id: str) -> None:
+    async def start(self, order_id: str) -> bool:
+        """True = a NEW workflow was started; False = one already exists.
+        Temporal reports ALREADY_EXISTS identically for a running duplicate
+        and for a CLOSED execution rejected by REJECT_DUPLICATE — so False
+        may mean "healthy" or "terminally stuck"; callers that heal (the
+        sweeper) must not claim credit for it."""
         client = await self._connect()
         try:
             await client.start_workflow(
@@ -74,9 +79,11 @@ class TemporalSaga:
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
             )
             log.info("saga started", order_id=order_id)
+            return True
         except WorkflowAlreadyStartedError:
             # The idempotent-replay path: the workflow exists; that IS the goal.
             log.info("saga already running", order_id=order_id)
+            return False
 
     async def signal_decision(self, order_id: str, verdict: Verdict) -> None:
         await self._signal(f"ord::{order_id}", SIGNAL_RESTAURANT_DECISION, verdict)

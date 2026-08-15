@@ -57,8 +57,9 @@ class RecordingSaga:
         self.cancels: list[str] = []
         self.fail_with: Exception | None = None
 
-    async def start(self, order_id: str) -> None:
+    async def start(self, order_id: str) -> bool:
         self.started.append(order_id)
+        return True
 
     async def signal_decision(self, order_id: str, verdict: str) -> None:
         self._maybe_fail()
@@ -104,7 +105,9 @@ def saga():
 
 @pytest.fixture()
 def client(catalog, identity, saga):
-    settings = Settings(database_url="sqlite+aiosqlite://", create_all=True)
+    settings = Settings(
+        database_url="sqlite+aiosqlite://", create_all=True, sweeper_interval_seconds=0
+    )
     app = create_app(settings, catalog=catalog, identity=identity, saga=saga)
     with TestClient(app) as c:
         yield c

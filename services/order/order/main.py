@@ -117,7 +117,8 @@ def create_app(
             if own_producer is not None:  # pragma: no cover — live path
                 await own_producer.start()
             tasks.append(asyncio.create_task(poller.run()))
-        tasks.append(asyncio.create_task(sweeper.run()))
+        if settings.sweeper_interval_seconds > 0:
+            tasks.append(asyncio.create_task(sweeper.run()))
         yield
         for task in tasks:
             task.cancel()  # cancellation IS the tasks' shutdown signal

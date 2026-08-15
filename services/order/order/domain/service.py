@@ -24,6 +24,7 @@ from smartfood_idempotency import (
     Reserved,
 )
 from smartfood_kafka import EventType
+from smartfood_otel import get_logger
 from smartfood_pricing import Line, PricedOrder, PricingConfig, PricingError, price_order
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -31,6 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..adapters.repo import OrderRepo, decode_cursor, encode_cursor
 from ..db import OrderStatus
 from .ports import AddressNotFound, CatalogPort, IdentityPort, SagaGone, SagaPort, SagaUnavailable
+
+log = get_logger("order.service")
 
 
 class OrderNotFound(Exception):
@@ -216,7 +219,15 @@ class OrderService:
             await self._idempotency.complete(session, user_id, idem_key, 202, response_body)
             await session.commit()
 
-        await self._saga.start(order_id)  # after commit; sweeper heals a crash here
+        try:
+            await self._saga.start(order_id)
+        except Exception as exc:
+            # The order is COMMITTED and the stored idempotent answer is
+            # 202 — a start failure (Temporal outage) must not turn into a
+            # customer-facing 500 that contradicts both and invites a
+            # duplicate re-order. The sweeper heals this exact gap; the
+            # committed row is the durable to-do.
+            log.warning("saga start failed — sweeper will heal", order_id=order_id, error=str(exc))
         return Placed(order_id=order_id)
 
     # ── customer cancellation (S7) ─────────────────────────────────

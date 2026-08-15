@@ -38,7 +38,9 @@ class Settings(BaseSettings):
     # Placement sweeper (W3): heal PLACED orders whose saga start died in
     # the commit→start gap. min_age must comfortably exceed a normal
     # placement's own start latency so sweeps of healthy orders stay rare
-    # (they'd be no-ops anyway — REJECT_DUPLICATE referees).
+    # (they'd be no-ops anyway — REJECT_DUPLICATE referees). interval 0
+    # disables the task (unit-test apps: a background sweep sharing the
+    # sqlite StaticPool with a request would be a race, not a feature).
     sweeper_interval_seconds: float = 30.0
     sweeper_min_age_seconds: float = 60.0
 
