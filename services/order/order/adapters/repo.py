@@ -139,6 +139,17 @@ class OrderRepo:
             grouped.setdefault(row.order_id, []).append(row)
         return grouped
 
+    async def stale_placed_order_ids(self, cutoff: datetime) -> list[str]:
+        """Orders the sweeper owes a saga: still PLACED past the age
+        threshold. Rides the partial index ix_orders_sweeper — the set is
+        near-empty in a healthy system (PLACED is a transient state)."""
+        result = await self._s.execute(
+            sa.select(orders.c.order_id)
+            .where((orders.c.status == "PLACED") & (orders.c.placed_at < cutoff))
+            .order_by(orders.c.placed_at)
+        )
+        return list(result.scalars().all())
+
     async def list_orders(
         self,
         *,

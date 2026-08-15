@@ -12,7 +12,9 @@ def test_healthz(client):
 def test_app_builds_real_catalog_client_when_none_injected():
     """No catalog injected → the app constructs the real adapter and owns
     its http client's lifecycle (closed on shutdown without error)."""
-    app = create_app(Settings(database_url="sqlite+aiosqlite://", create_all=True))
+    app = create_app(
+        Settings(database_url="sqlite+aiosqlite://", create_all=True, sweeper_interval_seconds=0)
+    )
     with TestClient(app) as c:
         assert c.get("/healthz").status_code == 200
     # exiting the context ran the lifespan shutdown — own_http.aclose()
@@ -160,7 +162,7 @@ def test_injected_poller_lives_and_dies_with_the_app():
 
     poller = StubPoller()
     app = create_app(
-        Settings(database_url="sqlite+aiosqlite://", create_all=True),
+        Settings(database_url="sqlite+aiosqlite://", create_all=True, sweeper_interval_seconds=0),
         poller=poller,  # type: ignore[arg-type]
     )
     with TestClient(app):

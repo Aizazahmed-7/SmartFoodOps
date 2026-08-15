@@ -41,6 +41,7 @@ class NeverSignalsSaga:
 
     async def start(self, order_id):
         self.started.append(order_id)
+        return True
 
     async def signal_decision(self, order_id, verdict):
         raise AssertionError("placement never signals")  # pragma: no cover
@@ -176,3 +177,29 @@ async def test_replay_never_touches_the_database_again(make_snapshot):
         count = (await s.execute(sa.select(sa.func.count()).select_from(orders))).scalar_one()
     assert count == 1
     assert len(saga.started) == 1
+
+
+async def test_saga_outage_still_answers_202_and_the_sweeper_heals(make_snapshot):
+    """The commit→start gap, non-crash flavor: Temporal is down when the
+    post-commit start runs. The order is committed with a stored 202 —
+    a customer-facing 500 would contradict both and invite a duplicate
+    re-order. place() answers the committed truth; the sweeper pays the
+    debt once Temporal returns."""
+    from order.sweeper import Sweeper
+
+    service, sessions, saga = await _service(make_snapshot)
+
+    async def exploding_start(order_id):
+        raise RuntimeError("temporal unreachable")
+
+    saga.start = exploding_start
+    outcome = await _place(service)
+    assert isinstance(outcome, Placed)  # the 202 body — not an INTERNAL 500
+    async with sessions() as s:
+        status = (await s.execute(sa.select(orders.c.status))).scalar_one()
+    assert status == "PLACED"
+
+    healer = NeverSignalsSaga()
+    swept = await Sweeper(sessions, healer, min_age_seconds=0).sweep_once()
+    assert swept == 1
+    assert healer.started == [outcome.order_id]

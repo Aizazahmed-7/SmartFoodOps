@@ -29,7 +29,7 @@ TO_CONFIRMED = [
 @pytest.fixture()
 def client(catalog, identity, saga, db_url, make_snapshot):
     catalog.snapshot = make_snapshot()
-    settings = Settings(database_url=db_url, create_all=True)
+    settings = Settings(database_url=db_url, create_all=True, sweeper_interval_seconds=0)
     app = create_app(settings, catalog=catalog, identity=identity, saga=saga)
     with TestClient(app) as c:
         yield c
