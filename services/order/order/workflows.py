@@ -5,6 +5,11 @@ stdlib, temporalio, and order.values (passed through). No SQLAlchemy, no
 httpx, no datetime.now()/uuid4() — time comes from timers, identity from
 the input, and every side effect happens in an activity invoked BY NAME.
 
+ADR-0023: the workflow also OWNS placement. It is started by the POST
+itself (update-with-start), creates the order row in its first activity,
+and answers the waiting request through the await_placement update — so
+the order exists because the saga made it, not before the saga knew.
+
 S5: PLACED → VALIDATED → PAYMENT_CLEARED → CONFIRMED → the durable
 restaurant_decision wait (signal vs timer), with the §7 compensation
 unwind for every failure. S6: accept starts the DeliveryWorkflow child
@@ -21,9 +26,11 @@ visible in the DB is the kitchen's licence to hit /preparing → /ready,
 and /ready signals dlv::{order_id} — starting the child first means that
 signal always has a target (no ordering race to apologize for).
 
-Action budget (happy path): 7 activities + 1 local + 1 child + 1 timer +
-1 signal — inside ≤12/≤3/≤4 (ADR-0018); the child adds 2 activities,
-2 timers, 1 signal of its own.
+Action budget (happy path): 7 activities + 1 child + 1 timer + 1 signal +
+1 update — inside ≤12/≤3/≤4 (ADR-0018); the child adds 2 activities,
+2 timers, 1 signal of its own. (create_order replaced the price_order
+local activity one-for-one — placement moved in without growing the
+budget, because the workflow no longer reads back what it was told.)
 """
 
 import asyncio
@@ -32,16 +39,19 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.workflow import ParentClosePolicy
 
 with workflow.unsafe.imports_passed_through():
     from order.values import (
+        UPDATE_AWAIT_PLACEMENT,
         ActivityName,
         CancelReason,
         DeliveryInput,
-        PriceResult,
+        PlacementAck,
         Verdict,
         WorkflowInput,
+        price_of,
     )
 
 # Transient failures retry forever with a 5-minute cap (compensations must
@@ -55,11 +65,38 @@ RETRY = RetryPolicy(
 STEP_TIMEOUT = timedelta(seconds=30)  # per-attempt; retries continue beyond
 
 
+class _RanOutOfTime(Exception):
+    """A forward step exhausted its deadline. Raised and caught INSIDE this
+    module — it never escapes run(), so it can never become a workflow
+    failure. It exists so the unwind can tell "the world is unreachable"
+    (recoverable: cancel the order cleanly) from "the world disagrees with
+    our history" (an IllegalTransition — a page, not a cancel)."""
+
+
 @workflow.defn(name="OrderWorkflow")
 class OrderWorkflow:
     def __init__(self) -> None:
         self._decision: Verdict | None = None
         self._cancel_requested = False
+        self._placed: PlacementAck | None = None
+        self._deadline = timedelta(seconds=300)  # replaced from input in run()
+
+    @workflow.update(name=UPDATE_AWAIT_PLACEMENT)
+    async def await_placement(self) -> PlacementAck:
+        """The HTTP request's handle on this workflow (ADR-0023).
+
+        An update is a signal that answers. The placement POST sends this
+        one WITH the start (a single ExecuteMultiOperation RPC), then blocks
+        on it: the handler waits for the create_order activity to commit and
+        hands back the id and status the customer gets in their 202.
+
+        Blocking in an update handler is legal and cheap — it parks on the
+        workflow's own event loop, holding no worker thread. If the caller
+        gives up first, the handler simply completes into a void: the client
+        is gone, the workflow is untouched, and the order still gets made."""
+        await workflow.wait_condition(lambda: self._placed is not None)
+        assert self._placed is not None  # wait_condition's postcondition
+        return self._placed
 
     @workflow.signal(name="restaurant_decision")
     def restaurant_decision(self, verdict: Verdict) -> None:
@@ -72,41 +109,76 @@ class OrderWorkflow:
 
     @workflow.run
     async def run(self, input: WorkflowInput) -> str:
-        order_id = input.order_id
+        placement = input.placement
+        order_id = placement.order_id
 
-        price = await workflow.execute_local_activity(
-            ActivityName.PRICE_ORDER,
-            order_id,
-            result_type=PriceResult,  # by-name call: tell the converter the shape
-            start_to_close_timeout=timedelta(seconds=10),
-            retry_policy=RETRY,
-        )
+        # Step one is now the order itself: the row, its lines, the outbox
+        # fact and the idempotent answer, in one transaction. Only once it
+        # has COMMITTED does the waiting POST get its 202 — the customer is
+        # never told "placed" about a row that does not exist.
+        #
+        # Deliberately NOT deadline-bounded (_step, not _forward): it holds
+        # nothing, so there is nothing to unwind, and a workflow that failed
+        # here would poison this idempotency key permanently — every retry
+        # re-derives the same ord:: id, which REJECT_DUPLICATE then refuses
+        # forever. Waiting for the database to come back is the right answer.
+        status = str(await self._step(ActivityName.CREATE_ORDER, placement))
+        self._placed = PlacementAck(order_id=order_id, status=status)
 
-        reserved = await self._step(ActivityName.VALIDATE_AND_RESERVE, order_id, price)
-        if reserved != "ok":
-            # Nothing is held yet — no compensation, straight to cancelled
-            # (§7 row 1). The failed reserve was all-or-nothing in inventory.
-            reason = (
-                CancelReason.ITEM_UNAVAILABLE
-                if reserved == "item_unavailable"
-                else CancelReason.AT_CAPACITY
-            )
-            await self._cancel(order_id, expected="PLACED", reason=reason)
-            return "CANCELLED"
+        # No price_order activity any more: the API priced this cart before
+        # starting us and the numbers travel in our input, so re-reading
+        # them from the DB would be a round trip to learn what we were told.
+        price = price_of(placement)
 
-        authorized = await self._step(ActivityName.AUTHORIZE_PAYMENT, order_id, price)
-        if authorized != "ok":
-            # Reserved but not charged: release the stock, no void (§7 row 2
-            # — there is no authorization to void).
+        # The three pre-confirmation steps run under a DEADLINE (see
+        # _forward). `stage` tracks the last state the DB is known to hold,
+        # so a deadline unwind can name it in the guarded transition.
+        self._deadline = timedelta(seconds=input.forward_deadline_s)
+        stage = "PLACED"
+        try:
+            reserved = await self._forward(ActivityName.VALIDATE_AND_RESERVE, order_id, price)
+            if reserved != "ok":
+                # Nothing is held yet — no compensation, straight to cancelled
+                # (§7 row 1). The failed reserve was all-or-nothing in inventory.
+                reason = (
+                    CancelReason.ITEM_UNAVAILABLE
+                    if reserved == "item_unavailable"
+                    else CancelReason.AT_CAPACITY
+                )
+                await self._cancel(order_id, expected="PLACED", reason=reason)
+                return "CANCELLED"
+
+            stage = "VALIDATED"
+            authorized = await self._forward(ActivityName.AUTHORIZE_PAYMENT, order_id, price)
+            if authorized != "ok":
+                # Reserved but not charged: release the stock, no void (§7 row 2
+                # — there is no authorization to void).
+                await self._cancel(
+                    order_id,
+                    expected="VALIDATED",
+                    reason=CancelReason.PAYMENT_DECLINED,
+                    release=True,
+                )
+                return "CANCELLED"
+
+            stage = "PAYMENT_CLEARED"
+            await self._forward(ActivityName.CONFIRM_ORDER, order_id)
+        except _RanOutOfTime:
+            # A dependency stayed unreachable past the deadline. Unwind with
+            # the AMBIGUOUS case in mind: the step that ran out of time may
+            # have half-succeeded (its last attempt could have committed and
+            # lost the answer), so undo everything it could have acquired.
+            # Both undos are idempotent — releasing a reservation that was
+            # never made, or voiding an authorization that never happened,
+            # are no-ops by contract, not errors.
             await self._cancel(
                 order_id,
-                expected="VALIDATED",
-                reason=CancelReason.PAYMENT_DECLINED,
+                expected=stage,
+                reason=CancelReason.SYSTEM_TIMEOUT,
+                void=stage != "PLACED",  # nothing was authorized before VALIDATED
                 release=True,
             )
             return "CANCELLED"
-
-        await self._step(ActivityName.CONFIRM_ORDER, order_id)
 
         # FR-18: the durable wait — restaurant decision vs the timeout timer,
         # now also listening for the customer's cancel (S7).
@@ -231,6 +303,38 @@ class OrderWorkflow:
         if release:
             await self._step(ActivityName.RELEASE_RESERVATION, order_id)
         await self._step(ActivityName.FINISH_CANCEL, order_id, reason)
+
+    async def _forward(self, name: str, *args: object) -> object:
+        """A forward step, bounded by a deadline.
+
+        Compensations retry forever because dropping an unwind strands money
+        or stock. Forward steps must NOT: they hold a reservation the
+        inventory reaper releases at 1800s, so retrying an authorization for
+        an hour would eventually be charging a card for stock somebody else
+        now owns. When the deadline expires we cancel the order cleanly
+        instead — a customer told "we could not complete this" is far better
+        served than one whose order silently waits forever.
+
+        Reading the failure (verified against the SDK, not assumed): with no
+        maximum_attempts in RETRY, execute_activity can only fail two ways —
+        a NON-RETRYABLE ApplicationError (IllegalTransition: the world
+        disagrees with our history, which retrying can never fix), or the
+        deadline running out. In the second case the cause is whatever the
+        last attempt raised (an ordinary ApplicationError), or a TimeoutError
+        when no attempt ever got to run. So the discriminator is the
+        non_retryable flag, not the exception type."""
+        try:
+            return await workflow.execute_activity(
+                name,
+                args=list(args),
+                start_to_close_timeout=STEP_TIMEOUT,
+                schedule_to_close_timeout=self._deadline,
+                retry_policy=RETRY,
+            )
+        except ActivityError as exc:
+            if isinstance(exc.cause, ApplicationError) and exc.cause.non_retryable:
+                raise  # a genuine fault — fail loudly, exactly as before
+            raise _RanOutOfTime(name) from None
 
     async def _step(self, name: str, *args: object) -> object:
         return await workflow.execute_activity(

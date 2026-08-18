@@ -62,14 +62,9 @@ orders = sa.Table(
 sa.Index("ix_orders_history", orders.c.user_id, orders.c.placed_at.desc(), orders.c.order_id.desc())
 # Restaurant feed (S6): status-filtered kitchen queues.
 sa.Index("ix_orders_feed", orders.c.restaurant_id, orders.c.status, orders.c.placed_at)
-# Sweeper scan (W3): PARTIAL — PLACED is transient, so this index is
-# near-empty in a healthy system and the periodic scan costs ~nothing.
-sa.Index(
-    "ix_orders_sweeper",
-    orders.c.placed_at,
-    postgresql_where=orders.c.status == "PLACED",
-    sqlite_where=orders.c.status == "PLACED",
-)
+# (ix_orders_sweeper lived here until ADR-0023. Nothing scans for orphaned
+# PLACED rows any more: the workflow creates the order, so an order cannot
+# exist without one. Migration 0003 drops it.)
 
 order_items = sa.Table(
     "order_items",

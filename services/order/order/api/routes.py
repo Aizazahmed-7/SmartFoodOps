@@ -24,6 +24,7 @@ from smartfood_pricing import (
 from ..domain.ports import (
     AddressNotFound,
     AddressUnavailable,
+    PlacementPending,
     RestaurantNotFound,
     SagaUnavailable,
     SnapshotUnavailable,
@@ -181,8 +182,23 @@ async def place_order(
         ) from None
     except _PRICING_ERRORS as exc:
         raise _map_pricing_errors(exc) from None
+    except SagaUnavailable:
+        # ADR-0023's accepted cost: the orchestrator is now on the checkout
+        # path, so its outage is a checkout outage. Retry-After + an
+        # unreleased key means the client's retry lands on the SAME order id.
+        raise ApiError(
+            ErrorCode.DEPENDENCY_UNAVAILABLE,
+            "temporarily unavailable",
+            503,
+            headers={"Retry-After": "1"},
+        ) from None
 
     if isinstance(outcome, Placed):
+        return placement_response(outcome.order_id, outcome.status)
+    if isinstance(outcome, PlacementPending):
+        # The saga has the order and is durable; it just has not written the
+        # row yet. 202 is still the truthful answer — the alternative, a
+        # 5xx, would tell the customer to re-order against a live workflow.
         return placement_response(outcome.order_id)
     if isinstance(outcome, Replay):
         return JSONResponse(

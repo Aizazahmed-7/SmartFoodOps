@@ -2,7 +2,7 @@
 name = "smartfood-idempotency"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = ["sqlalchemy[asyncio]>=2.0"]
+dependencies = ["sqlalchemy[asyncio]>=2.0", "smartfood-otel"]
 
 [build-system]
 requires = ["hatchling"]
@@ -10,3 +10,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["smartfood_idempotency"]
+
+[tool.uv.sources]
+smartfood-otel = { workspace = true }

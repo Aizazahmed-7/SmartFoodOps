@@ -140,3 +140,69 @@ async def test_body_hash_is_stable_sha256():
     assert body_hash(b"x") == body_hash(b"x")
     assert body_hash(b"x") != body_hash(b"y")
     assert len(body_hash(b"x")) == 64
+
+
+# ── the janitor (nothing else reclaims these rows) ─────────────────
+
+
+async def _row(store, sessions, table, key: str, status: str, age_seconds: int):
+    """A key as it would look `age_seconds` ago, in the given state."""
+    await store.reserve("u", key, HASH_A)
+    async with sessions() as s:
+        await s.execute(table.update().where(table.c.idem_key == key).values(status=status))
+        await s.commit()
+    await _age_row(sessions, table, key, age_seconds)
+
+
+async def test_purge_reclaims_only_what_nobody_can_use():
+    """COMPLETE past its replay TTL and IN_PROGRESS past the orphan TTL go;
+    anything a client could still replay or take over stays."""
+    store, sessions, table = await _store()
+    await _row(store, sessions, table, "old-complete", "COMPLETE", 90_000)  # > 24h
+    await _row(store, sessions, table, "old-orphan", "IN_PROGRESS", 7_200)  # > 1h
+    await _row(store, sessions, table, "fresh-complete", "COMPLETE", 60)
+    await _row(store, sessions, table, "fresh-progress", "IN_PROGRESS", 10)
+
+    assert await store.purge(orphan_ttl_seconds=3600) == 2
+
+    async with sessions() as s:
+        left = set((await s.execute(sa.select(table.c.idem_key))).scalars().all())
+    assert left == {"fresh-complete", "fresh-progress"}
+
+
+async def test_purge_leaves_a_healthy_table_alone():
+    store, sessions, table = await _store()
+    await store.reserve("u", "k", HASH_A)
+    assert await store.purge(orphan_ttl_seconds=3600) == 0
+
+
+async def test_janitor_sleeps_first_survives_failures_and_stops_on_cancel():
+    """Boot must not trigger a table-wide delete, one bad pass must not kill
+    the loop, and cancellation is the shutdown signal."""
+    import asyncio
+
+    import pytest
+    from smartfood_idempotency import IdempotencyJanitor
+
+    survived = asyncio.Event()
+
+    class FlakyStore:
+        def __init__(self):
+            self.calls = 0
+
+        async def purge(self, *, orphan_ttl_seconds):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("db blip")
+            survived.set()  # a pass AFTER the failure — the loop lived on
+            return 3
+
+    flaky = FlakyStore()
+    janitor = IdempotencyJanitor(flaky, interval_seconds=0.01, orphan_ttl_seconds=60)  # type: ignore[arg-type]
+    assert flaky.calls == 0  # constructing it purges nothing
+
+    task = asyncio.create_task(janitor.run())
+    await asyncio.wait_for(survived.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

@@ -15,7 +15,16 @@ from contextlib import asynccontextmanager
 
 import pytest
 import pytest_asyncio
-from order.values import ActivityName, LineSpec, PriceResult, WorkflowInput
+from order.values import (
+    UPDATE_AWAIT_PLACEMENT,
+    ActivityName,
+    LineSnapshot,
+    LineSpec,
+    PlacementAck,
+    PlacementInput,
+    PriceResult,
+    WorkflowInput,
+)
 from order.workflows import DeliveryWorkflow, OrderWorkflow
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
@@ -34,6 +43,34 @@ PRICE = PriceResult(
     card_token="tok_ok",
     lines=[LineSpec(item_id="itm_a", qty=2)],
 )
+
+
+def placement_for(order_id: str) -> PlacementInput:
+    """The workflow's input carries the whole priced order now — and the
+    numbers here MUST project to PRICE, since price_of() is what the money
+    activities see (ADR-0023 deleted the price_order round trip)."""
+    return PlacementInput(
+        order_id=order_id,
+        scope="usr_1",
+        idem_key=f"K-{order_id}",
+        user_id="usr_1",
+        restaurant_id="rst_1",
+        restaurant_name="Biryani House",
+        card_token="tok_ok",
+        menu_version=3,
+        currency="USD",
+        amount_cents=3446,
+        placed_at="2026-08-18T10:00:00+00:00",
+        lines=[
+            LineSnapshot(
+                menu_item_id="itm_a",
+                name="Chicken Biryani",
+                unit_price_cents=1500,
+                qty=2,
+                line_total_cents=3000,
+            )
+        ],
+    )
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -58,10 +95,10 @@ def mock_activities(script: dict[str, object] | None = None):
             raise value
         return value
 
-    @activity.defn(name=ActivityName.PRICE_ORDER)
-    async def price_order(order_id: str) -> PriceResult:
-        calls.append(("price_order", order_id))
-        return PRICE
+    @activity.defn(name=ActivityName.CREATE_ORDER)
+    async def create_order(placement: PlacementInput) -> str:
+        calls.append(("create_order", placement.order_id))
+        return outcome("create_order", "PLACED")  # type: ignore[return-value]
 
     @activity.defn(name=ActivityName.VALIDATE_AND_RESERVE)
     async def validate_and_reserve(order_id: str, price: PriceResult) -> str:
@@ -76,6 +113,7 @@ def mock_activities(script: dict[str, object] | None = None):
     @activity.defn(name=ActivityName.CONFIRM_ORDER)
     async def confirm_order(order_id: str) -> None:
         calls.append(("confirm_order", order_id))
+        outcome("confirm_order", None)
 
     @activity.defn(name=ActivityName.MARK_ACCEPTED)
     async def mark_accepted(order_id: str) -> None:
@@ -114,13 +152,14 @@ def mock_activities(script: dict[str, object] | None = None):
     @activity.defn(name=ActivityName.RELEASE_RESERVATION)
     async def release_reservation(order_id: str) -> None:
         calls.append(("release_reservation", order_id))
+        outcome("release_reservation", None)
 
     @activity.defn(name=ActivityName.FINISH_CANCEL)
     async def finish_cancel(order_id: str, reason: str) -> None:
         calls.append(("finish_cancel", order_id, reason))
 
     return [
-        price_order,
+        create_order,
         validate_and_reserve,
         authorize_payment,
         confirm_order,
@@ -183,7 +222,7 @@ async def running_order(env, script=None, *, task_queue=None):
     async with worker:
         handle = await env.client.start_workflow(
             "OrderWorkflow",
-            WorkflowInput(order_id=order_id, accept_timeout_s=180),
+            WorkflowInput(placement=placement_for(order_id), accept_timeout_s=180),
             id=f"ord::{order_id}",
             task_queue=task_queue,
         )
@@ -199,6 +238,7 @@ async def _run(
     deliver=False,
     sandboxed=False,
     order_id=None,
+    forward_deadline_s=300,
 ):
     order_id = order_id or f"ord_{uuid.uuid4().hex[:8]}"
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -214,7 +254,11 @@ async def _run(
     async with worker:
         handle = await env.client.start_workflow(
             "OrderWorkflow",
-            WorkflowInput(order_id=order_id, accept_timeout_s=180),
+            WorkflowInput(
+                placement=placement_for(order_id),
+                accept_timeout_s=180,
+                forward_deadline_s=forward_deadline_s,
+            ),
             id=f"ord::{order_id}",
             task_queue=task_queue,
         )
@@ -234,7 +278,7 @@ async def test_happy_path_runs_to_settled(env):
     result, calls, order_id = await _run(env, signal="accept", deliver=True)
     assert result == "SETTLED"
     assert [c[0] for c in calls] == [
-        "price_order",
+        "create_order",
         "validate_and_reserve",
         "authorize_payment",
         "confirm_order",
@@ -244,6 +288,87 @@ async def test_happy_path_runs_to_settled(env):
         "capture_payment",  # parent resumes: money becomes real
         "settle_order",  # reservation consumed, order closed
     ]
+
+
+async def test_update_with_start_returns_the_ack_once_the_order_exists(env):
+    """The placement handshake end to end, against a REAL Temporal server:
+    one ExecuteMultiOperation call starts ord::{id} and blocks on
+    await_placement, and comes back with the status create_order committed
+    — the exact mechanism the POST route depends on (ADR-0023)."""
+    from temporalio.client import WithStartWorkflowOperation
+    from temporalio.common import WorkflowIDConflictPolicy
+
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    activities, calls = mock_activities()
+    worker = Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[OrderWorkflow, DeliveryWorkflow],
+        activities=activities,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+    async with worker:
+        start = WithStartWorkflowOperation(
+            "OrderWorkflow",
+            WorkflowInput(placement=placement_for(order_id), accept_timeout_s=180),
+            id=f"ord::{order_id}",
+            task_queue=task_queue,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+        )
+        ack = await env.client.execute_update_with_start_workflow(
+            UPDATE_AWAIT_PLACEMENT, start_workflow_operation=start, result_type=PlacementAck
+        )
+        assert ack == PlacementAck(order_id=order_id, status="PLACED")
+        # It answered as soon as the order existed — NOT after the saga
+        # finished: the workflow is still parked on the kitchen's decision.
+        assert calls[0] == ("create_order", order_id)
+        handle = env.client.get_workflow_handle(f"ord::{order_id}")
+        assert (await handle.describe()).status.name == "RUNNING"
+        await handle.signal("restaurant_decision", "reject")  # let it wind up
+        assert await handle.result() == "CANCELLED"
+
+
+async def test_a_retried_placement_attaches_to_the_running_saga(env):
+    """A client retry (same key → same derived id) must join the workflow
+    already in flight and receive the same ack — never fork a second
+    order. USE_EXISTING is what makes that true."""
+    from temporalio.client import WithStartWorkflowOperation
+    from temporalio.common import WorkflowIDConflictPolicy
+
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    activities, calls = mock_activities()
+    worker = Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[OrderWorkflow, DeliveryWorkflow],
+        activities=activities,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+
+    def _start():
+        return WithStartWorkflowOperation(
+            "OrderWorkflow",
+            WorkflowInput(placement=placement_for(order_id), accept_timeout_s=180),
+            id=f"ord::{order_id}",
+            task_queue=task_queue,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+        )
+
+    async with worker:
+        first = await env.client.execute_update_with_start_workflow(
+            UPDATE_AWAIT_PLACEMENT, start_workflow_operation=_start(), result_type=PlacementAck
+        )
+        second = await env.client.execute_update_with_start_workflow(
+            UPDATE_AWAIT_PLACEMENT, start_workflow_operation=_start(), result_type=PlacementAck
+        )
+        assert first == second
+        # ONE workflow ran, so the order was created exactly once.
+        assert [c[0] for c in calls].count("create_order") == 1
+        handle = env.client.get_workflow_handle(f"ord::{order_id}")
+        await handle.signal("restaurant_decision", "reject")
+        await handle.result()
 
 
 async def test_delivery_child_has_the_contract_id(env):
@@ -352,7 +477,7 @@ async def test_duplicate_start_is_rejected(env):
         with pytest.raises(WorkflowAlreadyStartedError):
             await env.client.start_workflow(
                 "OrderWorkflow",
-                WorkflowInput(order_id=order_id, accept_timeout_s=180),
+                WorkflowInput(placement=placement_for(order_id), accept_timeout_s=180),
                 id=f"ord::{order_id}",
                 task_queue=task_queue,
             )
@@ -453,8 +578,9 @@ async def test_build_worker_registers_the_full_surface(env):
     """The worker composition seam: real OrderActivities wired end to end
     through build_worker and driven by the real workflow."""
     from order.activities import OrderActivities
-    from order.db import metadata
+    from order.db import idempotency_keys, metadata
     from order.worker import build_worker
+    from smartfood_idempotency import IdempotencyStore
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.pool import StaticPool
 
@@ -469,6 +595,95 @@ async def test_build_worker_registers_the_full_surface(env):
         async def reserve(self, **kwargs):
             return "ok"  # pragma: no cover — never driven here
 
-    activities = OrderActivities(sessions, NullClient(), NullClient())  # type: ignore[arg-type]
+    activities = OrderActivities(
+        sessions,
+        NullClient(),  # type: ignore[arg-type]
+        NullClient(),  # type: ignore[arg-type]
+        IdempotencyStore(sessions, idempotency_keys),
+    )
     worker = build_worker(env.client, activities, task_queue="tq-build-test")
     assert worker.task_queue == "tq-build-test"
+
+
+# ── forward deadlines (compensations stay unbounded) ───────────────
+
+
+async def test_reserve_deadline_cancels_and_releases_without_voiding(env):
+    """Inventory unreachable past the deadline. The reserve MAY have landed
+    on an attempt whose answer was lost, so the unwind releases; nothing
+    could have been authorized yet, so it must NOT void."""
+    result, calls, _ = await _run(
+        env,
+        {"validate_and_reserve": RuntimeError("inventory unreachable")},
+        forward_deadline_s=60,
+    )
+    assert result == "CANCELLED"
+    names = [c[0] for c in calls]
+    assert "release_reservation" in names
+    assert "void_authorization" not in names  # no hold could exist yet
+    begin = next(c for c in calls if c[0] == "begin_cancel")
+    assert begin[2] == "PLACED" and begin[3] == "system_timeout"
+
+
+async def test_authorize_deadline_voids_and_releases(env):
+    """The PSP stayed unreachable: an authorization may have gone through on
+    a lost attempt, so the unwind voids AND releases — both idempotent."""
+    result, calls, _ = await _run(
+        env,
+        {"authorize_payment": RuntimeError("psp unreachable")},
+        forward_deadline_s=60,
+    )
+    assert result == "CANCELLED"
+    names = [c[0] for c in calls]
+    assert names.index("void_authorization") < names.index("release_reservation")  # §7 order
+    begin = next(c for c in calls if c[0] == "begin_cancel")
+    assert begin[2] == "VALIDATED" and begin[3] == "system_timeout"
+
+
+async def test_confirm_deadline_unwinds_from_payment_cleared(env):
+    result, calls, _ = await _run(
+        env,
+        {"confirm_order": RuntimeError("db unreachable")},
+        forward_deadline_s=60,
+    )
+    assert result == "CANCELLED"
+    begin = next(c for c in calls if c[0] == "begin_cancel")
+    assert begin[2] == "PAYMENT_CLEARED" and begin[3] == "system_timeout"
+    names = [c[0] for c in calls]
+    assert "void_authorization" in names and "release_reservation" in names
+
+
+async def test_compensations_are_not_bounded_by_the_forward_deadline(env):
+    """THE point of splitting the policy: the unwind may take far longer
+    than the forward deadline and must still finish. Here the release keeps
+    failing for ~31s of retry backoff against a 30s forward deadline — if
+    compensations shared that deadline, this order would never reach
+    CANCELLED and the stock would stay held."""
+    result, calls, _ = await _run(
+        env,
+        {
+            "authorize_payment": RuntimeError("psp unreachable"),
+            "release_reservation": [
+                RuntimeError("inventory down"),
+                RuntimeError("inventory down"),
+                RuntimeError("inventory down"),
+                RuntimeError("inventory down"),
+                RuntimeError("inventory down"),
+                None,
+            ],
+        },
+        forward_deadline_s=30,
+    )
+    assert result == "CANCELLED"
+    assert [c[0] for c in calls].count("release_reservation") == 6  # 5 failures, then it lands
+    assert calls[-1][0] == "finish_cancel"
+
+
+async def test_a_non_retryable_forward_failure_still_fails_the_workflow(env):
+    """The other side of the discriminator: an IllegalTransition means the
+    world disagrees with our history. Retrying cannot fix it and cancelling
+    would be guessing — it must stay a loud workflow failure, not become a
+    system_timeout cancel."""
+    guard = ApplicationError("order is not PLACED", non_retryable=True, type="IllegalTransition")
+    with pytest.raises(WorkflowFailureError):
+        await _run(env, {"validate_and_reserve": guard}, forward_deadline_s=60)

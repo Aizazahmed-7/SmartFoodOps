@@ -3,11 +3,15 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
+from order.activities import OrderActivities
 from order.config import Settings
-from order.domain.ports import AddressNotFound
+from order.db import idempotency_keys
+from order.domain.ports import AddressNotFound, PlacementPending
 from order.domain.transitions import transition
 from order.main import create_app
+from order.values import PlacementAck
 from smartfood_auth import AuthContext, headers_for
+from smartfood_idempotency import IdempotencyStore
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 _CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
@@ -47,19 +51,47 @@ class FakeIdentity:
 
 
 class RecordingSaga:
-    """In-memory SagaPort: records starts and signals; `fail_with` makes the
-    NEXT signal raise (SagaGone / SagaUnavailable injection), then clears."""
+    """In-memory SagaPort that plays the WORKER's part.
+
+    Placement lives in the saga now (ADR-0023), so a double that merely
+    recorded the call would leave every API test with no order to read.
+    Instead `place` runs the real create_order activity inline against the
+    app's own sessionmaker: the same four writes, the same idempotency
+    completion, minus Temporal. Signals stay recorded.
+
+    Injection knobs: `pending` makes placement answer PlacementPending
+    (slow worker), `fail_place` raises (Temporal outage / closed saga), and
+    `fail_with` makes the NEXT signal raise, then clears."""
 
     def __init__(self):
-        self.started: list[str] = []
+        self.placed: list[str] = []
         self.decisions: list[tuple[str, str]] = []
         self.food_ready: list[str] = []
         self.cancels: list[str] = []
         self.fail_with: Exception | None = None
+        self.fail_place: Exception | None = None
+        self.pending = False
+        self._activities = None
 
-    async def start(self, order_id: str) -> bool:
-        self.started.append(order_id)
-        return True
+    def bind(self, sessions) -> None:
+        """Hand the double the app's database (see create_app's
+        app.state.sessions) — the worker would have its own handle to it."""
+        self._activities = OrderActivities(
+            sessions,
+            None,  # type: ignore[arg-type] — placement touches no inventory
+            None,  # type: ignore[arg-type] — nor payment
+            IdempotencyStore(sessions, idempotency_keys),
+        )
+
+    async def place(self, placement):
+        self.placed.append(placement.order_id)
+        if self.fail_place is not None:
+            raise self.fail_place
+        if self.pending:
+            return PlacementPending(placement.order_id)
+        assert self._activities is not None, "bind() the saga to the app's sessions first"
+        status = await self._activities.create_order(placement)
+        return PlacementAck(order_id=placement.order_id, status=status)
 
     async def signal_decision(self, order_id: str, verdict: str) -> None:
         self._maybe_fail()
@@ -105,10 +137,9 @@ def saga():
 
 @pytest.fixture()
 def client(catalog, identity, saga):
-    settings = Settings(
-        database_url="sqlite+aiosqlite://", create_all=True, sweeper_interval_seconds=0
-    )
+    settings = Settings(database_url="sqlite+aiosqlite://", create_all=True)
     app = create_app(settings, catalog=catalog, identity=identity, saga=saga)
+    saga.bind(app.state.sessions)  # the double writes into THIS app's db
     with TestClient(app) as c:
         yield c
 

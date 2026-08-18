@@ -29,6 +29,7 @@ const REASONS: Record<CancelReason, string> = {
   restaurant_rejected: "the restaurant couldn't take the order",
   restaurant_timeout: "the restaurant didn't respond in time",
   customer_cancelled: "you cancelled it",
+  system_timeout: "we couldn't complete it in time",
 };
 
 function Journey({ status }: { status: OrderStatus }) {
@@ -55,8 +56,13 @@ export default function OrderDetail() {
     queryKey: ["order", id],
     queryFn: () => getOrder(id!),
     refetchInterval: (query) =>
-      query.state.data && !TERMINAL_STATUSES.includes(query.state.data.status) ? 3000 : false,
+      // Poll while the order is still moving — AND while it is not here
+      // yet: a placement whose saga answered slowly hands back a real id
+      // seconds before the row exists (ADR-0023's pending case), so a 404
+      // right after checkout means "being placed", not "no such order".
+      !query.state.data || !TERMINAL_STATUSES.includes(query.state.data.status) ? 3000 : false,
     refetchIntervalInBackground: true, // tracking keeps moving in a background tab
+    retry: (failureCount, error) => hasCode(error, "NOT_FOUND") && failureCount < 5,
   });
 
   const cancel = useMutation({

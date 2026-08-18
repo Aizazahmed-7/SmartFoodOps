@@ -20,7 +20,7 @@ def test_placement_happy_path_202(client, catalog, saga, make_snapshot, make_ord
     placed = r.json()
     assert placed["status"] == "PLACED"
     assert placed["order_id"].startswith("ord_")
-    assert saga.started == [placed["order_id"]]  # after-commit hand-off
+    assert saga.placed == [placed["order_id"]]  # after-commit hand-off
 
 
 def test_replay_returns_same_order_no_duplicate(
@@ -34,7 +34,7 @@ def test_replay_returns_same_order_no_duplicate(
     assert replay.json() == first.json()  # stored response, verbatim
     assert replay.headers["idempotent-replay"] == "true"
     assert "idempotent-replay" not in first.headers
-    assert saga.started == [first.json()["order_id"]]  # exactly one order
+    assert saga.placed == [first.json()["order_id"]]  # exactly one order
 
 
 def test_same_key_different_body_is_422_reuse(client, catalog, make_snapshot, make_order_body):
@@ -71,6 +71,44 @@ def test_crash_mid_execution_leaves_key_in_progress(
     assert retry.status_code == 409
     assert retry.json()["error"]["code"] == "IDEMPOTENCY_IN_PROGRESS"
     assert retry.headers["retry-after"] == "1"
+
+
+def test_slow_worker_still_answers_202(client, catalog, saga, make_snapshot, make_order_body):
+    """The saga is durable but has not written the row inside the await
+    budget. The customer's answer is unchanged — 202 with the order id they
+    will be able to poll — because a 5xx here would ask them to re-order
+    against a workflow that is very much alive (ADR-0023)."""
+    catalog.snapshot = make_snapshot()
+    saga.pending = True
+    r = client.post("/v1/orders", json=make_order_body(), headers=_headers())
+    assert r.status_code == 202
+    assert r.json()["status"] == "PLACED"
+    # Read-your-writes is briefly suspended: the row is not there yet.
+    assert client.get(f"/v1/orders/{r.json()['order_id']}", headers=CUSTOMER).status_code == 404
+
+
+def test_temporal_outage_is_503_and_the_retry_reuses_the_key(
+    client, catalog, saga, make_snapshot, make_order_body
+):
+    """ADR-0023's accepted cost, in one test: placement now depends on the
+    orchestrator, so its outage is a 503 — and the key is deliberately NOT
+    released, so the immediate retry waits (409) instead of forking a
+    second order id."""
+    from order.domain.ports import SagaUnavailable
+
+    catalog.snapshot = make_snapshot()
+    key = uuid.uuid4().hex
+    saga.fail_place = SagaUnavailable("temporal down")
+
+    r = client.post("/v1/orders", json=make_order_body(), headers=_headers(key))
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert r.headers["retry-after"] == "1"
+
+    saga.fail_place = None
+    retry = client.post("/v1/orders", json=make_order_body(), headers=_headers(key))
+    assert retry.status_code == 409  # the key is still held — no duplicate
+    assert retry.json()["error"]["code"] == "IDEMPOTENCY_IN_PROGRESS"
 
 
 def test_missing_idempotency_key_is_422(client, catalog, make_snapshot, make_order_body):

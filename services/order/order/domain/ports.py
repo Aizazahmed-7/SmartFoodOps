@@ -1,9 +1,33 @@
 """Outbound ports — what the order domain needs from the world, as
 Protocols the adapters satisfy and tests fake."""
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ..values import AuthResult, LineSpec, ReserveResult, Verdict
+from ..values import (
+    AuthResult,
+    LineSpec,
+    PlacementAck,
+    PlacementInput,
+    ReserveResult,
+    Verdict,
+)
+
+
+@dataclass(frozen=True)
+class PlacementPending:
+    """The workflow is durably started, but its create_order activity has
+    not reported back inside our await budget — slow, backlogged or
+    restarting workers.
+
+    This is NOT a failure: Temporal is holding the intent, so the order is
+    coming. The customer still gets their 202 (a 5xx here would invite a
+    duplicate re-order against a live workflow); the only thing briefly
+    suspended is read-your-writes — GET /v1/orders/{id} may 404 for a
+    moment, and the idempotency key stays IN_PROGRESS until the activity
+    commits, so an immediate retry sees 409 rather than the stored reply."""
+
+    order_id: str
 
 
 class RestaurantNotFound(Exception):
@@ -32,6 +56,13 @@ class SagaUnavailable(Exception):
     """Temporal unreachable — surfaces as 503 (the kitchen retries)."""
 
 
+class SagaClosed(Exception):
+    """ord::{order_id} exists but has FINISHED, so REJECT_DUPLICATE refuses
+    to start it again. Only reachable when an idempotency key is reused past
+    its replay TTL — the derived order id then points at a settled order.
+    The domain answers it from the database, not the adapter."""
+
+
 class PaymentStateConflict(Exception):
     """Capture refused because there is nothing to capture (no auth, or it
     was voided). Unlike void/refund — where nothing-to-undo IS success —
@@ -54,12 +85,15 @@ class IdentityPort(Protocol):
 
 
 class SagaPort(Protocol):
-    async def start(self, order_id: str) -> bool:
-        """Kick the order workflow; True = newly started, False = one
-        already exists (running OR closed — Temporal reports both the
-        same way). Runs AFTER the placement commit (never network inside
-        the tx); a crash OR failure in that gap is healed by the sweeper
-        re-calling this — so start MUST stay idempotent."""
+    async def place(self, placement: PlacementInput) -> PlacementAck | PlacementPending:
+        """Start ord::{order_id} and wait for it to create the order row
+        (ADR-0023). One call does both — start and await — because the
+        workflow IS the placement now.
+
+        Must be idempotent: the same placement may arrive twice (a client
+        retry after the stale-key takeover), and both calls must converge on
+        the one workflow rather than fork. Raises SagaUnavailable when
+        Temporal cannot be reached — placement's new hard dependency."""
         ...
 
     async def signal_decision(self, order_id: str, verdict: Verdict) -> None:

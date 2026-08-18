@@ -167,6 +167,37 @@ class IdempotencyStore:
             )
         )
 
+    async def purge(self, *, orphan_ttl_seconds: float) -> int:
+        """Delete rows nobody can act on again; returns how many went.
+
+        Two populations, two reasons:
+          * COMPLETE past the replay TTL — the promise to replay has expired,
+            so the stored response is dead weight.
+          * IN_PROGRESS past `orphan_ttl_seconds` — a holder that never
+            finished and never will (its process died, or its dependency was
+            down when it gave up). Deleting is SAFE rather than merely tidy:
+            the takeover window is far shorter, so any client still holding
+            this key has long since been able to take it over and finish.
+
+        Deliberately NOT a business-logic path — it reclaims storage only.
+        Anything a client can still use is out of range by construction."""
+        now = _now()
+        async with self._sessions() as session:
+            result = await session.execute(
+                self._t.delete().where(
+                    (
+                        (self._t.c.status == "COMPLETE")
+                        & (self._t.c.created_at < now - self._replay_ttl)
+                    )
+                    | (
+                        (self._t.c.status == "IN_PROGRESS")
+                        & (self._t.c.created_at < now - timedelta(seconds=orphan_ttl_seconds))
+                    )
+                )
+            )
+            await session.commit()
+        return cast(CursorResult[Any], result).rowcount
+
     async def release(self, scope: str, key: str) -> None:
         """Free a key after a deterministic business failure — own short tx."""
         async with self._sessions() as session:

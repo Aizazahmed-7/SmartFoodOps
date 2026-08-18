@@ -13,6 +13,7 @@ exercised by the compose stack, not the unit suite.
 import asyncio
 
 import httpx
+from smartfood_idempotency import IdempotencyStore
 from smartfood_otel import get_logger, setup_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from temporalio.client import Client
@@ -22,6 +23,7 @@ from .activities import OrderActivities
 from .adapters.inventory_client import InventoryClient
 from .adapters.payment_client import PaymentClient
 from .config import Settings
+from .db import idempotency_keys
 from .workflows import DeliveryWorkflow, OrderWorkflow
 
 log = get_logger("order.worker")
@@ -60,6 +62,9 @@ async def main() -> None:  # pragma: no cover — live wiring (compose runs it)
             sessions,
             InventoryClient(settings.inventory_base_url, http),
             PaymentClient(settings.payment_base_url, http),
+            # The worker completes idempotency keys now: create_order stores
+            # the 202 in the same transaction as the order (ADR-0023).
+            IdempotencyStore(sessions, idempotency_keys),
         )
         worker = build_worker(client, activities, task_queue=settings.task_queue)
         log.info("order-worker up", task_queue=settings.task_queue)

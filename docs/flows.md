@@ -20,7 +20,7 @@ Companion to [erd.md](erd.md): the ERD shows what is stored; this shows **how da
 
 ## 1. Order placement — `POST /v1/orders`
 
-The four-writes-one-transaction placement, and the commit→start seam the sweeper guards.
+The four-writes-one-transaction placement — written by the SAGA since ADR-0023, with the HTTP request waiting on one update-with-start RPC.
 
 ```mermaid
 sequenceDiagram
@@ -30,8 +30,9 @@ sequenceDiagram
     participant O as order API
     participant I as identity
     participant C as catalog
-    participant DB as order_db
     participant T as Temporal
+    participant W as order worker
+    participant DB as order_db
 
     FE->>E: POST /v1/orders + Bearer JWT<br/>Idempotency-Key K = uuid per body-hash, from localStorage
     Note over E: verify JWT once via JWKS<br/>STRIP client identity headers<br/>STAMP X-Auth-Sub usr_1, X-Auth-Role customer
@@ -42,19 +43,23 @@ sequenceDiagram
     O->>C: GET internal pricing snapshot for rst_9
     C-->>O: menu snapshot at menu_version 7
     Note over O: price_order with expected version 7<br/>version moved → 409 PRICE_CHANGED, synchronously<br/>ok → PricedOrder total_cents 3446
-    Note over O: mint order_id = ord_ + uuid4 hex → ord_42
+    Note over O: order_id = ord_ + uuid5 of "usr_1:K" → ord_42<br/>DERIVED, not random — a retry re-derives THIS id
+    O->>T: execute_update_with_start_workflow — ONE RPC<br/>start ord::ord_42, USE_EXISTING + REJECT_DUPLICATE<br/>update await_placement
+    T->>W: workflow task → activity create_order
     rect rgb(230,240,230)
-        Note over O,DB: ONE TRANSACTION — the four writes
-        O->>DB: INSERT orders: status PLACED, aggregate_version 0,<br/>menu_version 7, pricing/address/name snapshots
-        O->>DB: INSERT order_items: name, unit_price 1200,<br/>option Family +600, line_total 3600
-        O->>DB: INSERT outbox: OrderPlaced<br/>id = uuid5 of "order:ord_42:0:OrderPlaced"
-        O->>DB: idempotency.complete — 202 body stored WITH the order
-        O->>DB: COMMIT
+        Note over W,DB: ONE TRANSACTION — the four writes
+        W->>DB: INSERT orders: status PLACED, aggregate_version 0,<br/>menu_version 7, pricing/address/name snapshots
+        W->>DB: INSERT order_items: name, unit_price 1200,<br/>option Family +600, line_total 3600
+        W->>DB: INSERT outbox: OrderPlaced<br/>id = uuid5 of "order:ord_42:0:OrderPlaced"
+        W->>DB: idempotency.complete — 202 body stored WITH the order
+        W->>DB: COMMIT
     end
-    O->>T: start_workflow OrderWorkflow, id ord::ord_42,<br/>policy REJECT_DUPLICATE
-    Note over O,T: start fails? log + STILL return 202 —<br/>committed row is the durable to-do — sweeper heals
+    W-->>T: PlacementAck ord_42 PLACED — the update resolves
+    T-->>O: ack
     O-->>FE: 202 order_id ord_42, status PLACED
+    Note over O,T: waited past 2s? still 202 — the workflow is durable<br/>Temporal unreachable? 503 and the key stays HELD,<br/>so the retry re-derives ord_42 instead of a second order
     Note over FE: navigate to /orders/ord_42 — the poll drives<br/>the placing-your-order → confirmed screen
+    Note over W: the same workflow runs straight on into<br/>validate_and_reserve → authorize_payment → confirm_order
 ```
 
 **Replay:** same `K` again → `reserve()` returns `Replay` → the *stored* 202 body returns byte-identical with `Idempotent-Replay: true`; nothing below the idempotency check re-executes. Same key + different body → `422 IDEMPOTENCY_KEY_REUSE`.
@@ -75,7 +80,8 @@ sequenceDiagram
     participant K as Kitchen API
     participant D as DeliveryWorkflow
 
-    Note over W: price_order local activity —<br/>READS pricing_snapshot from order_db, never recomputes
+    Note over W: create_order already ran (diagram 1) — the order EXISTS.<br/>price_of(placement) reads the numbers from the workflow INPUT,<br/>never the DB — the price_order activity was deleted (ADR-0023)
+    Note over W,PAY: the next three steps are FORWARD — bounded by forward_deadline_s (300s).<br/>They hold a reservation the reaper frees at 1800s, so retrying forever<br/>could authorize a card against stock already resold.<br/>On deadline the saga unwinds with cancel_reason system_timeout (diagram 4)
     W->>INV: POST internal reservation for ord_42
     Note over INV: ONE TX — occupy capacity slot where active below capacity,<br/>per line UPDATE stock SET available=available-2<br/>WHERE available >= 2 — the oversell guard.<br/>INSERT reservation PK ord_42, status active,<br/>expires_at now+1800s — the reaper's death clock.<br/>Event StockReserved id = uuid5 of "reservation:ord_42:0:StockReserved"
     INV-->>W: 201 created — replay returns 200, same reservation
@@ -104,7 +110,7 @@ sequenceDiagram
 
 ## 3. Compensation — card declined (`tok_decline`)
 
-Business outcomes travel as **values** (never exceptions — replay determinism); compensations unwind in reverse order and retry forever.
+Business outcomes travel as **values** (never exceptions — replay determinism). Two triggers reach the same unwind: a business *value* (declined, below) or a forward-step *deadline* (diagram 4). Either way the unwind runs in reverse order of acquisition and — unlike the bounded forward steps — its compensations retry **forever**.
 
 ```mermaid
 sequenceDiagram
@@ -131,7 +137,40 @@ sequenceDiagram
 
 ---
 
-## 4. The event pipeline — outbox → Kafka → notification inbox
+## 4. Compensation — forward-step timeout (`system_timeout`)
+
+The split retry policy, made visible. A **forward** step (reserve/authorize/confirm) is bounded: if a dependency stays unreachable past `forward_deadline_s`, the saga stops trying and unwinds. The **compensation** that unwinds it is *not* bounded — it retries forever, so the order reaches CANCELLED even while the dependency is still down. (Watched live: with inventory stopped, the order sat at CANCELLING until inventory returned, then settled to CANCELLED.)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant W as OrderWorkflow
+    participant INV as inventory
+    participant DB as order_db
+    participant N as notification
+
+    Note over W: create_order committed — the order is PLACED and durable.<br/>The forward steps begin, under forward_deadline_s (300s)
+    loop retry with backoff — until the deadline, never past it
+        W->>INV: validate_and_reserve
+        INV--xW: unreachable — Name or service not known
+    end
+    Note over W: deadline reached. The last failure is a RETRYABLE error,<br/>not a non_retryable fault — so the workflow reads it as<br/>RAN OUT OF TIME, not IllegalTransition, and unwinds cleanly
+    W->>DB: begin_cancel — PLACED→CANCELLING, v0→1,<br/>cancel_reason system_timeout stamped NOW
+    Note over W: the reserve MAY have half-landed on a lost attempt,<br/>so release anyway — no void, nothing could be authorized at PLACED.<br/>Both undos are idempotent no-ops if the acquire never happened
+    loop retry FOREVER — compensations are never deadline-bounded
+        W->>INV: release_reservation
+        INV--xW: still unreachable — the order sits at CANCELLING
+    end
+    Note over W,INV: inventory comes back
+    W->>INV: release_reservation
+    INV-->>W: released — active→released, or a no-op if never reserved
+    W->>DB: finish_cancel — CANCELLING→CANCELLED, v1→2,<br/>plus event OrderCancelled at v2, cancel_reason inside
+    N-->>N: via Kafka — "We couldn't reach Biryani House in time,<br/>your order was cancelled. Your card was not charged."
+```
+
+---
+
+## 5. The event pipeline — outbox → Kafka → notification inbox
 
 Where the deterministic ids pay off: publish-then-mark on the producer side, commit-after-handle plus natural-key dedupe on the consumer side — duplicates are absorbed at every hop.
 
@@ -163,7 +202,7 @@ sequenceDiagram
 
 ---
 
-## 5. Restaurant onboarding — sync grant + async convergence
+## 6. Restaurant onboarding — sync grant + async convergence
 
 Two services must change state with no shared transaction; every layer is idempotent so replay is the repair mechanism. The topic `c1.catalog.changes` is **compacted** — which is why payloads are full-state.
 
@@ -207,5 +246,5 @@ sequenceDiagram
 Three patterns repeat in every diagram — point at them and the architecture explains itself:
 
 1. **Green boxes are atomic.** State + its event + its stored response commit together; there is no moment where they can disagree.
-2. **Everything after a commit is idempotent and re-runnable** — saga starts (`REJECT_DUPLICATE`), grants (silent replay), consumer handling (deterministic ids). Reconcilers (sweeper, reaper, poller) re-run these paths freely, which is *why* crashes anywhere leave debts, never damage.
+2. **Every step is idempotent and re-runnable** — placement (derived order id + caught IntegrityError), saga starts (`REJECT_DUPLICATE`/`USE_EXISTING`), grants (silent replay), consumer handling (deterministic ids). Reconcilers (reaper, poller) and Temporal's own activity retries re-run these paths freely, which is *why* crashes anywhere leave debts, never damage.
 3. **Ids are the load-bearing walls**: deterministic where facts need dedup-able names, natural keys where the business rule is the uniqueness, random only where entities are truly born.

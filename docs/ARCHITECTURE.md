@@ -196,7 +196,7 @@ sequenceDiagram
   participant E as edge-bff
   participant O as Order
   participant T as Temporal<br/>OrderWorkflow
-  participant PR as PriceOrder<br/>(in-process lib)
+  participant PR as pricing lib<br/>(in-process, pre-start)
   participant I as Inventory
   participant P as Payment
   participant R as Restaurant<br/>(feed + signal)
@@ -206,13 +206,13 @@ sequenceDiagram
   C->>E: POST /v1/orders (Idempotency-Key, JWT)
   Note over E: verify JWT, admission token<br/>(over budget → 429 before any write)
   E->>O: create order (X-Auth-* stamped)
-  Note over O: one PG tx: insert order PLACED<br/>+ OrderPlaced outbox row
-  O->>T: start ord::{order_id}
+  O->>PR: price the cart (no network hop)
+  PR-->>O: immutable pricing snapshot<br/>drift → 409 PRICE_CHANGED, synchronously
+  O->>T: update-with-start ord::{order_id}<br/>(start + await_placement, ONE RPC)
+  Note over T: activity create_order — one PG tx:<br/>order PLACED + lines + OrderPlaced outbox<br/>+ idempotency completion
+  T-->>O: PlacementAck {order_id, PLACED}
   O-->>C: 202 {order_id, status: PLACED}
   O--)K: OrderPlaced (via outbox/Debezium)
-
-  T->>PR: PriceOrder (local activity, no network hop)
-  PR-->>T: immutable pricing snapshot
   T->>I: ValidateAndReserve (capacity + atomic stock decrement)
   I-->>T: reserved → VALIDATED
   T->>P: AuthorizePayment (key {order_id}:auth)
@@ -235,14 +235,16 @@ sequenceDiagram
 
 Key placement properties:
 
-- **PriceOrder** produces an immutable snapshot `{subtotal, discounts, fees, tax, total}`; authorization and refunds are computed **only** from it — money math is replay-deterministic. *(As built, W2: the placement ROUTE prices synchronously via `smartfood-pricing` and persists the snapshot in the placement transaction — the client hears `PRICE_CHANGED` immediately; the `price_order` local activity then LOADS that snapshot from order_db rather than recomputing. Same numbers by construction; the activity name and contract are unchanged.)*
+- **Pricing** produces an immutable snapshot `{subtotal, discounts, fees, tax, total}`; authorization and refunds are computed **only** from it — money math is replay-deterministic. *(As built: the placement ROUTE prices synchronously via `smartfood-pricing`, so the client hears `PRICE_CHANGED` immediately. Since ADR-0023 that snapshot travels INTO the workflow as its input and is persisted by the `create_order` activity — the `price_order` local activity that used to read it back is deleted. Same numbers, one fewer round trip.)*
 - **ValidateAndReserve** re-reads source of truth (never caches) — browse-time staleness is a display concern only (§10). Restaurant capacity is checked here too, via a conditional increment on `inventory_db.restaurant_load` (`WHERE active < capacity`; 0 rows → `RESTAURANT_AT_CAPACITY`) — the kitchen-slots analogue of the stock decrement, released on terminal states.
 - **ConfirmOrder** runs only after all validations — the order is visible as confirmed only after inventory + payment succeed (confirm-only-after-validation requirement).
 - SLO: p99 PLACED→CONFIRMED < 6s.
 
-**Action budget.** The happy path across `OrderWorkflow` + `DeliveryWorkflow` is budgeted at **≤12 activities + ≤3 timers + ≤4 signals** (≈20 Temporal actions per order, down from ~40 unbudgeted) — actions/order is the #1 Temporal cost and throughput driver. Concretely: `PriceOrder` runs as a **local activity**; `NotifyRestaurant` is not an activity at all — the Notification service consumes `OrderConfirmed` (same outcome, zero workflow actions); guarded status transitions fold into their owning activities (the guarded `UPDATE` lives inside `ConfirmOrder`, `Settle`, …), never standalone. The replay suite counts commands against the budget — warn-only from W2, a hard merge gate before Phase 3. Before adding an activity, ask: can an existing activity absorb it, or is it a fact (→ event + consumer) rather than a step?
+**Action budget.** The happy path across `OrderWorkflow` + `DeliveryWorkflow` is budgeted at **≤12 activities + ≤3 timers + ≤4 signals** (≈20 Temporal actions per order, down from ~40 unbudgeted) — actions/order is the #1 Temporal cost and throughput driver. Concretely: `PriceOrder` is **gone** — the API prices the cart before the workflow starts and the numbers ride in its input, so `create_order` (ADR-0023) took its slot rather than adding one; `NotifyRestaurant` is not an activity at all — the Notification service consumes `OrderConfirmed` (same outcome, zero workflow actions); guarded status transitions fold into their owning activities (the guarded `UPDATE` lives inside `ConfirmOrder`, `Settle`, …), never standalone. The replay suite counts commands against the budget — warn-only from W2, a hard merge gate before Phase 3. Before adding an activity, ask: can an existing activity absorb it, or is it a fact (→ event + consumer) rather than a step?
 
-**Saga sweeper.** Placement commits the order + outbox row, then starts the workflow — if the process dies in that gap, an order exists with no saga. Closed structurally: a small consumer of our own `OrderPlaced` events (`order.saga-sweeper.v1`) calls `start_workflow(…, REJECT_DUPLICATE)` and swallows already-started — the outbox row written by the same transaction guarantees the sweeper always fires, and the duplicate policy makes it a no-op in the overwhelming case. Lands in W3; the interim exposure is accepted. *(As built, W3: a periodic DB scan instead of the event consumer — `order.sweeper.Sweeper` in the API process re-runs `saga.start` for PLACED orders older than `sweeper_min_age_seconds` (60s), every `sweeper_interval_seconds` (30s), over the partial index `ix_orders_sweeper`. Deliberate deviation: the consumer variant would ride the ADR-0021 runtime, whose bounded-retry-then-DLQ would PARK a heal when Temporal is down — losing it until manual replay. A healer must retry forever; the scan does, with the committed row itself as the durable to-do. The REJECT_DUPLICATE + swallow contract is identical.)*
+**Placement is the saga's first step (ADR-0023, as built 2026-08-18).** There is no commit→start gap to heal any more, and no sweeper: `POST /v1/orders` reserves the idempotency key, resolves the address, snapshots the menu and prices the cart in-process — every fixable refusal stays a synchronous 4xx — then calls `execute_update_with_start_workflow`, which starts `ord::{order_id}` and awaits the `await_placement` update in ONE RPC. The workflow's first activity, `create_order`, writes the order + line snapshots + `OrderPlaced` outbox row + the idempotency completion in one transaction and the update resolves with the order's status, which becomes the 202. Two properties carry the design: order ids are **derived** (`uuid5(NS, "{scope}:{idem_key}")`), so a stale-key takeover converges on the same row and workflow instead of forking a second order; and the key is **never released once the start RPC is attempted**, so a retry waits (409) or takes over onto the same id. Awaiting longer than `placement_await_seconds` (2s) answers 202 anyway — the workflow is durable — at the cost of a brief 404 window on the order read. *(Accepted cost: Temporal is now a checkout-availability dependency — its outage is a 503 on placement. Previously the API committed first and `order.sweeper.Sweeper` re-ran `saga.start` over `ix_orders_sweeper`; that design, its trade-offs and the revisit triggers are in [placement-initiation-options.md](placement-initiation-options.md).)*
+
+**Retry policy is split by direction (as built).** Compensations retry **forever** (5-min cap) — dropping an unwind strands money or stock. The pre-confirmation **forward** steps (`ValidateAndReserve`, `AuthorizePayment`, `ConfirmOrder`) instead carry a `schedule_to_close` deadline (`forward_deadline_s`, default 300s) and, when it expires, unwind into `CANCELLED` with `cancel_reason=system_timeout`. The bound exists because those steps hold a stock reservation the inventory reaper releases at 1800s: an unbounded retry could still be authorizing a card against stock somebody else now owns. `CreateOrder` and the post-accept steps (`MarkAccepted`, `CapturePayment`, `SettleOrder`) stay unbounded — the first holds nothing (and a failure there would permanently poison its idempotency key), the others come after the food exists, where a robot's timeout is worse than a human's attention.
 
 **Money rules.** Only Payment imports the PSP adapter (the `PaymentGateway` port — no other service touches it); money is integer minor units end-to-end (a float anywhere near money fails lint); clients never assert amounts — requests carry item IDs + quantities, and every charge and refund derives from the immutable pricing snapshot.
 
@@ -754,7 +756,7 @@ Degradation order (steps 1–4 automated, 5–6 ops-approved):
 | [repo-structure.md](repo-structure.md) | Monorepo layout (uv workspaces, services/, libs/, deploy/, tools/) |
 | [erd.md](erd.md) | As-built ERD: one diagram per service database + the logical cross-service id references |
 | [flows.md](flows.md) | As-built sequence diagrams: placement, saga, compensation, event pipeline, onboarding — with id formulas and example data |
-| [placement-initiation-options.md](placement-initiation-options.md) | Five ways to wire Temporal into `POST /v1/orders` scored side by side — why placement commits first and the sweeper heals |
+| [placement-initiation-options.md](placement-initiation-options.md) | Five ways to wire Temporal into `POST /v1/orders` scored side by side — the comparison behind ADR-0023 |
 | [architecture-walkthrough.md](architecture-walkthrough.md) | narrative guided tour of this architecture |
 | [service-ownership.md](service-ownership.md) | per-service datastore/topic ownership map |
 | [api-standards.md](api-standards.md) | error envelope, DTO rules, idempotency semantics, API inventory |

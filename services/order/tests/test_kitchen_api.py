@@ -30,8 +30,9 @@ TO_ACCEPTED = [*TO_CONFIRMED, ("CONFIRMED", "ACCEPTED")]
 @pytest.fixture()
 def client(catalog, identity, saga, db_url, make_snapshot):
     catalog.snapshot = make_snapshot()
-    settings = Settings(database_url=db_url, create_all=True, sweeper_interval_seconds=0)
+    settings = Settings(database_url=db_url, create_all=True)
     app = create_app(settings, catalog=catalog, identity=identity, saga=saga)
+    saga.bind(app.state.sessions)  # the double plays the worker (ADR-0023)
     with TestClient(app) as c:
         yield c
 

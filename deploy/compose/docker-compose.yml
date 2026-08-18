@@ -259,6 +259,10 @@ services:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/order
       DATABASE_URL: postgresql+asyncpg://order_svc:order_svc@postgres:5432/order_db
+      # Pre-confirmation saga deadline (see ARCHITECTURE §6.1). Overridable so
+      # a demo can watch the unwind without waiting five real minutes:
+      #   FORWARD_DEADLINE_S=30 make up-m2
+      FORWARD_DEADLINE_S: ${FORWARD_DEADLINE_S:-300}
     command:
       [
         "uv",

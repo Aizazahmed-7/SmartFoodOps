@@ -47,6 +47,10 @@ _CANCEL_BODIES = {
     "payment_declined": "Your card was declined, so the order never reached {name}.",
     "item_unavailable": "Some items just sold out at {name}. Your card was not charged.",
     "at_capacity": "{name} can't take more orders right now. Your card was not charged.",
+    # Pre-confirmation only, and the unwind voids any hold it might have
+    # taken — so "not charged" is a fact here too.
+    "system_timeout": "We couldn't reach {name} in time, so your order was cancelled. "
+    "Your card was not charged.",
 }
 _CANCEL_FALLBACK = "Your order at {name} was cancelled."
 

@@ -995,11 +995,15 @@ name = "smartfood-idempotency"
 version = "0.1.0"
 source = { editable = "libs/smartfood-idempotency" }
 dependencies = [
+    { name = "smartfood-otel" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" }]
+requires-dist = [
+    { name = "smartfood-otel", editable = "libs/smartfood-otel" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
+]
 
 [[package]]
 name = "smartfood-kafka"

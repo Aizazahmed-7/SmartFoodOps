@@ -146,7 +146,10 @@ export type CancelReason =
   | "payment_declined"
   | "restaurant_rejected"
   | "restaurant_timeout"
-  | "customer_cancelled";
+  | "customer_cancelled"
+  // The saga could not finish a pre-confirmation step in time (ADR-0023
+  // follow-up). Pre-kitchen only, and never charged.
+  | "system_timeout";
 
 export interface Totals {
   subtotal_cents: number;

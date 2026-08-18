@@ -1,18 +1,24 @@
 """Domain-level placement: the DB artifacts HTTP can't see — the
 four-writes-one-transaction guarantee, snapshot contents, event identity."""
 
+import datetime as dt
+
+import pytest
 import sqlalchemy as sa
 from order.db import idempotency_keys, metadata, order_items, orders, outbox
-from order.domain.service import OrderService, Placed
+from order.domain.ports import PlacementPending, SagaClosed, SagaUnavailable
+from order.domain.service import OrderService, Placed, order_id_for
 from smartfood_idempotency import IdempotencyStore, body_hash
 from smartfood_outbox import event_id
 from smartfood_pricing import Line, PricingConfig
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-# Deliberately distinct from conftest's fakes — these carry DIFFERENT
-# contracts (static canned answers; a saga that refuses every signal),
-# so they carry different names.
+# The catalog/identity doubles here are deliberately distinct from
+# conftest's — they carry static canned answers. The SAGA double is the
+# shared `saga` fixture, bound to this module's own database: placement
+# runs through the real create_order activity either way (ADR-0023), and
+# two different inlined workers would be two different truths.
 
 
 class StaticCatalog:
@@ -33,24 +39,6 @@ class StaticIdentity:
             "lat": 24.8,
             "lon": 67.0,
         }
-
-
-class NeverSignalsSaga:
-    def __init__(self):
-        self.started: list[str] = []
-
-    async def start(self, order_id):
-        self.started.append(order_id)
-        return True
-
-    async def signal_decision(self, order_id, verdict):
-        raise AssertionError("placement never signals")  # pragma: no cover
-
-    async def signal_food_ready(self, order_id):
-        raise AssertionError("placement never signals")  # pragma: no cover
-
-    async def signal_cancel(self, order_id):
-        raise AssertionError("placement never signals")  # pragma: no cover
 
 
 def _menu_items():
@@ -75,14 +63,14 @@ def _menu_items():
     ]
 
 
-async def _service(make_snapshot):
+async def _service(make_snapshot, saga):
     engine = create_async_engine(
         "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
     async with engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    saga = NeverSignalsSaga()
+    saga.bind(sessions)  # the double runs the real create_order activity
     service = OrderService(
         StaticCatalog(make_snapshot(items=_menu_items())),
         pricing=PricingConfig(delivery_fee_cents=199, tax_basis_points=825),
@@ -119,8 +107,10 @@ async def _place(service, key="k1"):
     )
 
 
-async def test_placement_writes_all_four_artifacts_in_one_commit(make_snapshot):
-    service, sessions, saga = await _service(make_snapshot)
+async def test_placement_writes_all_four_artifacts_in_one_commit(make_snapshot, saga):
+    """Unchanged guarantee, new author: the four writes now happen inside
+    the saga's create_order activity, and they still commit together."""
+    service, sessions, saga = await _service(make_snapshot, saga)
     outcome = await _place(service)
     assert isinstance(outcome, Placed)
 
@@ -162,11 +152,14 @@ async def test_placement_writes_all_four_artifacts_in_one_commit(make_snapshot):
     assert idem.status == "COMPLETE"
     assert idem.response_body == {"order_id": order.order_id, "status": "PLACED"}
 
-    assert saga.started == [order.order_id]
+    assert saga.placed == [order.order_id]
+    # The id is DERIVED from the key, not random — this is the property the
+    # whole retry story rests on (ADR-0023).
+    assert order.order_id == order_id_for("usr_1", "k1")
 
 
-async def test_replay_never_touches_the_database_again(make_snapshot):
-    service, sessions, saga = await _service(make_snapshot)
+async def test_replay_never_touches_the_database_again(make_snapshot, saga):
+    service, sessions, saga = await _service(make_snapshot, saga)
     first = await _place(service)
     replay = await _place(service)  # same key, same hash
     from smartfood_idempotency import Replay
@@ -176,30 +169,86 @@ async def test_replay_never_touches_the_database_again(make_snapshot):
     async with sessions() as s:
         count = (await s.execute(sa.select(sa.func.count()).select_from(orders))).scalar_one()
     assert count == 1
-    assert len(saga.started) == 1
+    assert len(saga.placed) == 1  # the saga was not asked a second time
 
 
-async def test_saga_outage_still_answers_202_and_the_sweeper_heals(make_snapshot):
-    """The commit→start gap, non-crash flavor: Temporal is down when the
-    post-commit start runs. The order is committed with a stored 202 —
-    a customer-facing 500 would contradict both and invite a duplicate
-    re-order. place() answers the committed truth; the sweeper pays the
-    debt once Temporal returns."""
-    from order.sweeper import Sweeper
+async def test_order_ids_are_derived_from_the_key_not_random():
+    """Same scope + key → same id, always; a different key → a different
+    order. Randomness here would mint a second order on every takeover."""
+    assert order_id_for("usr_1", "k1") == order_id_for("usr_1", "k1")
+    assert order_id_for("usr_1", "k1") != order_id_for("usr_1", "k2")
+    assert order_id_for("usr_1", "k1") != order_id_for("usr_2", "k1")
+    assert order_id_for("usr_1", "k1").startswith("ord_")
 
-    service, sessions, saga = await _service(make_snapshot)
 
-    async def exploding_start(order_id):
-        raise RuntimeError("temporal unreachable")
+async def test_stale_key_takeover_lands_on_the_same_order(make_snapshot, saga):
+    """THE duplicate-order test. Placement's first attempt dies with the key
+    reserved but no order (Temporal unreachable). Five minutes later the
+    customer retries the same key: the store's stale-IN_PROGRESS takeover
+    hands the key back, placement runs again — and must converge on the
+    same order id, so the second run adopts the first one's row instead of
+    creating a second dinner."""
+    service, sessions, saga = await _service(make_snapshot, saga)
 
-    saga.start = exploding_start
-    outcome = await _place(service)
-    assert isinstance(outcome, Placed)  # the 202 body — not an INTERNAL 500
+    saga.fail_place = SagaUnavailable("temporal unreachable")
+    with pytest.raises(SagaUnavailable):
+        await _place(service)
     async with sessions() as s:
-        status = (await s.execute(sa.select(orders.c.status))).scalar_one()
-    assert status == "PLACED"
+        assert (await s.execute(sa.select(sa.func.count()).select_from(orders))).scalar_one() == 0
+        # The key is NOT released: a fresh key would mean a fresh order id.
+        assert (await s.execute(sa.select(idempotency_keys.c.status))).scalar_one() == "IN_PROGRESS"
 
-    healer = NeverSignalsSaga()
-    swept = await Sweeper(sessions, healer, min_age_seconds=0).sweep_once()
-    assert swept == 1
-    assert healer.started == [outcome.order_id]
+    # Age the reservation past the takeover TTL (300s) — what waiting does.
+    async with sessions() as s:
+        await s.execute(
+            idempotency_keys.update().values(
+                created_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=3600)
+            )
+        )
+        await s.commit()
+
+    saga.fail_place = None
+    retry = await _place(service)
+    assert isinstance(retry, Placed)
+    async with sessions() as s:
+        ids = (await s.execute(sa.select(orders.c.order_id))).scalars().all()
+    assert ids == [order_id_for("usr_1", "k1")]  # ONE order, the derived id
+
+
+async def test_slow_worker_answers_pending_without_a_row(make_snapshot, saga):
+    """The await budget expired but the workflow is durable: 202-shaped
+    outcome, no order row YET, key still IN_PROGRESS (so an immediate retry
+    waits rather than forking)."""
+    service, sessions, saga = await _service(make_snapshot, saga)
+    saga.pending = True
+
+    outcome = await _place(service)
+    assert outcome == PlacementPending(order_id_for("usr_1", "k1"))
+    async with sessions() as s:
+        assert (await s.execute(sa.select(sa.func.count()).select_from(orders))).scalar_one() == 0
+        assert (await s.execute(sa.select(idempotency_keys.c.status))).scalar_one() == "IN_PROGRESS"
+
+
+async def test_closed_saga_adopts_the_order_it_already_made(make_snapshot, saga):
+    """A key reused past its 24h replay TTL derives the id of an order that
+    already ran to completion. REJECT_DUPLICATE refuses the start; the
+    honest answer is that finished order, with its REAL status."""
+    service, sessions, saga = await _service(make_snapshot, saga)
+    first = await _place(service)
+    async with sessions() as s:
+        await s.execute(orders.update().values(status="SETTLED"))
+        await s.execute(idempotency_keys.delete())  # replay TTL expired
+        await s.commit()
+
+    saga.fail_place = SagaClosed(first.order_id)
+    outcome = await _place(service)
+    assert outcome == Placed(order_id=first.order_id, status="SETTLED")
+
+
+async def test_closed_saga_with_no_order_is_an_outage_not_an_answer(make_snapshot, saga):
+    """Same refusal, but nothing was ever written under that id — there is
+    no truthful 202 to give, so it surfaces as a 503-shaped failure."""
+    service, sessions, saga = await _service(make_snapshot, saga)
+    saga.fail_place = SagaClosed("ord_missing")
+    with pytest.raises(SagaUnavailable):
+        await _place(service)

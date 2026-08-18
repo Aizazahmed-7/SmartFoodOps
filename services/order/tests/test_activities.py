@@ -7,10 +7,19 @@ import pytest
 import sqlalchemy as sa
 from order.activities import OrderActivities
 from order.adapters.repo import OrderRepo
-from order.db import metadata, orders, outbox
+from order.db import idempotency_keys, metadata, order_items, orders, outbox
 from order.domain.ports import PaymentStateConflict
 from order.domain.transitions import transition
-from order.values import AuthResult, CancelReason, LineSpec, PriceResult, ReserveResult
+from order.values import (
+    AuthResult,
+    CancelReason,
+    LineSnapshot,
+    LineSpec,
+    PlacementInput,
+    PriceResult,
+    ReserveResult,
+)
+from smartfood_idempotency import IdempotencyStore
 from smartfood_kafka import EventType
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -94,7 +103,10 @@ async def _setup():
         )
         await s.commit()
     inventory, payment = FakeInventory(), FakePayment()
-    return OrderActivities(sessions, inventory, payment), sessions, inventory, payment
+    acts = OrderActivities(
+        sessions, inventory, payment, IdempotencyStore(sessions, idempotency_keys)
+    )
+    return acts, sessions, inventory, payment
 
 
 async def _status(sessions):
@@ -112,17 +124,106 @@ def _price():
     )
 
 
-async def test_price_order_loads_the_snapshot_never_recomputes():
-    acts, _, _, _ = await _setup()
-    price = await acts.price_order("ord_1")
-    assert price == _price()  # exactly the placement snapshot (flag #2)
+def _placement(order_id="ord_2", key="K-2"):
+    return PlacementInput(
+        order_id=order_id,
+        scope="usr_1",
+        idem_key=key,
+        user_id="usr_1",
+        restaurant_id="rst_1",
+        restaurant_name="Biryani House",
+        card_token="tok_ok",
+        menu_version=3,
+        currency="USD",
+        amount_cents=3446,
+        placed_at=datetime.now(UTC).isoformat(),
+        lines=[
+            LineSnapshot(
+                menu_item_id="itm_a",
+                name="Chicken Biryani",
+                unit_price_cents=1500,
+                qty=2,
+                line_total_cents=3000,
+            )
+        ],
+        pricing_snapshot={"total_cents": 3446, "currency": "USD"},
+        address_snapshot={"address_id": "adr_1", "line1": "12 Mango St", "city": "S"},
+    )
 
 
-async def test_price_order_unknown_order_is_non_retryable():
-    acts, _, _, _ = await _setup()
-    with pytest.raises(ApplicationError) as exc:
-        await acts.price_order("ord_ghost")
-    assert exc.value.non_retryable
+async def _reserve_key(sessions, placement):
+    """What the API did before the workflow started: the key exists and is
+    IN_PROGRESS, waiting for the activity to complete it."""
+    await IdempotencyStore(sessions, idempotency_keys).reserve(
+        placement.scope, placement.idem_key, "hash-of-body"
+    )
+
+
+async def test_create_order_writes_the_row_lines_event_and_key():
+    """The activity IS placement now: everything the route used to write,
+    it writes — including the stored 202 that makes replay possible."""
+    acts, sessions, _, _ = await _setup()
+    placement = _placement()
+    await _reserve_key(sessions, placement)
+
+    assert await acts.create_order(placement) == "PLACED"
+
+    async with sessions() as s:
+        order = (await s.execute(sa.select(orders).where(orders.c.order_id == "ord_2"))).one()
+        items = (
+            await s.execute(sa.select(order_items).where(order_items.c.order_id == "ord_2"))
+        ).all()
+        event = (await s.execute(sa.select(outbox).where(outbox.c.aggregate_id == "ord_2"))).one()
+        key = (
+            await s.execute(sa.select(idempotency_keys).where(idempotency_keys.c.idem_key == "K-2"))
+        ).one()
+    assert (order.status, order.aggregate_version) == ("PLACED", 0)
+    assert order.restaurant_name_snapshot == "Biryani House"
+    assert len(items) == 1 and items[0].name_snapshot == "Chicken Biryani"
+    assert event.event_type == EventType.ORDER_PLACED and event.payload["status"] == "PLACED"
+    assert key.status == "COMPLETE" and key.response_status == 202
+    assert key.response_body == {"order_id": "ord_2", "status": "PLACED"}
+
+
+async def test_create_order_run_twice_makes_exactly_one_order():
+    """At-least-once, survived: an activity that commits and then loses its
+    worker is retried with the SAME input. The second run must adopt the
+    row rather than raise or duplicate — this is the property the derived
+    order id buys."""
+    acts, sessions, _, _ = await _setup()
+    placement = _placement()
+    await _reserve_key(sessions, placement)
+
+    assert await acts.create_order(placement) == "PLACED"
+    assert await acts.create_order(placement) == "PLACED"  # the retry
+
+    async with sessions() as s:
+        count = (
+            await s.execute(
+                sa.select(sa.func.count()).select_from(orders).where(orders.c.order_id == "ord_2")
+            )
+        ).scalar_one()
+        events = (
+            await s.execute(
+                sa.select(sa.func.count())
+                .select_from(outbox)
+                .where(outbox.c.aggregate_id == "ord_2")
+            )
+        ).scalar_one()
+    assert (count, events) == (1, 1)  # one order, one OrderPlaced fact
+
+
+async def test_create_order_retry_reports_the_rows_real_status():
+    """If the saga moved on before the retry landed, the answer handed back
+    to any waiting request is the row's ACTUAL state, never a hopeful
+    'PLACED' the database would contradict."""
+    acts, sessions, _, _ = await _setup()
+    placement = _placement()
+    await _reserve_key(sessions, placement)
+    await acts.create_order(placement)
+    await transition(sessions, "ord_2", expected="PLACED", target="VALIDATED")
+
+    assert await acts.create_order(placement) == "VALIDATED"
 
 
 async def test_reserve_ok_transitions_to_validated():

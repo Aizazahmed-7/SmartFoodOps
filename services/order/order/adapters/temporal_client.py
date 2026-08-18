@@ -1,29 +1,44 @@
-"""The real SagaPort — replaces S3's logging stub.
+"""The real SagaPort — placement's front door (ADR-0023).
 
 Starts OrderWorkflow BY STRING NAME so the API process never imports
 workflow code (uvicorn stays sandbox-free; only the worker loads
-workflows.py). Workflow id = ord::{order_id} with REJECT_DUPLICATE:
-Temporal itself referees duplicate starts — the second start of the same
-order attaches nothing and raises AlreadyStarted, which we swallow (the
-placement replay path may legitimately call start twice).
+workflows.py). Workflow id = ord::{order_id}, and since the order id is
+itself derived from the idempotency key, the same intent always addresses
+the same workflow — Temporal referees duplicate placements for us.
+
+Two policies, two different questions, easy to confuse:
+  * id_conflict_policy = USE_EXISTING — "the workflow is RUNNING: attach
+    to it instead of erroring." This is what makes a client retry safe.
+  * id_reuse_policy = REJECT_DUPLICATE — "the workflow is CLOSED: refuse
+    to reuse the id." This is what stops a settled order from being
+    resurrected by a replayed request.
 
 The Temporal connection is lazy: created on first use, cached. create_app
 stays synchronous and tests that never place orders never connect.
 """
 
 import asyncio
+from datetime import timedelta
 
 from smartfood_otel import get_logger
-from temporalio.client import Client
-from temporalio.common import WorkflowIDReusePolicy
+from temporalio.client import (
+    Client,
+    WithStartWorkflowOperation,
+    WorkflowUpdateFailedError,
+    WorkflowUpdateRPCTimeoutOrCancelledError,
+)
+from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
-from ..domain.ports import SagaGone, SagaUnavailable
+from ..domain.ports import PlacementPending, SagaClosed, SagaGone, SagaUnavailable
 from ..values import (
     SIGNAL_CANCEL_REQUESTED,
     SIGNAL_FOOD_READY,
     SIGNAL_RESTAURANT_DECISION,
+    UPDATE_AWAIT_PLACEMENT,
+    PlacementAck,
+    PlacementInput,
     Verdict,
     WorkflowInput,
 )
@@ -40,6 +55,8 @@ class TemporalSaga:
         accept_timeout_s: int,
         pickup_delay_s: int,
         dropoff_delay_s: int,
+        forward_deadline_s: int = 300,
+        await_seconds: float = 2.0,
         client: Client | None = None,  # tests inject; production connects lazily
     ):
         self._address = address
@@ -47,6 +64,8 @@ class TemporalSaga:
         self._accept_timeout_s = accept_timeout_s
         self._pickup_delay_s = pickup_delay_s
         self._dropoff_delay_s = dropoff_delay_s
+        self._forward_deadline_s = forward_deadline_s
+        self._await_seconds = await_seconds
         self._client = client
         self._lock = asyncio.Lock()
 
@@ -58,32 +77,70 @@ class TemporalSaga:
                     self._client = await Client.connect(self._address)
         return self._client
 
-    async def start(self, order_id: str) -> bool:
-        """True = a NEW workflow was started; False = one already exists.
-        Temporal reports ALREADY_EXISTS identically for a running duplicate
-        and for a CLOSED execution rejected by REJECT_DUPLICATE — so False
-        may mean "healthy" or "terminally stuck"; callers that heal (the
-        sweeper) must not claim credit for it."""
+    async def place(self, placement: PlacementInput) -> PlacementAck | PlacementPending:
+        """Start the saga and wait for it to make the order (ADR-0023).
+
+        ONE RPC does both. execute_update_with_start_workflow sends the
+        start and the await_placement update together (Temporal calls this
+        ExecuteMultiOperation) and returns when the UPDATE resolves — which
+        the workflow does the moment create_order commits. Sending them
+        separately would open a gap where the start succeeded and the update
+        never got sent, which is the exact class of hole this design set out
+        to close.
+
+        rpc_timeout is the customer's patience, not the workflow's: when it
+        expires the placement is still durably running, so we answer
+        PlacementPending rather than an error."""
         client = await self._connect()
+        start = WithStartWorkflowOperation(
+            "OrderWorkflow",
+            WorkflowInput(
+                placement=placement,
+                accept_timeout_s=self._accept_timeout_s,
+                pickup_delay_s=self._pickup_delay_s,
+                dropoff_delay_s=self._dropoff_delay_s,
+                forward_deadline_s=self._forward_deadline_s,
+            ),
+            id=f"ord::{placement.order_id}",
+            task_queue=self._task_queue,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+        )
         try:
-            await client.start_workflow(
-                "OrderWorkflow",
-                WorkflowInput(
-                    order_id=order_id,
-                    accept_timeout_s=self._accept_timeout_s,
-                    pickup_delay_s=self._pickup_delay_s,
-                    dropoff_delay_s=self._dropoff_delay_s,
-                ),
-                id=f"ord::{order_id}",
-                task_queue=self._task_queue,
-                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            ack = await client.execute_update_with_start_workflow(
+                UPDATE_AWAIT_PLACEMENT,
+                start_workflow_operation=start,
+                result_type=PlacementAck,  # by-name call: name the shape
+                rpc_timeout=timedelta(seconds=self._await_seconds),
             )
-            log.info("saga started", order_id=order_id)
-            return True
+        except WorkflowUpdateRPCTimeoutOrCancelledError:
+            log.warning(
+                "placement await timed out — workflow continues", order_id=placement.order_id
+            )
+            return PlacementPending(placement.order_id)
+        except WorkflowUpdateFailedError as exc:
+            # The update itself failed — reachable only if create_order ever
+            # gains a non-retryable failure (today it has none, so a broken
+            # database means infinite retries and a PlacementPending answer
+            # instead). Mapping it keeps that future change from surfacing as
+            # a raw 500: the customer is told "try again", which is true.
+            log.warning("placement update failed", order_id=placement.order_id, error=str(exc))
+            raise SagaUnavailable(str(exc)) from None
         except WorkflowAlreadyStartedError:
-            # The idempotent-replay path: the workflow exists; that IS the goal.
-            log.info("saga already running", order_id=order_id)
-            return False
+            # REJECT_DUPLICATE refused a CLOSED execution: this key was
+            # reused after its replay TTL. The domain owns the answer (the
+            # old order, if it is still there) because it owns the database.
+            raise SagaClosed(placement.order_id) from None
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.DEADLINE_EXCEEDED:
+                return PlacementPending(placement.order_id)
+            if exc.status == RPCStatusCode.ALREADY_EXISTS:
+                raise SagaClosed(placement.order_id) from None
+            raise SagaUnavailable(str(exc)) from None
+        except OSError as exc:  # DNS/socket failures below the RPC layer
+            raise SagaUnavailable(str(exc)) from None
+        log.info("saga placed", order_id=placement.order_id, status=ack.status)
+        return ack
 
     async def signal_decision(self, order_id: str, verdict: Verdict) -> None:
         await self._signal(f"ord::{order_id}", SIGNAL_RESTAURANT_DECISION, verdict)

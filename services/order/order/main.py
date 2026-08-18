@@ -1,9 +1,9 @@
 """Order service — the state-machine owner (docs/service-ownership.md).
 
-S3 scope: quote + idempotent placement + reads, outbox → c1.orders.events.
-The saga port is a logging stub until S5 wires Temporal. Flag #7: only THIS
-process runs the OutboxPoller (single-instance ordering); the worker
-process only stages rows.
+Scope: quote + idempotent placement + reads, outbox → c1.orders.events.
+Flag #7: only THIS process runs the OutboxPoller (single-instance
+ordering); the worker process only stages rows — including, since
+ADR-0023, the OrderPlaced row its create_order activity writes.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 import httpx
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers
-from smartfood_idempotency import IdempotencyStore
+from smartfood_idempotency import IdempotencyJanitor, IdempotencyStore
 from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, Topic, topic
 from smartfood_otel import RequestContextMiddleware, setup_logging
 from smartfood_outbox import OutboxPoller
@@ -30,7 +30,6 @@ from .db import idempotency_keys, metadata, outbox
 from .domain.kitchen import KitchenService
 from .domain.ports import CatalogPort, IdentityPort, SagaPort
 from .domain.service import OrderService
-from .sweeper import Sweeper
 
 
 def _run_migrations(database_url: str) -> None:  # pragma: no cover — Postgres-only path,
@@ -53,7 +52,6 @@ def create_app(
     identity: IdentityPort | None = None,
     saga: SagaPort | None = None,
     poller: OutboxPoller | None = None,
-    sweeper: Sweeper | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("order")
@@ -83,17 +81,18 @@ def create_app(
             accept_timeout_s=settings.accept_timeout_s,
             pickup_delay_s=settings.pickup_delay_s,
             dropoff_delay_s=settings.dropoff_delay_s,
+            forward_deadline_s=settings.forward_deadline_s,
+            await_seconds=settings.placement_await_seconds,
         )
 
-    if sweeper is None:
-        # Shares whatever saga port the app resolved above (real or fake),
-        # so a sweep and a placement can never disagree about Temporal.
-        sweeper = Sweeper(
-            sessions,
-            saga,
-            interval_seconds=settings.sweeper_interval_seconds,
-            min_age_seconds=settings.sweeper_min_age_seconds,
-        )
+    idempotency = IdempotencyStore(
+        sessions, idempotency_keys, in_progress_ttl_seconds=settings.placement_key_ttl_seconds
+    )
+    janitor = IdempotencyJanitor(
+        idempotency,
+        interval_seconds=settings.idempotency_purge_interval_seconds,
+        orphan_ttl_seconds=settings.idempotency_orphan_ttl_seconds,
+    )
 
     events_topic = topic(settings.cell_id, Topic.ORDERS_EVENTS)
     own_producer: EventProducer | None = None
@@ -117,8 +116,8 @@ def create_app(
             if own_producer is not None:  # pragma: no cover — live path
                 await own_producer.start()
             tasks.append(asyncio.create_task(poller.run()))
-        if settings.sweeper_interval_seconds > 0:
-            tasks.append(asyncio.create_task(sweeper.run()))
+        if settings.idempotency_purge_interval_seconds > 0:
+            tasks.append(asyncio.create_task(janitor.run()))
         yield
         for task in tasks:
             task.cancel()  # cancellation IS the tasks' shutdown signal
@@ -134,6 +133,10 @@ def create_app(
     app = FastAPI(title="order", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
+    # Exposed for the same reason state.service is: it is this app's one
+    # database handle. Tests bind their in-process saga double to it so
+    # placement writes land in the app's own (in-memory) database.
+    app.state.sessions = sessions
     app.state.service = OrderService(
         catalog,
         pricing=PricingConfig(
@@ -143,7 +146,7 @@ def create_app(
         sessions=sessions,
         identity=identity,
         saga=saga,
-        idempotency=IdempotencyStore(sessions, idempotency_keys),
+        idempotency=idempotency,
     )
     app.state.kitchen = KitchenService(sessions, saga=saga)
     app.include_router(router)

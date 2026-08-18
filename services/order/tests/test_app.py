@@ -12,9 +12,7 @@ def test_healthz(client):
 def test_app_builds_real_catalog_client_when_none_injected():
     """No catalog injected → the app constructs the real adapter and owns
     its http client's lifecycle (closed on shutdown without error)."""
-    app = create_app(
-        Settings(database_url="sqlite+aiosqlite://", create_all=True, sweeper_interval_seconds=0)
-    )
+    app = create_app(Settings(database_url="sqlite+aiosqlite://", create_all=True))
     with TestClient(app) as c:
         assert c.get("/healthz").status_code == 200
     # exiting the context ran the lifespan shutdown — own_http.aclose()
@@ -27,36 +25,156 @@ def test_worker_module_importable():
     assert callable(worker.main) and callable(worker.build_worker)
 
 
-async def test_temporal_saga_starts_by_name_and_swallows_duplicates():
+def _placement(order_id="ord_1"):
+    from order.values import PlacementInput
+
+    return PlacementInput(
+        order_id=order_id,
+        scope="usr_1",
+        idem_key="K-1",
+        user_id="usr_1",
+        restaurant_id="rst_1",
+        restaurant_name="Biryani House",
+        card_token="tok_ok",
+        menu_version=3,
+        currency="USD",
+        amount_cents=1500,
+        placed_at="2026-08-18T10:00:00+00:00",
+    )
+
+
+def _started(operation):
+    """The start half of an update-with-start, as the SDK recorded it.
+    Private attribute on purpose: there is no public accessor, and the id
+    and policies are exactly the contract worth pinning."""
+    return operation._start_workflow_input
+
+
+def _place_saga(*, answer=None, raises=None):
+    """A TemporalSaga whose one RPC either returns `answer` or raises."""
     from order.adapters.temporal_client import TemporalSaga
-    from order.values import WorkflowInput
-    from temporalio.exceptions import WorkflowAlreadyStartedError
+
+    calls: list = []
 
     class FakeClient:
-        def __init__(self):
-            self.calls: list = []
+        async def execute_update_with_start_workflow(
+            self, update, *, start_workflow_operation, result_type, rpc_timeout
+        ):
+            calls.append((update, start_workflow_operation, rpc_timeout))
+            if raises is not None:
+                raise raises
+            return answer
 
-        async def start_workflow(self, name, arg, *, id, task_queue, id_reuse_policy):
-            self.calls.append((name, arg, id, task_queue))
-            if len(self.calls) > 1:
-                raise WorkflowAlreadyStartedError(id, name)
-
-    fake = FakeClient()
     saga = TemporalSaga(
         "unused:7233",
         task_queue="order-tq",
         accept_timeout_s=180,
         pickup_delay_s=20,
         dropoff_delay_s=30,
-        client=fake,  # type: ignore[arg-type]
+        await_seconds=2.0,
+        client=FakeClient(),  # type: ignore[arg-type]
     )
-    await saga.start("ord_1")
-    await saga.start("ord_1")  # duplicate — swallowed, not raised
-    name, arg, workflow_id, task_queue = fake.calls[0]
-    assert name == "OrderWorkflow"
-    assert isinstance(arg, WorkflowInput) and arg.order_id == "ord_1"
-    assert (workflow_id, task_queue) == ("ord::ord_1", "order-tq")
-    assert len(fake.calls) == 2
+    return saga, calls
+
+
+async def test_place_sends_start_and_update_as_one_call():
+    """The id contracts ADR-0023 rests on: workflow id ord::{order_id},
+    the placement rides in the START operation, and the update we await is
+    await_placement — one RPC, so a started workflow can never be left
+    without the request that is waiting on it."""
+    from datetime import timedelta
+
+    from order.values import UPDATE_AWAIT_PLACEMENT, PlacementAck, WorkflowInput
+
+    saga, calls = _place_saga(answer=PlacementAck(order_id="ord_1", status="PLACED"))
+    ack = await saga.place(_placement())
+
+    assert ack == PlacementAck(order_id="ord_1", status="PLACED")
+    update, start, rpc_timeout = calls[0]
+    assert update == UPDATE_AWAIT_PLACEMENT
+    started = _started(start)
+    assert started.id == "ord::ord_1" and started.task_queue == "order-tq"
+    assert isinstance(started.args[0], WorkflowInput)
+    assert started.args[0].placement.order_id == "ord_1"
+    assert rpc_timeout == timedelta(seconds=2.0)
+
+
+async def test_place_reuse_and_conflict_policies_are_pinned():
+    """USE_EXISTING (running → attach) and REJECT_DUPLICATE (closed →
+    refuse) answer different questions; swapping either one silently
+    changes what a retried placement does."""
+    from order.values import PlacementAck
+    from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+
+    saga, calls = _place_saga(answer=PlacementAck(order_id="ord_1", status="PLACED"))
+    await saga.place(_placement())
+    started = _started(calls[0][1])
+    assert started.id_conflict_policy == WorkflowIDConflictPolicy.USE_EXISTING
+    assert started.id_reuse_policy == WorkflowIDReusePolicy.REJECT_DUPLICATE
+
+
+async def test_place_timeouts_are_pending_not_failures():
+    """Both flavours of "we stopped waiting" — the SDK's update-timeout and
+    a raw DEADLINE_EXCEEDED — mean the workflow is still running. Answering
+    anything but PlacementPending here would invite a duplicate order."""
+    from order.domain.ports import PlacementPending
+    from temporalio.client import WorkflowUpdateRPCTimeoutOrCancelledError
+    from temporalio.service import RPCError, RPCStatusCode
+
+    for failure in (
+        WorkflowUpdateRPCTimeoutOrCancelledError(),
+        RPCError("deadline", RPCStatusCode.DEADLINE_EXCEEDED, b""),
+    ):
+        saga, _ = _place_saga(raises=failure)
+        assert await saga.place(_placement()) == PlacementPending("ord_1")
+
+
+async def test_place_on_a_closed_workflow_asks_the_domain():
+    """REJECT_DUPLICATE refusing a finished execution is not an outage —
+    it is a reused key pointing at an order that already ran. The adapter
+    has no database, so it names the case and the domain answers it."""
+    import pytest
+    from order.domain.ports import SagaClosed
+    from temporalio.exceptions import WorkflowAlreadyStartedError
+    from temporalio.service import RPCError, RPCStatusCode
+
+    for failure in (
+        WorkflowAlreadyStartedError("ord::ord_1", "OrderWorkflow"),
+        RPCError("exists", RPCStatusCode.ALREADY_EXISTS, b""),
+    ):
+        saga, _ = _place_saga(raises=failure)
+        with pytest.raises(SagaClosed):
+            await saga.place(_placement())
+
+
+async def test_place_update_failure_is_saga_unavailable_not_a_500():
+    """If create_order ever gains a non-retryable failure, the pending
+    update fails. That must reach the customer as the domain's 503 —
+    "try again" — never as a raw exception the route turns into a 500."""
+    import pytest
+    from order.domain.ports import SagaUnavailable
+    from temporalio.client import WorkflowUpdateFailedError
+
+    saga, _ = _place_saga(raises=WorkflowUpdateFailedError(RuntimeError("activity failed")))
+    with pytest.raises(SagaUnavailable):
+        await saga.place(_placement())
+
+
+async def test_place_transport_failures_are_saga_unavailable():
+    """Temporal is on the checkout path now: its outage must arrive as the
+    domain's 503, never as a raw exception (a 500 would tell the customer
+    to re-order)."""
+    import pytest
+    from order.domain.ports import SagaUnavailable
+    from temporalio.service import RPCError, RPCStatusCode
+
+    for failure in (
+        RPCError("conn refused", RPCStatusCode.UNAVAILABLE, b""),
+        OSError("dns says no"),
+    ):
+        saga, _ = _place_saga(raises=failure)
+        with pytest.raises(SagaUnavailable):
+            await saga.place(_placement())
 
 
 def _signal_saga(fail_with=None):
@@ -162,9 +280,37 @@ def test_injected_poller_lives_and_dies_with_the_app():
 
     poller = StubPoller()
     app = create_app(
-        Settings(database_url="sqlite+aiosqlite://", create_all=True, sweeper_interval_seconds=0),
+        Settings(database_url="sqlite+aiosqlite://", create_all=True),
         poller=poller,  # type: ignore[arg-type]
     )
     with TestClient(app):
         pass
     assert poller.started and poller.cancelled
+
+
+def test_idempotency_janitor_is_gated_off_when_disabled():
+    """Interval 0 = no janitor task (the same gate the old sweeper needed:
+    a background writer sharing a sqlite StaticPool with requests is a
+    race, not a feature). The default path is exercised by every other
+    app test — the janitor sleeps first, so it never ticks in a suite."""
+    app = create_app(
+        Settings(
+            database_url="sqlite+aiosqlite://",
+            create_all=True,
+            idempotency_purge_interval_seconds=0,
+        )
+    )
+    with TestClient(app) as c:
+        assert c.get("/healthz").status_code == 200
+
+
+def test_placement_keys_use_the_short_takeover_ttl():
+    """The 30s default is load-bearing UX (ADR-0023): after a Temporal
+    outage the customer would otherwise be locked out of THAT cart for the
+    library's 300s. Pinning the wiring keeps a config rename from silently
+    restoring the long window."""
+    from datetime import timedelta
+
+    app = create_app(Settings(database_url="sqlite+aiosqlite://", create_all=True))
+    store = app.state.service._idempotency
+    assert store._in_progress_ttl == timedelta(seconds=30)
