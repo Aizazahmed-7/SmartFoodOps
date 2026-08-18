@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from .api.routes import router
 from .config import Settings
-from .db import metadata
+from .db import metadata, seed_roles
 from .domain.service import IdentityService
 from .keys import load_or_generate
 
@@ -50,6 +50,9 @@ def create_app(
         else:
             # Alembic manages its own (sync) connection; run it off the event loop.
             await asyncio.to_thread(_run_migrations, settings.database_url)  # pragma: no cover
+        # Every boot, both paths: the roles lookup converges to the Role
+        # enum (ADR-0022) — a new member can never be forgotten in a deploy.
+        await seed_roles(engine)
         consumer_task: asyncio.Task[None] | None = None
         live_consumer = consumer
         if live_consumer is None and settings.kafka_consumers == "on":  # pragma: no cover

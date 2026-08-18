@@ -752,6 +752,9 @@ Degradation order (steps 1–4 automated, 5–6 ops-approved):
 | [capacity-plan.md](capacity-plan.md) | Cell-ceiling math with assumptions (Aurora, Kafka, Redis, DDB, gateways, OSRM, Temporal) |
 | [local-dev.md](local-dev.md) | Compose profiles, port map, slim mode, simulators, chaos suite, first-30-minutes tour |
 | [repo-structure.md](repo-structure.md) | Monorepo layout (uv workspaces, services/, libs/, deploy/, tools/) |
+| [erd.md](erd.md) | As-built ERD: one diagram per service database + the logical cross-service id references |
+| [flows.md](flows.md) | As-built sequence diagrams: placement, saga, compensation, event pipeline, onboarding — with id formulas and example data |
+| [placement-initiation-options.md](placement-initiation-options.md) | Five ways to wire Temporal into `POST /v1/orders` scored side by side — why placement commits first and the sweeper heals |
 | [architecture-walkthrough.md](architecture-walkthrough.md) | narrative guided tour of this architecture |
 | [service-ownership.md](service-ownership.md) | per-service datastore/topic ownership map |
 | [api-standards.md](api-standards.md) | error envelope, DTO rules, idempotency semantics, API inventory |

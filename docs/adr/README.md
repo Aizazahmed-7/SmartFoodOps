@@ -25,5 +25,6 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0019](0019-search-postgres-fts-first-opensearch-behind-port.md) | Search: Postgres FTS + trigram first, OpenSearch behind a port later | Accepted |
 | [0020](0020-onboarding-consistency-outbox-convergence-not-temporal.md) | Onboarding consistency: sync grant + outbox convergence, not Temporal | Accepted |
 | [0021](0021-consumer-failure-policy-bounded-retry-then-dlq.md) | Consumer failure policy: supervised loop, bounded retry, then DLQ | Accepted |
+| [0022](0022-roles-as-seeded-lookup-table.md) | Roles as a seeded lookup table, pinned to the enum | Accepted |
 
 **Conventions**: files are `NNNN-kebab-title.md`; numbers are never reused. Superseding an ADR = new ADR + status change here, never editing the old decision.
