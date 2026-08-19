@@ -1,0 +1,2365 @@
+{
+  "info": {
+    "name": "SmartFoodOps \u2014 panel demo (success + failure catalog)",
+    "description": "Run folders 00\u219206 top-to-bottom, one Send at a time; 07 is optional chaos theater with docker commands in each description.\n\nPrereqs: `make up-m3 && make seed` (m3 = the m2 set + the notification service the bell folder needs) \u2014 gateway on localhost:8080.\n\nEvery request carries PASS/FAIL tests (open the Test Results tab) and chains its captures (tokens, ids) into collection variables \u2014 nothing is pasted by hand. The placement folder PREDICTS each order id locally with uuid5(sub:key) before the server sees the request \u2014 open the Postman Console to narrate it.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    }
+  ],
+  "item": [
+    {
+      "name": "00 \u00b7 Cast & stage",
+      "description": "Run top to bottom once. Captures every id and token the rest of the demo chains on \u2014 nothing is pasted by hand.",
+      "item": [
+        {
+          "name": "Smoke: browse restaurants (captures restaurantId)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/restaurants?city=springfield",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "restaurants"
+              ],
+              "query": [
+                {
+                  "key": "city",
+                  "value": "springfield"
+                }
+              ]
+            },
+            "description": "Gateway \u2192 catalog. Grabs Biryani House's id for everything that follows."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with restaurants', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json().restaurants.find(x => x.name === 'Biryani House');",
+                  "pm.test('Biryani House exists (make seed)', () => pm.expect(r).to.not.be.undefined);",
+                  "pm.collectionVariables.set('restaurantId', r.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login: demo customer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "The seeded customer. The test decodes the JWT's sub \u2014 it becomes half of the derived order id.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"customer@demo.smartfood.dev\",\n  \"password\": \"demo1234demo\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "function subOf(token) {",
+                  "  const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');",
+                  "  const pad = b64 + '='.repeat((4 - b64.length % 4) % 4);",
+                  "  const CryptoJS = require('crypto-js');",
+                  "  return JSON.parse(CryptoJS.enc.Base64.parse(pad).toString(CryptoJS.enc.Utf8)).sub;",
+                  "}",
+                  "pm.test('200 token pair', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('customerToken', b.access_token);",
+                  "pm.collectionVariables.set('customerSub', subOf(b.access_token));",
+                  "pm.test('JWT carries sub + role', () => pm.expect(pm.collectionVariables.get('customerSub')).to.match(/^usr_/));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login: restaurant owner",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"owner-springfield-biryani-house@demo.smartfood.dev\",\n  \"password\": \"demo1234demo\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('ownerToken', pm.response.json().access_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Customer's saved address (captures addressId)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/me/addresses",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "me",
+                "addresses"
+              ]
+            },
+            "description": "Placement sends address_id only \u2014 the server resolves content (api-standards \u00a73)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with an address', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('addressId', pm.response.json()[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Menu (captures itemId + menuVersion)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/menus/{{restaurantId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "menus",
+                "{{restaurantId}}"
+              ]
+            },
+            "description": "menuVersion is the client's price consent \u2014 placement pins it; drift \u2192 PRICE_CHANGED."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const m = pm.response.json();",
+                  "pm.collectionVariables.set('menuVersion', m.version);",
+                  "let pick = null;",
+                  "for (const c of m.categories) for (const i of c.items) {",
+                  "  const required = (i.modifier_groups || []).some(g => g.min_select > 0);",
+                  "  if (i.available !== false && !required && !pick) pick = i;",
+                  "}",
+                  "pm.test('found a modifier-free item', () => pm.expect(pick).to.not.be.null);",
+                  "pm.collectionVariables.set('itemId', pick.id);",
+                  "pm.collectionVariables.set('itemPrice', pick.price_cents);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "01 \u00b7 Auth \u2014 rotation & theft detection",
+      "description": "Runs on a THROWAWAY user (minted in step 1) so killing its session never hurts the demo customer.",
+      "item": [
+        {
+          "name": "Register a throwaway panelist \u2192 202",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "auth",
+                "register"
+              ]
+            },
+            "description": "202: registration is accepted, not logged-in \u2014 tokens come from login.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{panelEmail}}\",\n  \"password\": \"panel-demo-12345\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('panelEmail', `panel-${Date.now()}@demo.smartfood.dev`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login panelist (token pair)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{panelEmail}}\",\n  \"password\": \"panel-demo-12345\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('panelAccess', b.access_token);",
+                  "pm.collectionVariables.set('panelRefresh', b.refresh_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wrong password \u2192 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "auth",
+                "login"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{panelEmail}}\",\n  \"password\": \"wrong-password-1\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 AUTH_INVALID_CREDENTIALS', () => {",
+                  "  pm.response.to.have.status(401);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('AUTH_INVALID_CREDENTIALS');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Who am I",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{panelAccess}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "auth",
+                "me"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, role customer', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().role).to.eql('customer');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rotate the refresh token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Rotation: the old token is marked used, a new one is issued \u2014 SAME family lineage.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{panelRefresh}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('panelOldRefresh', pm.collectionVariables.get('panelRefresh'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 rotated', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('panelRefresh', pm.response.json().refresh_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Replay the OLD refresh (theft signal) \u2192 401 + family killed",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "A rotated token coming back = someone has a stolen copy. The ENTIRE family is revoked \u2014 attacker and victim both logged out.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{panelOldRefresh}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 AUTH_REFRESH_REUSED', () => {",
+                  "  pm.response.to.have.status(401);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('AUTH_REFRESH_REUSED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Even the NEWEST token is dead now \u2192 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "The blast radius of reuse detection is the whole family \u2014 the legitimate holder must log in again.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{panelRefresh}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 \u2014 family revoked', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 \u00b7 Quote \u2014 the server is the only pricer",
+      "description": "Every refusal is synchronous and coded. The pause/resume pair needs the owner (already logged in).",
+      "item": [
+        {
+          "name": "Quote \u2192 200 with server-priced totals",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/quote",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "quote"
+              ]
+            },
+            "description": "Client sends ids + quantities ONLY. Integer cents everywhere.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 2\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const t = pm.response.json().totals;",
+                  "pm.test('total = subtotal + fee + tax \u2212 discount', () =>",
+                  "  pm.expect(t.total_cents).to.eql(t.subtotal_cents + t.fee_cents + t.tax_cents - t.discount_cents));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown restaurant \u2192 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/quote",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "quote"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"rst_does_not_exist\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 NOT_FOUND', () => { pm.response.to.have.status(404); pm.expect(pm.response.json().error.code).to.eql('NOT_FOUND'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ghost item \u2192 409 ITEM_UNAVAILABLE",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/quote",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "quote"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"lines\": [\n    {\n      \"item_id\": \"itm_ghost\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 ITEM_UNAVAILABLE with the item named', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  const e = pm.response.json().error;",
+                  "  pm.expect(e.code).to.eql('ITEM_UNAVAILABLE');",
+                  "  pm.expect(JSON.stringify(e.details)).to.include('itm_ghost');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "qty 0 \u2192 422 (StrictModel bounds)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/quote",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "quote"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 0\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 VALIDATION_FAILED', () => { pm.response.to.have.status(422); pm.expect(pm.response.json().error.code).to.eql('VALIDATION_FAILED'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Owner pauses the restaurant",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/restaurants/{{restaurantId}}/pause",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "restaurants",
+                "{{restaurantId}}",
+                "pause"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 paused', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Quote while paused \u2192 409 RESTAURANT_CLOSED",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/quote",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "quote"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 RESTAURANT_CLOSED', () => { pm.response.to.have.status(409); pm.expect(pm.response.json().error.code).to.eql('RESTAURANT_CLOSED'); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Owner resumes (cleanup)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/restaurants/{{restaurantId}}/resume",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "restaurants",
+                "{{restaurantId}}",
+                "resume"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 open again', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Re-pin menuVersion (pause/resume BUMPED it)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/menus/{{restaurantId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "menus",
+                "{{restaurantId}}"
+              ]
+            },
+            "description": "Teaching moment: pause and resume are menu-affecting events, so the catalog version just bumped TWICE. Every placement pins menu_version as price consent \u2014 skip this re-pin and the next folder would (correctly!) refuse with 409 PRICE_CHANGED. That refusal working is the feature; this request is the client's re-quote step."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 \u2014 fresh version pinned', () => pm.response.to.have.status(200));",
+                  "const v = pm.response.json().version;",
+                  "console.log('menuVersion re-pinned:', pm.collectionVariables.get('menuVersion'), '\u2192', v);",
+                  "pm.collectionVariables.set('menuVersion', v);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 \u00b7 Placement \u2014 the orders row IS the record (ADR-0024)",
+      "description": "The star section. The pre-request script PREDICTS the order id with uuid5(sub:key) before the server ever sees the request \u2014 then the tests hold the server to it. Run in order.",
+      "item": [
+        {
+          "name": "Missing Idempotency-Key \u2192 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "The key is the DERIVATION SEED for the order id \u2014 placement refuses to run without it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 with the header named', () => {",
+                  "  pm.response.to.have.status(422);",
+                  "  pm.expect(JSON.stringify(pm.response.json().error.details)).to.include('Idempotency-Key');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Place order A \u2192 202 on the PREDICTED id",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKeyA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Pre-request computes ord_ + uuid5(NS, sub:key) locally (open the Console to see it). The test asserts the server minted EXACTLY that id \u2014 the property every retry guarantee rests on.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// uuid5(namespace, name) \u2014 same math as Python's uuid.uuid5 (verified byte-for-byte).",
+                  "const CryptoJS = require('crypto-js');",
+                  "function uuid5hex(nsHex, name) {",
+                  "  const words = CryptoJS.enc.Hex.parse(nsHex).concat(CryptoJS.enc.Utf8.parse(name));",
+                  "  const hex = CryptoJS.SHA1(words).toString(CryptoJS.enc.Hex).slice(0, 32).split('');",
+                  "  hex[12] = '5';",
+                  "  hex[16] = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);",
+                  "  return hex.join('');",
+                  "}",
+                  "const key = pm.variables.replaceIn('{{$guid}}');",
+                  "pm.collectionVariables.set('idemKeyA', key);",
+                  "const sub = pm.collectionVariables.get('customerSub');",
+                  "const predicted = 'ord_' + uuid5hex('9f2c7b416d3e4a588c0f1e7b5a2d9c34', sub + ':' + key);",
+                  "pm.collectionVariables.set('predictedA', predicted);",
+                  "console.log('PREDICTED order id (computed in Postman, before the request):', predicted);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 PLACED', () => pm.response.to.have.status(202));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('orderA', b.order_id);",
+                  "pm.test('server id === Postman-predicted id', () =>",
+                  "  pm.expect(b.order_id).to.eql(pm.collectionVariables.get('predictedA')));",
+                  "pm.test('a FIRST answer \u2014 no replay header', () =>",
+                  "  pm.expect(pm.response.headers.has('Idempotent-Replay')).to.be.false);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Replay: same key \u2192 same order + Idempotent-Replay: true",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKeyA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "No key table anywhere \u2014 the orders ROW answered this (double-click / refresh / lost-response safety).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202, same order id', () => {",
+                  "  pm.response.to.have.status(202);",
+                  "  pm.expect(pm.response.json().order_id).to.eql(pm.collectionVariables.get('orderA'));",
+                  "});",
+                  "pm.test('marked as a replay', () => pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('true'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Track order A (Send until CONFIRMED)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderA}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderA}}"
+              ]
+            },
+            "description": "The saga runs async: reserve \u2192 authorize \u2192 confirm, usually under 2s. Press Send until status = CONFIRMED, then run the next request."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const s = pm.response.json().status;",
+                  "pm.test('200 \u2014 saga-owned status: ' + s, () => pm.response.to.have.status(200));",
+                  "console.log('order A status:', s);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Replay AFTER confirm \u2192 reports the CURRENT status",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKeyA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "Not a frozen stored copy: the row answers, so the replay says CONFIRMED \u2014 truer than the 'byte-identical' replay the old key table gave.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 replay with a LIVE status', () => {",
+                  "  pm.response.to.have.status(202);",
+                  "  pm.expect(pm.response.headers.get('Idempotent-Replay')).to.eql('true');",
+                  "  pm.expect(pm.response.json().status).to.not.eql(undefined);",
+                  "});",
+                  "console.log('replayed status:', pm.response.json().status, '(compare with the previous GET)');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Same key, DIFFERENT cart \u2192 422 (request_hash guard)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKeyA}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "One key = one intent. A different body under it is a client bug \u2014 answering with order A would silently hand them the wrong food. Caught by the sha256 stamped ON the order row.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 3\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 IDEMPOTENCY_KEY_REUSE', () => {",
+                  "  pm.response.to.have.status(422);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('IDEMPOTENCY_KEY_REUSE');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Stale menu_version (fresh key) \u2192 409 PRICE_CHANGED",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "The client consents to a specific menu version; drift = a fixable 409 WITH the current version in details \u2014 the FE one-taps a re-confirm.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": 0,\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 PRICE_CHANGED naming the current version', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  const e = pm.response.json().error;",
+                  "  pm.expect(e.code).to.eql('PRICE_CHANGED');",
+                  "  pm.expect(JSON.stringify(e.details)).to.include('menu is now at version');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Raw card number \u2192 422 (unrepresentable by shape)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "card_token must match ^tok_\u2026 \u2014 a real PAN cannot even be EXPRESSED in the API's types.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"4111111111111111\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown address \u2192 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"adr_ghost\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 naming address_id', () => {",
+                  "  pm.response.to.have.status(404);",
+                  "  pm.expect(JSON.stringify(pm.response.json().error.details)).to.include('address_id');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ownership: the OWNER cannot read the customer's order \u2192 404",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderA}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderA}}"
+              ]
+            },
+            "description": "Ownership lives in the WHERE clause \u2014 not-yours and not-found are the same 404 (no existence oracle)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 for someone else\\'s order', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My order history (keyset paged)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 and contains order A', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  const ids = pm.response.json().items.map(o => o.order_id);",
+                  "  pm.expect(ids).to.include(pm.collectionVariables.get('orderA'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 \u00b7 Kitchen \u2014 the owner drives, the saga referees",
+      "description": "Run within ~3 min of confirming order A (the accept window is 180s). Every reply is idempotent-by-state.",
+      "item": [
+        {
+          "name": "CONFIRMED queue (order A waiting)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/restaurant/orders?status=CONFIRMED",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "restaurant",
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "CONFIRMED"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 feed', () => pm.response.to.have.status(200));",
+                  "console.log('queue ids:', pm.response.json().items.map(o => o.order_id));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Accept order A \u2192 202 (signalled to the saga)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/restaurant/orders/{{orderA}}/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "restaurant",
+                "orders",
+                "{{orderA}}",
+                "accept"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 \u2014 the workflow got the verdict', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Accept AGAIN \u2192 200 (same verdict = replay, not error)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/restaurant/orders/{{orderA}}/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "restaurant",
+                "orders",
+                "{{orderA}}",
+                "accept"
+              ]
+            },
+            "description": "A kitchen tablet double-tap is not a conflict. 200 = the row already moved to ACCEPTED (same-verdict replay); 202 = you double-tapped faster than the saga moved the row, and the duplicate signal was absorbed by first-verdict-wins. Both are the safe answer."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 (replay) or 202 (signal absorbed) \u2014 never a conflict', () =>",
+                  "  pm.expect([200, 202]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reject after accept \u2192 409 ORDER_ALREADY_DECIDED",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/restaurant/orders/{{orderA}}/reject",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "restaurant",
+                "orders",
+                "{{orderA}}",
+                "reject"
+              ]
+            },
+            "description": "OPPOSITE verdicts are the real conflict \u2014 first decision wins, forever."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 ORDER_ALREADY_DECIDED', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('ORDER_ALREADY_DECIDED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Preparing \u2192 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/restaurant/orders/{{orderA}}/preparing",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "restaurant",
+                "orders",
+                "{{orderA}}",
+                "preparing"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ready \u2192 200 (signals the courier)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/restaurant/orders/{{orderA}}/ready",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "restaurant",
+                "orders",
+                "{{orderA}}",
+                "ready"
+              ]
+            },
+            "description": "Signals dlv::{orderA}. The simulated courier picks up ~20s later, delivers ~30s after that, then capture + settle."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Track to SETTLED (Send every ~15s)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderA}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderA}}"
+              ]
+            },
+            "description": "Watch READY \u2192 PICKED_UP \u2192 DELIVERED \u2192 SETTLED. Money is captured only AFTER delivery (FR-20)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const s = pm.response.json().status;",
+                  "pm.test('lifecycle state: ' + s, () => pm.response.to.have.status(200));",
+                  "console.log('order A:', s);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 \u00b7 Cancellation & the declined card",
+      "description": "Cancels are idempotent BY STATE (202 submitted / 200 already-done / 409 too-late). The declined card proves money failures arrive as order state \u2014 the API never lies with a 500.",
+      "item": [
+        {
+          "name": "Place order B \u2192 202",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKeyB}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idemKeyB', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202', () => pm.response.to.have.status(202));",
+                  "pm.collectionVariables.set('orderB', pm.response.json().order_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel B \u2192 202 (handed to the saga)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderB}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderB}}",
+                "cancel"
+              ]
+            },
+            "description": "Honest-async: 202 = submitted. The workflow referees customer-vs-courier; the tracking screen is the truth."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 submitted', () => pm.response.to.have.status(202));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel B AGAIN \u2192 200 (already done \u2014 never an error)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderB}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderB}}",
+                "cancel"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 idempotent by state', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Track B \u2192 CANCELLED, reason customer_cancelled",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderB}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderB}}"
+              ]
+            },
+            "description": "Send until CANCELLED. The unwind ran: void the hold, release the stock, stamp the reason."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "pm.test('cancel family, customer_cancelled: ' + b.status, () =>",
+                  "  pm.expect(['CANCELLING','CANCELLED']).to.include(b.status));",
+                  "console.log('B:', b.status, 'reason:', b.cancel_reason);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel the SETTLED order A \u2192 409 too late",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderA}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderA}}",
+                "cancel"
+              ]
+            },
+            "description": "FR-21: once the courier holds the food (and beyond), cancels lose. Requires order A to be past PICKED_UP \u2014 run after folder 04 finished."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 ORDER_NOT_CANCELLABLE', () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('ORDER_NOT_CANCELLABLE');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Place order C with tok_decline \u2192 still 202",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "The 202 means 'order created' \u2014 the card is authorized INSIDE the saga. A decline is a business outcome, not an HTTP error.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_decline\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 \u2014 decline happens in the saga', () => pm.response.to.have.status(202));",
+                  "pm.collectionVariables.set('orderC', pm.response.json().order_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Track C \u2192 CANCELLED, reason payment_declined",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderC}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderC}}"
+              ]
+            },
+            "description": "Send until CANCELLED. Stock was released; no void needed (nothing was ever held). The notification says 'your card was declined'."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const c = pm.response.json();",
+                  "pm.test('declined path state: ' + c.status, () => pm.response.to.have.status(200));",
+                  "console.log('C:', c.status, 'reason:', c.cancel_reason);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "06 \u00b7 Notifications \u2014 the bell",
+      "description": "Minted by a Kafka consumer from the same order events the panel just watched \u2014 deterministic ids make redelivery collapse.",
+      "item": [
+        {
+          "name": "Customer's bell (today's story in notifications)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/notifications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "notifications"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const items = pm.response.json().items;",
+                  "pm.test('has notifications from the drills', () => pm.expect(items.length).to.be.above(0));",
+                  "if (items.length) pm.collectionVariables.set('notificationId', items[0].id);",
+                  "console.log(items.slice(0,5).map(n => n.body));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mark one read",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/notifications/{{notificationId}}/read",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "notifications",
+                "{{notificationId}}",
+                "read"
+              ]
+            },
+            "description": "Ownership in the WHERE \u2014 someone else's notification id would 404. First read_at survives replays."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read-all",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/notifications/read-all",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "notifications",
+                "read-all"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Owner's bell (new-order alerts)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/notifications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "notifications"
+              ]
+            },
+            "description": "Same endpoint, different recipient: the verified claim routes restaurant_admin \u2192 the restaurant inbox."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "07 \u00b7 Chaos theater (needs the terminal)",
+      "description": "Each request names the docker command to run FIRST \u2014 the same drills the team ran for ADR-0023/0024 sign-off. Terminal prefix:\n\ncd \"/Users/emumba/Smart Food/SmartFoodOps\" && docker compose -f deploy/compose/docker-compose.yml --profile core --profile apps <stop|start> <service>",
+      "item": [
+        {
+          "name": "[temporal STOPPED] Place \u2192 503, and NOTHING is written",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKeyX}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "RUN FIRST:  cd \"/Users/emumba/Smart Food/SmartFoodOps\" && docker compose -f deploy/compose/docker-compose.yml --profile core --profile apps stop temporal\n\nThe orchestrator is on the checkout path (ADR-0023's accepted cost). Because there is no key table, this failure leaves NO row and NO lock \u2014 nothing to take over, nothing to garbage-collect.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const CryptoJS = require('crypto-js');",
+                  "function uuid5hex(nsHex, name) {",
+                  "  const words = CryptoJS.enc.Hex.parse(nsHex).concat(CryptoJS.enc.Utf8.parse(name));",
+                  "  const hex = CryptoJS.SHA1(words).toString(CryptoJS.enc.Hex).slice(0, 32).split('');",
+                  "  hex[12] = '5';",
+                  "  hex[16] = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);",
+                  "  return hex.join('');",
+                  "}",
+                  "if (!pm.collectionVariables.get('idemKeyX')) {",
+                  "  const key = pm.variables.replaceIn('{{$guid}}');",
+                  "  pm.collectionVariables.set('idemKeyX', key);",
+                  "  const sub = pm.collectionVariables.get('customerSub');",
+                  "  pm.collectionVariables.set('predictedX', 'ord_' + uuid5hex('9f2c7b416d3e4a588c0f1e7b5a2d9c34', sub + ':' + key));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('503 DEPENDENCY_UNAVAILABLE with Retry-After', () => {",
+                  "  pm.response.to.have.status(503);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('DEPENDENCY_UNAVAILABLE');",
+                  "  pm.expect(pm.response.headers.has('Retry-After')).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "[temporal STARTED] Same key \u2192 202 on the PREDICTED id",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKeyX}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "RUN FIRST:  cd \"/Users/emumba/Smart Food/SmartFoodOps\" && docker compose -f deploy/compose/docker-compose.yml --profile core --profile apps start temporal   (give it ~10s)\n\nThe retry is not a 'takeover' of anything \u2014 it just runs, and lands on the exact id Postman predicted before the outage.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 on the predicted id \u2014 one order, ever', () => {",
+                  "  pm.response.to.have.status(202);",
+                  "  pm.expect(pm.response.json().order_id).to.eql(pm.collectionVariables.get('predictedX'));",
+                  "});",
+                  "pm.test('a FIRST answer, not a replay', () => pm.expect(pm.response.headers.has('Idempotent-Replay')).to.be.false);",
+                  "pm.collectionVariables.unset('idemKeyX');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "[worker STOPPED] Place \u2192 202 pending (durable, row invisible)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idemKeyP}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders"
+              ]
+            },
+            "description": "RUN FIRST:  cd \"/Users/emumba/Smart Food/SmartFoodOps\" && docker compose -f deploy/compose/docker-compose.yml --profile core --profile apps stop order-worker\n\nTemporal accepted the workflow durably; no worker exists to run create_order. After the 2s await budget the API still answers 202 \u2014 a 5xx would invite a duplicate re-order against a LIVE workflow.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"restaurant_id\": \"{{restaurantId}}\",\n  \"menu_version\": {{menuVersion}},\n  \"address_id\": \"{{addressId}}\",\n  \"card_token\": \"tok_ok\",\n  \"lines\": [\n    {\n      \"item_id\": \"{{itemId}}\",\n      \"qty\": 1\n    }\n  ]\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idemKeyP', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 while the row does not exist yet', () => pm.response.to.have.status(202));",
+                  "pm.collectionVariables.set('orderP', pm.response.json().order_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "[worker still STOPPED] Read it \u2192 404 (read-your-writes suspended)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderP}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderP}}"
+              ]
+            },
+            "description": "The honest cost of the pending path: the id is real, the workflow is durable, the row just is not visible yet. The FE polls through this window."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 \u2014 briefly', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "[worker STARTED] Read again \u2192 the order materialized",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{customerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/orders/{{orderP}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "orders",
+                "{{orderP}}"
+              ]
+            },
+            "description": "RUN FIRST:  cd \"/Users/emumba/Smart Food/SmartFoodOps\" && docker compose -f deploy/compose/docker-compose.yml --profile core --profile apps start order-worker   (give it ~10s)\n\nTemporal held the intent the whole time. The saga now runs it forward: PLACED \u2192 \u2026 \u2192 CONFIRMED."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 \u2014 the durable intent became a row', () => pm.response.to.have.status(200));",
+                  "console.log('materialized as:', pm.response.json().status);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
