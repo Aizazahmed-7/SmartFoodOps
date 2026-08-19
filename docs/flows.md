@@ -4,15 +4,15 @@ Companion to [erd.md](erd.md): the ERD shows what is stored; this shows **how da
 
 ## The identity cheat-sheet — every id in the system and its formula
 
-| Id | Formula | Example | Why deterministic / why not |
-|---|---|---|---|
-| Entity ids | `prefix_ + uuid4().hex` | `ord_42…`, `rst_9…`, `usr_1…` | Random — entities are *created*, not derived |
-| Event id | `uuid5(NS, "{aggregate_type}:{aggregate_id}:{version}:{event_type}")` | `uuid5("order:ord_42:3:OrderConfirmed")` | Deterministic — same fact, same id, always → consumer dedupe, safe replays |
-| Notification id | `ntf_ + uuid5(NS, "{event_id}:{recipient_type}:{recipient_id}").hex` | `ntf_e9cd…` | Deterministic per (event, recipient) → redelivery collides on PK, absorbed |
-| Money idempotency key | `"{order_id}:{op}"` | `ord_42:auth`, `ord_42:capture` | Natural key — one auth per order, ever |
-| HTTP idempotency key | client uuid, minted per **cart-body-hash**, persisted in localStorage | header `Idempotency-Key: K` | Same cart resubmitted = same key = replay; changed cart = new key = new order |
-| Workflow ids | `ord::{order_id}` / `dlv::{order_id}` | `ord::ord_42` | Identity, not randomness → `REJECT_DUPLICATE` makes every re-start a no-op |
-| Consumer dedupe | `(consumer_group, event_id)` row, or the deterministic PK itself | — | "Have I seen this fact?" answerable only because facts have stable names |
+| Id                    | Formula                                                               | Example                                  | Why deterministic / why not                                                   |
+| --------------------- | --------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------- |
+| Entity ids            | `prefix_ + uuid4().hex`                                               | `ord_42…`, `rst_9…`, `usr_1…`            | Random — entities are _created_, not derived                                  |
+| Event id              | `uuid5(NS, "{aggregate_type}:{aggregate_id}:{version}:{event_type}")` | `uuid5("order:ord_42:3:OrderConfirmed")` | Deterministic — same fact, same id, always → consumer dedupe, safe replays    |
+| Notification id       | `ntf_ + uuid5(NS, "{event_id}:{recipient_type}:{recipient_id}").hex`  | `ntf_e9cd…`                              | Deterministic per (event, recipient) → redelivery collides on PK, absorbed    |
+| Money idempotency key | `"{order_id}:{op}"`                                                   | `ord_42:auth`, `ord_42:capture`          | Natural key — one auth per order, ever                                        |
+| HTTP idempotency key  | client uuid, minted per **cart-body-hash**, persisted in localStorage | header `Idempotency-Key: K`              | Same cart resubmitted = same key = replay; changed cart = new key = new order |
+| Workflow ids          | `ord::{order_id}` / `dlv::{order_id}`                                 | `ord::ord_42`                            | Identity, not randomness → `REJECT_DUPLICATE` makes every re-start a no-op    |
+| Consumer dedupe       | `(consumer_group, event_id)` row, or the deterministic PK itself      | —                                        | "Have I seen this fact?" answerable only because facts have stable names      |
 
 `aggregate_version` bumps on **every** guarded transition, but only some transitions stage events — so published versions are monotone **with gaps** (this order publishes at 0, 3, 8, 9).
 
@@ -46,7 +46,7 @@ sequenceDiagram
     Note over O: order_id = ord_ + uuid5 of "usr_1:K" → ord_42<br/>DERIVED, not random — a retry re-derives THIS id
     O->>T: execute_update_with_start_workflow — ONE RPC<br/>start ord::ord_42, USE_EXISTING + REJECT_DUPLICATE<br/>update await_placement
     T->>W: workflow task → activity create_order
-    rect rgb(230,240,230)
+    rect rgb(0,0,0)
         Note over W,DB: ONE TRANSACTION — the four writes
         W->>DB: INSERT orders: status PLACED, aggregate_version 0,<br/>menu_version 7, pricing/address/name snapshots
         W->>DB: INSERT order_items: name, unit_price 1200,<br/>option Family +600, line_total 3600
@@ -62,7 +62,7 @@ sequenceDiagram
     Note over W: the same workflow runs straight on into<br/>validate_and_reserve → authorize_payment → confirm_order
 ```
 
-**Replay:** same `K` again → `reserve()` returns `Replay` → the *stored* 202 body returns byte-identical with `Idempotent-Replay: true`; nothing below the idempotency check re-executes. Same key + different body → `422 IDEMPOTENCY_KEY_REUSE`.
+**Replay:** same `K` again → `reserve()` returns `Replay` → the _stored_ 202 body returns byte-identical with `Idempotent-Replay: true`; nothing below the idempotency check re-executes. Same key + different body → `422 IDEMPOTENCY_KEY_REUSE`.
 
 ---
 
@@ -110,7 +110,7 @@ sequenceDiagram
 
 ## 3. Compensation — card declined (`tok_decline`)
 
-Business outcomes travel as **values** (never exceptions — replay determinism). Two triggers reach the same unwind: a business *value* (declined, below) or a forward-step *deadline* (diagram 4). Either way the unwind runs in reverse order of acquisition and — unlike the bounded forward steps — its compensations retry **forever**.
+Business outcomes travel as **values** (never exceptions — replay determinism). Two triggers reach the same unwind: a business _value_ (declined, below) or a forward-step _deadline_ (diagram 4). Either way the unwind runs in reverse order of acquisition and — unlike the bounded forward steps — its compensations retry **forever**.
 
 ```mermaid
 sequenceDiagram
@@ -139,7 +139,7 @@ sequenceDiagram
 
 ## 4. Compensation — forward-step timeout (`system_timeout`)
 
-The split retry policy, made visible. A **forward** step (reserve/authorize/confirm) is bounded: if a dependency stays unreachable past `forward_deadline_s`, the saga stops trying and unwinds. The **compensation** that unwinds it is *not* bounded — it retries forever, so the order reaches CANCELLED even while the dependency is still down. (Watched live: with inventory stopped, the order sat at CANCELLING until inventory returned, then settled to CANCELLED.)
+The split retry policy, made visible. A **forward** step (reserve/authorize/confirm) is bounded: if a dependency stays unreachable past `forward_deadline_s`, the saga stops trying and unwinds. The **compensation** that unwinds it is _not_ bounded — it retries forever, so the order reaches CANCELLED even while the dependency is still down. (Watched live: with inventory stopped, the order sat at CANCELLING until inventory returned, then settled to CANCELLED.)
 
 ```mermaid
 sequenceDiagram
@@ -219,7 +219,7 @@ sequenceDiagram
 
     FE->>E: POST /v1/restaurants — Bearer token, role customer
     E->>C: forward, X-Auth-Sub usr_1
-    rect rgb(230,240,230)
+    rect rgb(0,0,0)
         Note over C,CDB: ONE TRANSACTION
         C->>CDB: INSERT restaurant rst_9, owner_user_id usr_1 —<br/>UNIQUE owner — race loser rolls back and adopts the winner
         C->>CDB: version bump to 1, INSERT menu_versions rst_9 v1
@@ -246,5 +246,5 @@ sequenceDiagram
 Three patterns repeat in every diagram — point at them and the architecture explains itself:
 
 1. **Green boxes are atomic.** State + its event + its stored response commit together; there is no moment where they can disagree.
-2. **Every step is idempotent and re-runnable** — placement (derived order id + caught IntegrityError), saga starts (`REJECT_DUPLICATE`/`USE_EXISTING`), grants (silent replay), consumer handling (deterministic ids). Reconcilers (reaper, poller) and Temporal's own activity retries re-run these paths freely, which is *why* crashes anywhere leave debts, never damage.
+2. **Every step is idempotent and re-runnable** — placement (derived order id + caught IntegrityError), saga starts (`REJECT_DUPLICATE`/`USE_EXISTING`), grants (silent replay), consumer handling (deterministic ids). Reconcilers (reaper, poller) and Temporal's own activity retries re-run these paths freely, which is _why_ crashes anywhere leave debts, never damage.
 3. **Ids are the load-bearing walls**: deterministic where facts need dedup-able names, natural keys where the business rule is the uniqueness, random only where entities are truly born.
