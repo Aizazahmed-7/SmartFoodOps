@@ -50,11 +50,12 @@ def test_same_key_different_body_is_422_reuse(client, catalog, make_snapshot, ma
     assert r.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSE"
 
 
-def test_crash_mid_execution_leaves_key_in_progress(
+def test_crash_mid_execution_leaves_nothing_and_the_retry_succeeds(
     client, catalog, monkeypatch, make_snapshot, make_order_body
 ):
-    """Unexpected failure (not a business refusal) does NOT release the key:
-    the immediate retry gets 409 and the takeover TTL is the recovery."""
+    """A crash before the order commits leaves NO record and NO lock
+    (ADR-0024) — the retry with the same key simply runs placement again
+    and lands on the same derived id. No 409, no takeover window."""
     catalog.snapshot = make_snapshot()
     key = uuid.uuid4().hex
 
@@ -68,9 +69,8 @@ def test_crash_mid_execution_leaves_key_in_progress(
         client.post("/v1/orders", json=make_order_body(), headers=_headers(key))
     monkeypatch.undo()
     retry = client.post("/v1/orders", json=make_order_body(), headers=_headers(key))
-    assert retry.status_code == 409
-    assert retry.json()["error"]["code"] == "IDEMPOTENCY_IN_PROGRESS"
-    assert retry.headers["retry-after"] == "1"
+    assert retry.status_code == 202
+    assert retry.json()["status"] == "PLACED"
 
 
 def test_slow_worker_still_answers_202(client, catalog, saga, make_snapshot, make_order_body):
@@ -87,13 +87,13 @@ def test_slow_worker_still_answers_202(client, catalog, saga, make_snapshot, mak
     assert client.get(f"/v1/orders/{r.json()['order_id']}", headers=CUSTOMER).status_code == 404
 
 
-def test_temporal_outage_is_503_and_the_retry_reuses_the_key(
+def test_temporal_outage_is_503_and_the_retry_converges(
     client, catalog, saga, make_snapshot, make_order_body
 ):
-    """ADR-0023's accepted cost, in one test: placement now depends on the
-    orchestrator, so its outage is a 503 — and the key is deliberately NOT
-    released, so the immediate retry waits (409) instead of forking a
-    second order id."""
+    """ADR-0023's accepted cost, ADR-0024's payoff, in one test: the
+    orchestrator's outage is a 503 with nothing written anywhere — so the
+    retry with the same key just places normally, onto the same derived
+    order id. One order, no waiting room."""
     from order.domain.ports import SagaUnavailable
 
     catalog.snapshot = make_snapshot()
@@ -107,8 +107,11 @@ def test_temporal_outage_is_503_and_the_retry_reuses_the_key(
 
     saga.fail_place = None
     retry = client.post("/v1/orders", json=make_order_body(), headers=_headers(key))
-    assert retry.status_code == 409  # the key is still held — no duplicate
-    assert retry.json()["error"]["code"] == "IDEMPOTENCY_IN_PROGRESS"
+    assert retry.status_code == 202
+    assert "idempotent-replay" not in retry.headers  # a FIRST answer, not a replay
+    replay = client.post("/v1/orders", json=make_order_body(), headers=_headers(key))
+    assert replay.json() == retry.json()  # …and THIS one is the replay
+    assert replay.headers["idempotent-replay"] == "true"
 
 
 def test_missing_idempotency_key_is_422(client, catalog, make_snapshot, make_order_body):
@@ -124,8 +127,10 @@ def test_price_changed_releases_key_for_fresh_confirm(
     client, catalog, make_snapshot, make_order_body
 ):
     """Version drift → 409 with the current version; the SAME key is then
-    immediately usable with the corrected body (deterministic refusals
-    free the key — no TTL squatting)."""
+    immediately usable with the corrected body — a refusal writes nothing,
+    so there is nothing to free (ADR-0024). NOTE: the corrected body is a
+    DIFFERENT body under the same key, and that is legal here because no
+    order exists yet — the hash guard only protects created orders."""
     catalog.snapshot = make_snapshot(version=4)
     key = uuid.uuid4().hex
     r = client.post("/v1/orders", json=make_order_body(menu_version=3), headers=_headers(key))

@@ -244,31 +244,15 @@ export interface PlaceOrderBody {
 }
 
 /**
- * Placement, with the in-progress wait built in.
- *
- * Since the saga owns placement (ADR-0023), the window between "key
- * reserved" and "order written" is a worker round trip rather than one
- * local transaction — so a retried submit can legitimately land while the
- * first one is still executing and get 409 IDEMPOTENCY_IN_PROGRESS. That
- * is "wait", not "failed": the server even says Retry-After: 1. We reuse
- * the SAME key (that is the whole point — a fresh key would be a second
- * order) and poll it out, surfacing the 409 only if it never resolves.
+ * Placement is one request again (ADR-0024): a retry with the same key
+ * either finds the order (the server replays it from the row) or attaches
+ * to the workflow already making it — the server never answers "busy,
+ * come back", so there is no 409-wait loop to run here.
  */
-export async function placeOrder(body: PlaceOrderBody): Promise<PlacedOrder> {
-  const headers = { "Idempotency-Key": idemKeyFor(body) };
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await request<PlacedOrder>("POST", "/v1/orders", body, { headers });
-    } catch (error) {
-      const waiting = error instanceof ApiError && error.code === "IDEMPOTENCY_IN_PROGRESS";
-      // 10s of patience, not 5: the server's takeover window for placement
-      // keys is 30s, so a retry that lands mid-flight is worth waiting out
-      // rather than turning into an error the customer has to act on.
-      if (!waiting || attempt >= 10) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-}
+export const placeOrder = (body: PlaceOrderBody) =>
+  request<PlacedOrder>("POST", "/v1/orders", body, {
+    headers: { "Idempotency-Key": idemKeyFor(body) },
+  });
 
 export const listOrders = (cursor?: string) =>
   request<OrderList>("GET", `/v1/orders${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);

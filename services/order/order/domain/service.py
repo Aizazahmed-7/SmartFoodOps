@@ -1,17 +1,24 @@
 """Order domain — quote (S2), idempotent placement + reads (S3).
 
 Placement is split at the seam ADR-0023 chose: this module does everything
-that must answer the customer SYNCHRONOUSLY — reserve the idempotency key,
-resolve the address, snapshot the menu, price the cart — and then hands a
-fully-priced PlacementInput to the saga, which writes the order row inside
-its own first activity and reports back.
+that must answer the customer SYNCHRONOUSLY — resolve the address, snapshot
+the menu, price the cart — and then hands a fully-priced PlacementInput to
+the saga, which writes the order row inside its own first activity and
+reports back.
 
-So the four-things-at-once transaction (FR-14/16) still exists, unchanged;
-it simply lives in the worker now (activities.create_order). What this
-module keeps is the part with a customer waiting on it: every deterministic
-refusal (PRICE_CHANGED, ITEM_UNAVAILABLE, RESTAURANT_CLOSED, unknown
-address) is still raised here, in-process, with the key released for a
-clean retry — no workflow round trip to learn the cart is stale.
+Idempotency (ADR-0024) has no table: the ORDERS ROW is the record. The
+order id is derived from (user, Idempotency-Key), so a retry re-derives it
+and the row-read at the top of place() answers before anything else runs —
+before pricing, before Temporal. request_hash on the row is the body guard
+(same key + different cart = a client bug, 422). Concurrent duplicates are
+refereed by Temporal itself: same workflow id, USE_EXISTING attaches, both
+callers get the same ack.
+
+Deterministic refusals (PRICE_CHANGED, ITEM_UNAVAILABLE, RESTAURANT_CLOSED,
+unknown address) still surface here, in-process — with one carve-out: if a
+durable workflow is ALREADY making this exact order (a retry landed in the
+pending window and the menu drifted meanwhile), its ack outranks the
+refusal, because "re-confirm your cart" would invite a second dinner.
 """
 
 import uuid
@@ -19,13 +26,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from smartfood_idempotency import (
-    BodyMismatch,
-    IdempotencyStore,
-    InProgress,
-    Replay,
-    Reserved,
-)
 from smartfood_otel import get_logger
 from smartfood_pricing import Line, PricedOrder, PricingConfig, PricingError, price_order
 from sqlalchemy.engine import Row
@@ -62,15 +62,29 @@ class Placed:
     status: str = "PLACED"
 
 
-PlaceOutcome = Placed | PlacementPending | Replay | InProgress | BodyMismatch
+@dataclass(frozen=True)
+class Replayed:
+    """The derived id already has a row — this request was answered before.
+    Same 202 shape, current status, Idempotent-Replay: true on the wire."""
 
-# Placement's order id is DERIVED from the idempotency key, never random
-# (ADR-0023). Two requests carrying the same key MUST land on the same id:
-# once the order row is written by a worker rather than by this process,
-# the window between reserving the key and completing it is long enough for
-# the store's stale-IN_PROGRESS takeover to fire, and a fresh uuid4() there
-# would mint a second id, a second ord:: workflow, and a second dinner.
-# uuid5 makes that retry converge on the row that already exists instead.
+    order_id: str
+    status: str
+
+
+@dataclass(frozen=True)
+class HashMismatch:
+    """The derived id has a row, but for a DIFFERENT body: the client
+    reused an Idempotency-Key across two carts. Answering with the old
+    order would silently give them food they did not ask for — 422."""
+
+
+PlaceOutcome = Placed | Replayed | HashMismatch | PlacementPending
+
+# Placement's order id is DERIVED from (user, Idempotency-Key), never
+# random (ADR-0023/0024). This single line is the whole idempotency story:
+# the same intent always names the same order, so a retry's row-read finds
+# it, Temporal's USE_EXISTING attaches to it, and create_order's insert
+# conflicts into adopting it. A uuid4() here would mint a second dinner.
 _ORDER_NS = uuid.UUID("9f2c7b41-6d3e-4a58-8c0f-1e7b5a2d9c34")
 
 
@@ -114,9 +128,9 @@ CancelOutcome = CancelSubmitted | CancelAlreadyDone | NotCancellable
 
 
 def placement_response(order_id: str, status: str = "PLACED") -> dict[str, str]:
-    """THE 202 placement body. It is stored for idempotent replay (by the
-    create_order ACTIVITY now) and returned on the fresh path — with two
-    authors the replay could drift from the live shape; with one it cannot."""
+    """THE 202 placement body — fresh path and replay both render through
+    here (a replay's status comes from the row, so it may have advanced
+    past PLACED: the truth, not a frozen copy)."""
     return {"order_id": order_id, "status": status}
 
 
@@ -137,14 +151,12 @@ class OrderService:
         sessions: async_sessionmaker[AsyncSession] | None = None,
         identity: IdentityPort | None = None,
         saga: SagaPort | None = None,
-        idempotency: IdempotencyStore | None = None,
     ):
         self._catalog = catalog
         self._pricing = pricing
         self._sessions = sessions
         self._identity = identity
         self._saga = saga
-        self._idempotency = idempotency
 
     # ── quote (S2) ─────────────────────────────────────────────────
 
@@ -169,10 +181,18 @@ class OrderService:
         address_id: str,
         card_token: str,
     ) -> PlaceOutcome:
-        assert self._identity and self._saga and self._idempotency
-        outcome = await self._idempotency.reserve(user_id, idem_key, request_hash)
-        if not isinstance(outcome, Reserved):
-            return outcome
+        assert self._identity and self._saga
+        order_id = order_id_for(user_id, idem_key)
+
+        # THE idempotency check (ADR-0024): the derived id either has a row
+        # or it does not. Reading it FIRST — before pricing — is what makes
+        # a replay immune to menu drift: an order that already exists must
+        # never be re-priced into a 409 while a kitchen is cooking it.
+        row = await self._order_row_for(user_id, order_id)
+        if row is not None:
+            if row.request_hash is not None and row.request_hash != request_hash:
+                return HashMismatch()
+            return Replayed(order_id=order_id, status=str(row.status))
 
         try:
             # Server-side resolution only — the request carried IDs, never
@@ -183,12 +203,17 @@ class OrderService:
                 snapshot, lines, expected_menu_version=menu_version, config=self._pricing
             )
         except (PricingError, AddressNotFound):
-            # Deterministic business refusal: free the key immediately — the
-            # client will re-confirm with a fresh body and a fresh key.
-            await self._idempotency.release(user_id, idem_key)
+            # Deterministic refusal — with one carve-out. A retry can land
+            # in the window where the workflow is durably making this order
+            # but the row is not visible yet; if the menu drifted meanwhile,
+            # re-pricing refuses an order that is COMING. The refusal must
+            # lose to the running workflow's ack, or "re-confirm your cart"
+            # mints a second order for one dinner.
+            attached = await self._attach_if_running(order_id)
+            if attached is not None:
+                return attached
             raise
 
-        order_id = order_id_for(user_id, idem_key)
         now = _now()
         line_snapshots = [
             LineSnapshot(
@@ -208,10 +233,9 @@ class OrderService:
         }
         placement = PlacementInput(
             order_id=order_id,
-            # The key travels with the work: the activity that writes the
-            # order is the one that marks this key COMPLETE, in the same tx.
-            scope=user_id,
-            idem_key=idem_key,
+            # Stamped onto the row: the body this order answers for. A
+            # retried key is checked against it (same → replay, else 422).
+            request_hash=request_hash,
             user_id=user_id,
             restaurant_id=restaurant_id,
             restaurant_name=priced.restaurant_name,
@@ -227,21 +251,18 @@ class OrderService:
             address_snapshot=address_snapshot,
         )
 
-        # From here the workflow owns the order. NOTE what is deliberately
-        # absent: no release() on failure past this line. Once the start RPC
-        # has been attempted we cannot know whether Temporal took it, and
-        # freeing the key would let a retry mint a SECOND order id against a
-        # workflow that may well be alive. Leaving the key IN_PROGRESS makes
-        # the retry either wait (409) or take over onto the SAME id — both
-        # safe (ADR-0023).
+        # From here the workflow owns the order. A failure past this line
+        # leaves NOTHING behind (no row, no lock): the retry simply re-runs
+        # this method, re-derives the same id, and converges — Temporal's
+        # USE_EXISTING referees if a workflow did start.
         try:
             ack = await self._saga.place(placement)
         except SagaClosed:
-            # The derived id belongs to an order that already ran its course
-            # (key reused past its 24h replay TTL). Returning that order is
-            # the honest idempotent answer; a missing row would mean the id
-            # collided with a workflow that never wrote one — an ops case.
-            row = await self._order_row(order_id)
+            # ord::{order_id} finished between our row-read and the start
+            # (create_order committed and the saga ran to a close in the
+            # gap). The row is the answer; a closed workflow with NO row
+            # means it was terminated before creating anything — ops case.
+            row = await self._order_row_for(user_id, order_id)
             if row is None:
                 raise SagaUnavailable(f"closed saga with no order {order_id}") from None
             log.info("placement adopted a finished order", order_id=order_id, status=row.status)
@@ -253,10 +274,28 @@ class OrderService:
             return ack
         return Placed(order_id=ack.order_id, status=ack.status)
 
-    async def _order_row(self, order_id: str) -> Row[Any] | None:
+    async def _order_row_for(self, user_id: str, order_id: str) -> Row[Any] | None:
+        """Ownership-scoped read (defense in depth — the derived id already
+        encodes the user, so a cross-user hit is impossible by construction)."""
         assert self._sessions
         async with self._sessions() as session:
-            return await OrderRepo(session).get_order_any(order_id)
+            return await OrderRepo(session).get_order(user_id=user_id, order_id=order_id)
+
+    async def _attach_if_running(self, order_id: str) -> Placed | PlacementPending | None:
+        """The pending-window probe: is a durable workflow already making
+        this order? None = no (the caller's refusal stands). On transport
+        trouble we ALSO answer None — the overwhelmingly common reason to be
+        here is a genuinely stale cart with no workflow anywhere, and the
+        refusal (409, re-confirm) is the honest answer we can still give."""
+        assert self._saga
+        try:
+            ack = await self._saga.attach_placement(order_id)
+        except (SagaGone, SagaUnavailable):
+            return None
+        if isinstance(ack, PlacementPending):
+            return ack
+        log.info("refusal outranked by running placement", order_id=order_id, status=ack.status)
+        return Placed(order_id=ack.order_id, status=ack.status)
 
     # ── customer cancellation (S7) ─────────────────────────────────
 

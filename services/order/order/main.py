@@ -12,7 +12,6 @@ from contextlib import asynccontextmanager, suppress
 import httpx
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers
-from smartfood_idempotency import IdempotencyJanitor, IdempotencyStore
 from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, Topic, topic
 from smartfood_otel import RequestContextMiddleware, setup_logging
 from smartfood_outbox import OutboxPoller
@@ -26,7 +25,7 @@ from .adapters.temporal_client import TemporalSaga
 from .api.restaurant import router as restaurant_router
 from .api.routes import router
 from .config import Settings
-from .db import idempotency_keys, metadata, outbox
+from .db import metadata, outbox
 from .domain.kitchen import KitchenService
 from .domain.ports import CatalogPort, IdentityPort, SagaPort
 from .domain.service import OrderService
@@ -85,15 +84,6 @@ def create_app(
             await_seconds=settings.placement_await_seconds,
         )
 
-    idempotency = IdempotencyStore(
-        sessions, idempotency_keys, in_progress_ttl_seconds=settings.placement_key_ttl_seconds
-    )
-    janitor = IdempotencyJanitor(
-        idempotency,
-        interval_seconds=settings.idempotency_purge_interval_seconds,
-        orphan_ttl_seconds=settings.idempotency_orphan_ttl_seconds,
-    )
-
     events_topic = topic(settings.cell_id, Topic.ORDERS_EVENTS)
     own_producer: EventProducer | None = None
     if poller is None and settings.outbox_mode == "poller":  # pragma: no cover — live wiring
@@ -116,8 +106,6 @@ def create_app(
             if own_producer is not None:  # pragma: no cover — live path
                 await own_producer.start()
             tasks.append(asyncio.create_task(poller.run()))
-        if settings.idempotency_purge_interval_seconds > 0:
-            tasks.append(asyncio.create_task(janitor.run()))
         yield
         for task in tasks:
             task.cancel()  # cancellation IS the tasks' shutdown signal
@@ -146,7 +134,6 @@ def create_app(
         sessions=sessions,
         identity=identity,
         saga=saga,
-        idempotency=idempotency,
     )
     app.state.kitchen = KitchenService(sessions, saga=saga)
     app.include_router(router)

@@ -8,7 +8,6 @@ changes (pricing_snapshot) — an order is a historical fact, not a view.
 from typing import Literal, get_args
 
 import sqlalchemy as sa
-from smartfood_idempotency import idempotency_table
 from smartfood_outbox import outbox_table
 
 metadata = sa.MetaData()
@@ -45,6 +44,12 @@ orders = sa.Table(
     sa.Column("aggregate_version", sa.Integer, nullable=False, server_default="0"),
     sa.Column("payment_method", sa.Text, nullable=False, server_default="CARD"),
     sa.Column("card_token", sa.Text, nullable=False),
+    # sha256 of the exact placement body this order was created from
+    # (ADR-0024). The order row IS the idempotency record now: a retry
+    # re-derives this order_id and reads the row — same hash → replay the
+    # 202, different hash → 422 (a client reused a key across carts).
+    # Nullable: rows born before ADR-0024 skip the guard.
+    sa.Column("request_hash", sa.Text, nullable=True),
     sa.Column("menu_version", sa.Integer, nullable=False),
     # {subtotal,discount,fee,tax,total}_cents + currency — FR-16: authorization
     # and refunds are computed ONLY from this, never recomputed.
@@ -82,7 +87,11 @@ order_items = sa.Table(
     sa.CheckConstraint("qty BETWEEN 1 AND 50", name="ck_order_items_qty"),
 )
 
-idempotency_keys = idempotency_table(metadata)
+# (idempotency_keys lived here until ADR-0024. Placement's idempotency
+# record is the orders row itself — the derived order_id is the key, and
+# request_hash is the body guard. Migration 0004 drops the table; the
+# smartfood-idempotency library lives on in payment, where stored 402
+# replays and PSP read-before-execute genuinely need it.)
 
 # The 9-column contract lives with its reader (smartfood-outbox).
 outbox = outbox_table(metadata)

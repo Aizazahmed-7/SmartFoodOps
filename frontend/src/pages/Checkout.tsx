@@ -170,12 +170,7 @@ export default function Checkout() {
           confirms the new price.
         </Note>
       )}
-      {hasCode(place.error, "IDEMPOTENCY_IN_PROGRESS") ? (
-        <p className="text-sm text-amber-300">
-          Your previous attempt is still being processed — give it a moment,
-          then check <Link to="/orders" className="underline">your orders</Link> before retrying.
-        </p>
-      ) : !hasCode(place.error, "PRICE_CHANGED") ? (
+      {!hasCode(place.error, "PRICE_CHANGED") ? (
         <ErrorNote error={place.error} />
       ) : null}
 

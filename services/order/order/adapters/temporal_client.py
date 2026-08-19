@@ -142,6 +142,40 @@ class TemporalSaga:
         log.info("saga placed", order_id=placement.order_id, status=ack.status)
         return ack
 
+    async def attach_placement(self, order_id: str) -> PlacementAck | PlacementPending:
+        """Update-only (no start): ask a running ord::{order_id} for its
+        placement ack. The await_placement handler is a pure read of state
+        already set, so re-running it for a late caller is free — and if
+        create_order has not committed yet, we park exactly like place()
+        does, under the same await budget.
+
+        NOT_FOUND covers both "never started" and "already finished" (the
+        same collapse _signal documents); both map to SagaGone — for a
+        finished workflow the orders row exists and the caller answered
+        from it before ever pricing, so reaching here means the refusal
+        should stand."""
+        try:
+            client = await self._connect()
+            ack = await client.get_workflow_handle(f"ord::{order_id}").execute_update(
+                UPDATE_AWAIT_PLACEMENT,
+                result_type=PlacementAck,
+                rpc_timeout=timedelta(seconds=self._await_seconds),
+            )
+        except WorkflowUpdateRPCTimeoutOrCancelledError:
+            return PlacementPending(order_id)
+        except WorkflowUpdateFailedError as exc:
+            raise SagaUnavailable(str(exc)) from None
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.NOT_FOUND:
+                raise SagaGone(f"ord::{order_id}") from None
+            if exc.status == RPCStatusCode.DEADLINE_EXCEEDED:
+                return PlacementPending(order_id)
+            raise SagaUnavailable(str(exc)) from None
+        except OSError as exc:
+            raise SagaUnavailable(str(exc)) from None
+        log.info("placement attached", order_id=order_id, status=ack.status)
+        return ack
+
     async def signal_decision(self, order_id: str, verdict: Verdict) -> None:
         await self._signal(f"ord::{order_id}", SIGNAL_RESTAURANT_DECISION, verdict)
         log.info("decision signalled", order_id=order_id, verdict=verdict)

@@ -14,7 +14,6 @@ and the workflow's history disagree, which is a page, not a retry.
 
 from datetime import datetime
 
-from smartfood_idempotency import IdempotencyStore
 from smartfood_kafka import EventType
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -24,7 +23,6 @@ from temporalio.exceptions import ApplicationError
 from .adapters.repo import OrderRepo
 from .db import OrderStatus
 from .domain.ports import InventoryOpsPort, PaymentOpsPort, PaymentStateConflict
-from .domain.service import placement_response
 from .domain.transitions import IllegalTransition, begin_cancel_from, transition
 from .values import (
     ActivityName,
@@ -47,20 +45,19 @@ class OrderActivities:
         sessions: async_sessionmaker[AsyncSession],
         inventory: InventoryOpsPort,
         payment: PaymentOpsPort,
-        idempotency: IdempotencyStore,
     ):
         self._sessions = sessions
         self._inventory = inventory
         self._payment = payment
-        self._idempotency = idempotency
 
     # ── the forward path ───────────────────────────────────────────
 
     @activity.defn(name=ActivityName.CREATE_ORDER)
     async def create_order(self, placement: PlacementInput) -> str:
-        """The saga's first act (ADR-0023): the four writes that used to sit
-        in the placement route — order row + line snapshots + OrderPlaced
-        outbox row + the idempotency completion — committing together.
+        """The saga's first act (ADR-0023): order row + line snapshots +
+        OrderPlaced outbox row, committing together. The row carries
+        request_hash — since ADR-0024 the orders row IS the idempotency
+        record, so this one transaction is the whole placement fact.
 
         At-least-once applies here like everywhere else: an activity that
         commits and then loses its worker gets retried. That is survivable
@@ -76,7 +73,7 @@ class OrderActivities:
         return await self._adopt_existing(placement)
 
     async def _insert_placement(self, placement: PlacementInput) -> bool:
-        """One transaction, four writes. False = the row already existed
+        """One transaction, three writes. False = the row already existed
         (a retry of a commit whose acknowledgement was lost)."""
         now = datetime.fromisoformat(placement.placed_at)
         lines = [
@@ -99,6 +96,7 @@ class OrderActivities:
                     restaurant_id=placement.restaurant_id,
                     restaurant_name=placement.restaurant_name,
                     card_token=placement.card_token,
+                    request_hash=placement.request_hash,
                     menu_version=placement.menu_version,
                     pricing_snapshot=placement.pricing_snapshot,
                     address_snapshot=placement.address_snapshot,
@@ -123,16 +121,6 @@ class OrderActivities:
                     },
                     now=now,
                 )
-                # The stored 202 commits WITH the order (unchanged invariant,
-                # new address): a replay of the key can never disagree with
-                # reality, because reality and the answer are one write.
-                await self._idempotency.complete(
-                    session,
-                    placement.scope,
-                    placement.idem_key,
-                    202,
-                    placement_response(placement.order_id),
-                )
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
@@ -141,20 +129,11 @@ class OrderActivities:
 
     async def _adopt_existing(self, placement: PlacementInput) -> str:
         """The insert lost to an earlier execution of THIS activity. The
-        order is already there, so the only thing possibly still owed is the
-        stored answer — and completing it twice is a blind UPDATE to the same
-        values, which is exactly why replay is safe."""
+        order is already there and, since ADR-0024, the row IS the whole
+        record — nothing else is owed. Report its real status."""
         async with self._sessions() as session:
             row = await OrderRepo(session).get_order_any(placement.order_id)
-            assert row is not None  # the conflict we caught proves it exists
-            await self._idempotency.complete(
-                session,
-                placement.scope,
-                placement.idem_key,
-                202,
-                placement_response(placement.order_id),
-            )
-            await session.commit()
+        assert row is not None  # the conflict we caught proves it exists
         return str(row.status)
 
     @activity.defn(name=ActivityName.VALIDATE_AND_RESERVE)

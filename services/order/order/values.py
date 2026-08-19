@@ -36,16 +36,15 @@ class PlacementInput:
     the whole priced request, resolved and validated by the API before the
     workflow ever started (ADR-0023).
 
-    Two fields carry the idempotency contract into the worker: `scope` and
-    `idem_key` are the key the API reserved, which the activity COMPLETES
-    inside the same transaction as the order. `placed_at` is an ISO stamp
-    taken by the API, not by the activity: an activity that commits and
-    then times out gets retried, and a retry must write byte-identical
-    rows — a fresh now() inside the activity would not."""
+    `request_hash` is the sha256 of the placement body, stamped onto the
+    orders row so a retried key can be checked against the cart it was
+    minted for (ADR-0024). `placed_at` is an ISO stamp taken by the API,
+    not by the activity: an activity that commits and then times out gets
+    retried, and a retry must write byte-identical rows — a fresh now()
+    inside the activity would not."""
 
     order_id: str
-    scope: str
-    idem_key: str
+    request_hash: str
     user_id: str
     restaurant_id: str
     restaurant_name: str

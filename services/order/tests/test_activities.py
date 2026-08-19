@@ -7,7 +7,7 @@ import pytest
 import sqlalchemy as sa
 from order.activities import OrderActivities
 from order.adapters.repo import OrderRepo
-from order.db import idempotency_keys, metadata, order_items, orders, outbox
+from order.db import metadata, order_items, orders, outbox
 from order.domain.ports import PaymentStateConflict
 from order.domain.transitions import transition
 from order.values import (
@@ -19,7 +19,6 @@ from order.values import (
     PriceResult,
     ReserveResult,
 )
-from smartfood_idempotency import IdempotencyStore
 from smartfood_kafka import EventType
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -79,6 +78,7 @@ async def _setup():
             restaurant_id="rst_1",
             restaurant_name="Biryani House",
             card_token="tok_ok",
+            request_hash="hash-of-K-1",
             menu_version=3,
             pricing_snapshot={
                 "subtotal_cents": 3000,
@@ -103,9 +103,7 @@ async def _setup():
         )
         await s.commit()
     inventory, payment = FakeInventory(), FakePayment()
-    acts = OrderActivities(
-        sessions, inventory, payment, IdempotencyStore(sessions, idempotency_keys)
-    )
+    acts = OrderActivities(sessions, inventory, payment)
     return acts, sessions, inventory, payment
 
 
@@ -127,8 +125,7 @@ def _price():
 def _placement(order_id="ord_2", key="K-2"):
     return PlacementInput(
         order_id=order_id,
-        scope="usr_1",
-        idem_key=key,
+        request_hash=f"hash-of-{key}",
         user_id="usr_1",
         restaurant_id="rst_1",
         restaurant_name="Biryani House",
@@ -151,20 +148,12 @@ def _placement(order_id="ord_2", key="K-2"):
     )
 
 
-async def _reserve_key(sessions, placement):
-    """What the API did before the workflow started: the key exists and is
-    IN_PROGRESS, waiting for the activity to complete it."""
-    await IdempotencyStore(sessions, idempotency_keys).reserve(
-        placement.scope, placement.idem_key, "hash-of-body"
-    )
-
-
-async def test_create_order_writes_the_row_lines_event_and_key():
-    """The activity IS placement now: everything the route used to write,
-    it writes — including the stored 202 that makes replay possible."""
+async def test_create_order_writes_the_row_lines_and_event():
+    """The activity IS placement: order + lines + OrderPlaced in one
+    commit, with request_hash stamped on the row — the row is the whole
+    idempotency record now (ADR-0024)."""
     acts, sessions, _, _ = await _setup()
     placement = _placement()
-    await _reserve_key(sessions, placement)
 
     assert await acts.create_order(placement) == "PLACED"
 
@@ -174,15 +163,11 @@ async def test_create_order_writes_the_row_lines_event_and_key():
             await s.execute(sa.select(order_items).where(order_items.c.order_id == "ord_2"))
         ).all()
         event = (await s.execute(sa.select(outbox).where(outbox.c.aggregate_id == "ord_2"))).one()
-        key = (
-            await s.execute(sa.select(idempotency_keys).where(idempotency_keys.c.idem_key == "K-2"))
-        ).one()
     assert (order.status, order.aggregate_version) == ("PLACED", 0)
     assert order.restaurant_name_snapshot == "Biryani House"
+    assert order.request_hash == "hash-of-K-2"  # the body this order answers for
     assert len(items) == 1 and items[0].name_snapshot == "Chicken Biryani"
     assert event.event_type == EventType.ORDER_PLACED and event.payload["status"] == "PLACED"
-    assert key.status == "COMPLETE" and key.response_status == 202
-    assert key.response_body == {"order_id": "ord_2", "status": "PLACED"}
 
 
 async def test_create_order_run_twice_makes_exactly_one_order():
@@ -192,7 +177,6 @@ async def test_create_order_run_twice_makes_exactly_one_order():
     order id buys."""
     acts, sessions, _, _ = await _setup()
     placement = _placement()
-    await _reserve_key(sessions, placement)
 
     assert await acts.create_order(placement) == "PLACED"
     assert await acts.create_order(placement) == "PLACED"  # the retry
@@ -219,7 +203,6 @@ async def test_create_order_retry_reports_the_rows_real_status():
     'PLACED' the database would contradict."""
     acts, sessions, _, _ = await _setup()
     placement = _placement()
-    await _reserve_key(sessions, placement)
     await acts.create_order(placement)
     await transition(sessions, "ord_2", expected="PLACED", target="VALIDATED")
 

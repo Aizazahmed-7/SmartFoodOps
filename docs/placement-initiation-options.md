@@ -7,6 +7,13 @@
 > cons listed under C are now *our* costs and the revisit triggers are what we
 > watch. Everything below describes the option space as it was scored; §7
 > records what was decided and why the hybrid changed the balance.
+>
+> **Addendum (2026-08-20, ADR-0024):** the idempotency mechanics described
+> below (the key table, its takeover window, "the key is never released")
+> were subsequently retired — the derived order id made the orders row
+> itself the idempotency record. Read the retry/409 details here as
+> history; [ADR-0024](adr/0024-orders-row-is-placements-idempotency-record.md)
+> is current.
 
 **Purpose**: a decision document for the recurring review question *"why isn't
 the whole order flow inside the workflow?"* It lays out the full option space,

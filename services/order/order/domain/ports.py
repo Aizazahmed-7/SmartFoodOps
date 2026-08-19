@@ -24,8 +24,8 @@ class PlacementPending:
     coming. The customer still gets their 202 (a 5xx here would invite a
     duplicate re-order against a live workflow); the only thing briefly
     suspended is read-your-writes — GET /v1/orders/{id} may 404 for a
-    moment, and the idempotency key stays IN_PROGRESS until the activity
-    commits, so an immediate retry sees 409 rather than the stored reply."""
+    moment, and a placement retry in this window attaches to the running
+    workflow (same derived id) instead of finding the row."""
 
     order_id: str
 
@@ -58,9 +58,9 @@ class SagaUnavailable(Exception):
 
 class SagaClosed(Exception):
     """ord::{order_id} exists but has FINISHED, so REJECT_DUPLICATE refuses
-    to start it again. Only reachable when an idempotency key is reused past
-    its replay TTL — the derived order id then points at a settled order.
-    The domain answers it from the database, not the adapter."""
+    to start it again. Reachable only in the race where the workflow ran to
+    a close between place()'s row-read and its start RPC. The domain
+    answers it from the database, not the adapter."""
 
 
 class PaymentStateConflict(Exception):
@@ -91,9 +91,19 @@ class SagaPort(Protocol):
         workflow IS the placement now.
 
         Must be idempotent: the same placement may arrive twice (a client
-        retry after the stale-key takeover), and both calls must converge on
+        retry racing the first attempt), and both calls must converge on
         the one workflow rather than fork. Raises SagaUnavailable when
-        Temporal cannot be reached — placement's new hard dependency."""
+        Temporal cannot be reached — placement's hard dependency."""
+        ...
+
+    async def attach_placement(self, order_id: str) -> PlacementAck | PlacementPending:
+        """Await ord::{order_id}'s placement WITHOUT starting anything —
+        the ADR-0024 pending-window probe. Used when pricing refused a
+        retry: if a durable workflow is already making this order, its ack
+        outranks the refusal (the customer must hear about THAT order, not
+        re-confirm into a second one). Raises SagaGone when no such
+        workflow is running (the refusal stands) or SagaUnavailable on
+        transport trouble."""
         ...
 
     async def signal_decision(self, order_id: str, verdict: Verdict) -> None:

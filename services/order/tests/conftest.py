@@ -5,13 +5,11 @@ import pytest
 from fastapi.testclient import TestClient
 from order.activities import OrderActivities
 from order.config import Settings
-from order.db import idempotency_keys
-from order.domain.ports import AddressNotFound, PlacementPending
+from order.domain.ports import AddressNotFound, PlacementPending, SagaGone
 from order.domain.transitions import transition
 from order.main import create_app
 from order.values import PlacementAck
 from smartfood_auth import AuthContext, headers_for
-from smartfood_idempotency import IdempotencyStore
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 _CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
@@ -56,21 +54,26 @@ class RecordingSaga:
     Placement lives in the saga now (ADR-0023), so a double that merely
     recorded the call would leave every API test with no order to read.
     Instead `place` runs the real create_order activity inline against the
-    app's own sessionmaker: the same four writes, the same idempotency
-    completion, minus Temporal. Signals stay recorded.
+    app's own sessionmaker: the same three writes, minus Temporal.
+    Signals stay recorded.
 
     Injection knobs: `pending` makes placement answer PlacementPending
-    (slow worker), `fail_place` raises (Temporal outage / closed saga), and
-    `fail_with` makes the NEXT signal raise, then clears."""
+    (slow worker), `fail_place` raises (Temporal outage / closed saga),
+    `attach_ack` scripts attach_placement (default: SagaGone — no workflow
+    is running, the common case), and `fail_with` makes the NEXT signal
+    raise, then clears."""
 
     def __init__(self):
         self.placed: list[str] = []
+        self.attaches: list[str] = []
         self.decisions: list[tuple[str, str]] = []
         self.food_ready: list[str] = []
         self.cancels: list[str] = []
         self.fail_with: Exception | None = None
         self.fail_place: Exception | None = None
+        self.fail_place_after_create: Exception | None = None
         self.pending = False
+        self.attach_ack: PlacementAck | PlacementPending | None = None
         self._activities = None
 
     def bind(self, sessions) -> None:
@@ -80,7 +83,6 @@ class RecordingSaga:
             sessions,
             None,  # type: ignore[arg-type] — placement touches no inventory
             None,  # type: ignore[arg-type] — nor payment
-            IdempotencyStore(sessions, idempotency_keys),
         )
 
     async def place(self, placement):
@@ -91,7 +93,17 @@ class RecordingSaga:
             return PlacementPending(placement.order_id)
         assert self._activities is not None, "bind() the saga to the app's sessions first"
         status = await self._activities.create_order(placement)
+        if self.fail_place_after_create is not None:
+            # The read→start race: the order landed, but the RPC's answer
+            # was a refusal (e.g. the workflow closed in the gap).
+            raise self.fail_place_after_create
         return PlacementAck(order_id=placement.order_id, status=status)
+
+    async def attach_placement(self, order_id: str):
+        self.attaches.append(order_id)
+        if self.attach_ack is None:
+            raise SagaGone(f"ord::{order_id}")  # nothing running — the default world
+        return self.attach_ack
 
     async def signal_decision(self, order_id: str, verdict: str) -> None:
         self._maybe_fail()

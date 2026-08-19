@@ -10,7 +10,7 @@ Companion to [erd.md](erd.md): the ERD shows what is stored; this shows **how da
 | Event id              | `uuid5(NS, "{aggregate_type}:{aggregate_id}:{version}:{event_type}")` | `uuid5("order:ord_42:3:OrderConfirmed")` | Deterministic — same fact, same id, always → consumer dedupe, safe replays    |
 | Notification id       | `ntf_ + uuid5(NS, "{event_id}:{recipient_type}:{recipient_id}").hex`  | `ntf_e9cd…`                              | Deterministic per (event, recipient) → redelivery collides on PK, absorbed    |
 | Money idempotency key | `"{order_id}:{op}"`                                                   | `ord_42:auth`, `ord_42:capture`          | Natural key — one auth per order, ever                                        |
-| HTTP idempotency key  | client uuid, minted per **cart-body-hash**, persisted in localStorage | header `Idempotency-Key: K`              | Same cart resubmitted = same key = replay; changed cart = new key = new order |
+| HTTP idempotency key  | client uuid, minted per **cart-body-hash**, persisted in localStorage | header `Idempotency-Key: K`              | The DERIVATION SEED, not a ledger (ADR-0024): `order_id = uuid5(sub:K)`, and the orders row is the record — same cart = same key = same order; changed cart = new key = new order |
 | Workflow ids          | `ord::{order_id}` / `dlv::{order_id}`                                 | `ord::ord_42`                            | Identity, not randomness → `REJECT_DUPLICATE` makes every re-start a no-op    |
 | Consumer dedupe       | `(consumer_group, event_id)` row, or the deterministic PK itself      | —                                        | "Have I seen this fact?" answerable only because facts have stable names      |
 
@@ -20,7 +20,7 @@ Companion to [erd.md](erd.md): the ERD shows what is stored; this shows **how da
 
 ## 1. Order placement — `POST /v1/orders`
 
-The four-writes-one-transaction placement — written by the SAGA since ADR-0023, with the HTTP request waiting on one update-with-start RPC.
+Placement, written by the SAGA (ADR-0023) with the orders row as its own idempotency record (ADR-0024): the HTTP request reads the row, prices, then waits on one update-with-start RPC.
 
 ```mermaid
 sequenceDiagram
@@ -37,7 +37,7 @@ sequenceDiagram
     FE->>E: POST /v1/orders + Bearer JWT<br/>Idempotency-Key K = uuid per body-hash, from localStorage
     Note over E: verify JWT once via JWKS<br/>STRIP client identity headers<br/>STAMP X-Auth-Sub usr_1, X-Auth-Role customer
     E->>O: forward with stamped headers
-    O->>DB: idempotency.reserve scope=usr_1, key=K,<br/>body_hash=sha256 of body → Reserved
+    O->>DB: SELECT orders WHERE order_id = derived id<br/>row + hash match → 202 replay, current status — STOP<br/>row + hash differs → 422 reuse — STOP<br/>no row → continue (fresh placement)
     O->>I: GET internal address adr_1 for usr_1<br/>system headers sub=svc:order + traceparent
     I-->>O: address → delivery_address_snapshot
     O->>C: GET internal pricing snapshot for rst_9
@@ -47,22 +47,21 @@ sequenceDiagram
     O->>T: execute_update_with_start_workflow — ONE RPC<br/>start ord::ord_42, USE_EXISTING + REJECT_DUPLICATE<br/>update await_placement
     T->>W: workflow task → activity create_order
     rect rgb(0,0,0)
-        Note over W,DB: ONE TRANSACTION — the four writes
-        W->>DB: INSERT orders: status PLACED, aggregate_version 0,<br/>menu_version 7, pricing/address/name snapshots
+        Note over W,DB: ONE TRANSACTION — the three writes
+        W->>DB: INSERT orders: status PLACED, aggregate_version 0,<br/>menu_version 7, request_hash, pricing/address/name snapshots
         W->>DB: INSERT order_items: name, unit_price 1200,<br/>option Family +600, line_total 3600
         W->>DB: INSERT outbox: OrderPlaced<br/>id = uuid5 of "order:ord_42:0:OrderPlaced"
-        W->>DB: idempotency.complete — 202 body stored WITH the order
         W->>DB: COMMIT
     end
     W-->>T: PlacementAck ord_42 PLACED — the update resolves
     T-->>O: ack
     O-->>FE: 202 order_id ord_42, status PLACED
-    Note over O,T: waited past 2s? still 202 — the workflow is durable<br/>Temporal unreachable? 503 and the key stays HELD,<br/>so the retry re-derives ord_42 instead of a second order
+    Note over O,T: waited past 2s? still 202 — the workflow is durable<br/>Temporal unreachable? 503 with NOTHING written —<br/>the retry re-derives ord_42 and just runs again
     Note over FE: navigate to /orders/ord_42 — the poll drives<br/>the placing-your-order → confirmed screen
     Note over W: the same workflow runs straight on into<br/>validate_and_reserve → authorize_payment → confirm_order
 ```
 
-**Replay:** same `K` again → `reserve()` returns `Replay` → the _stored_ 202 body returns byte-identical with `Idempotent-Replay: true`; nothing below the idempotency check re-executes. Same key + different body → `422 IDEMPOTENCY_KEY_REUSE`.
+**Replay (ADR-0024):** same `K` again → the row-read at the top answers — 202 with the order's **current** status and `Idempotent-Replay: true`; nothing below it re-executes (so a replay is immune to menu drift). Same key + different body → `422 IDEMPOTENCY_KEY_REUSE` via the row's `request_hash`. Retry landing in the pending window (no row yet)? It attaches to the running workflow — and if pricing refuses because the menu drifted meanwhile, the running workflow's ack **outranks the refusal**.
 
 ---
 

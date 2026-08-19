@@ -47,21 +47,6 @@ class Settings(BaseSettings):
     # latency grows; lower it to fail fast toward the pending screen.
     placement_await_seconds: float = 2.0
 
-    # How long a reserved-but-uncompleted placement key blocks a retry of the
-    # SAME key. The library default is 300s, sized for "a crash mid-
-    # transaction — do not re-execute eagerly". Placement no longer needs
-    # that caution: the order id is derived from the key (ADR-0023), so a
-    # takeover provably converges on the same order and the same workflow
-    # instead of minting a second one. Short wins — after a Temporal outage
-    # the customer would otherwise be locked out of THAT cart for 5 minutes.
-    placement_key_ttl_seconds: int = 30
-
-    # Idempotency-key garbage collection: nothing else reclaims these rows.
-    # The janitor sleeps first, so a boot never triggers a table-wide delete
-    # and the unit suites never reach a tick. 0 disables it.
-    idempotency_purge_interval_seconds: float = 3600.0
-    idempotency_orphan_ttl_seconds: float = 3600.0
-
     # Tests use sqlite + create_all; containers run Alembic migrations (S3).
     create_all: bool = False
 

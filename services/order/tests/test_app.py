@@ -30,8 +30,7 @@ def _placement(order_id="ord_1"):
 
     return PlacementInput(
         order_id=order_id,
-        scope="usr_1",
-        idem_key="K-1",
+        request_hash="hash-of-K-1",
         user_id="usr_1",
         restaurant_id="rst_1",
         restaurant_name="Biryani House",
@@ -158,6 +157,84 @@ async def test_place_update_failure_is_saga_unavailable_not_a_500():
     saga, _ = _place_saga(raises=WorkflowUpdateFailedError(RuntimeError("activity failed")))
     with pytest.raises(SagaUnavailable):
         await saga.place(_placement())
+
+
+def _attach_saga(*, answer=None, raises=None):
+    """A TemporalSaga whose update-only RPC either returns or raises."""
+    from order.adapters.temporal_client import TemporalSaga
+
+    calls: list = []
+
+    class FakeHandle:
+        def __init__(self, workflow_id):
+            self._id = workflow_id
+
+        async def execute_update(self, update, *, result_type, rpc_timeout):
+            calls.append((self._id, update, rpc_timeout))
+            if raises is not None:
+                raise raises
+            return answer
+
+    class FakeClient:
+        def get_workflow_handle(self, workflow_id):
+            return FakeHandle(workflow_id)
+
+    saga = TemporalSaga(
+        "unused:7233",
+        task_queue="order-tq",
+        accept_timeout_s=180,
+        pickup_delay_s=20,
+        dropoff_delay_s=30,
+        await_seconds=2.0,
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+    return saga, calls
+
+
+async def test_attach_placement_awaits_the_update_without_starting():
+    """The ADR-0024 probe: update-only against ord::{id}, same await
+    budget as place(), no WithStart anywhere near it."""
+    from datetime import timedelta
+
+    from order.values import UPDATE_AWAIT_PLACEMENT, PlacementAck
+
+    saga, calls = _attach_saga(answer=PlacementAck(order_id="ord_1", status="PLACED"))
+    ack = await saga.attach_placement("ord_1")
+    assert ack == PlacementAck(order_id="ord_1", status="PLACED")
+    assert calls == [("ord::ord_1", UPDATE_AWAIT_PLACEMENT, timedelta(seconds=2.0))]
+
+
+async def test_attach_placement_maps_every_failure_to_a_domain_answer():
+    """NOT_FOUND (no workflow, or it finished) → SagaGone; both timeout
+    flavours → pending (the workflow is real and slow); update-failed and
+    transport trouble → SagaUnavailable."""
+    import pytest
+    from order.domain.ports import PlacementPending, SagaGone, SagaUnavailable
+    from temporalio.client import (
+        WorkflowUpdateFailedError,
+        WorkflowUpdateRPCTimeoutOrCancelledError,
+    )
+    from temporalio.service import RPCError, RPCStatusCode
+
+    saga, _ = _attach_saga(raises=RPCError("no workflow", RPCStatusCode.NOT_FOUND, b""))
+    with pytest.raises(SagaGone):
+        await saga.attach_placement("ord_1")
+
+    for timeout in (
+        WorkflowUpdateRPCTimeoutOrCancelledError(),
+        RPCError("deadline", RPCStatusCode.DEADLINE_EXCEEDED, b""),
+    ):
+        saga, _ = _attach_saga(raises=timeout)
+        assert await saga.attach_placement("ord_1") == PlacementPending("ord_1")
+
+    for hard in (
+        WorkflowUpdateFailedError(RuntimeError("activity failed")),
+        RPCError("conn refused", RPCStatusCode.UNAVAILABLE, b""),
+        OSError("dns says no"),
+    ):
+        saga, _ = _attach_saga(raises=hard)
+        with pytest.raises(SagaUnavailable):
+            await saga.attach_placement("ord_1")
 
 
 async def test_place_transport_failures_are_saga_unavailable():
@@ -287,30 +364,3 @@ def test_injected_poller_lives_and_dies_with_the_app():
         pass
     assert poller.started and poller.cancelled
 
-
-def test_idempotency_janitor_is_gated_off_when_disabled():
-    """Interval 0 = no janitor task (the same gate the old sweeper needed:
-    a background writer sharing a sqlite StaticPool with requests is a
-    race, not a feature). The default path is exercised by every other
-    app test — the janitor sleeps first, so it never ticks in a suite."""
-    app = create_app(
-        Settings(
-            database_url="sqlite+aiosqlite://",
-            create_all=True,
-            idempotency_purge_interval_seconds=0,
-        )
-    )
-    with TestClient(app) as c:
-        assert c.get("/healthz").status_code == 200
-
-
-def test_placement_keys_use_the_short_takeover_ttl():
-    """The 30s default is load-bearing UX (ADR-0023): after a Temporal
-    outage the customer would otherwise be locked out of THAT cart for the
-    library's 300s. Pinning the wiring keeps a config rename from silently
-    restoring the long window."""
-    from datetime import timedelta
-
-    app = create_app(Settings(database_url="sqlite+aiosqlite://", create_all=True))
-    store = app.state.service._idempotency
-    assert store._in_progress_ttl == timedelta(seconds=30)

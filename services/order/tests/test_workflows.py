@@ -51,8 +51,7 @@ def placement_for(order_id: str) -> PlacementInput:
     activities see (ADR-0023 deleted the price_order round trip)."""
     return PlacementInput(
         order_id=order_id,
-        scope="usr_1",
-        idem_key=f"K-{order_id}",
+        request_hash=f"hash-of-{order_id}",
         user_id="usr_1",
         restaurant_id="rst_1",
         restaurant_name="Biryani House",
@@ -578,9 +577,8 @@ async def test_build_worker_registers_the_full_surface(env):
     """The worker composition seam: real OrderActivities wired end to end
     through build_worker and driven by the real workflow."""
     from order.activities import OrderActivities
-    from order.db import idempotency_keys, metadata
+    from order.db import metadata
     from order.worker import build_worker
-    from smartfood_idempotency import IdempotencyStore
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.pool import StaticPool
 
@@ -599,7 +597,6 @@ async def test_build_worker_registers_the_full_surface(env):
         sessions,
         NullClient(),  # type: ignore[arg-type]
         NullClient(),  # type: ignore[arg-type]
-        IdempotencyStore(sessions, idempotency_keys),
     )
     worker = build_worker(env.client, activities, task_queue="tq-build-test")
     assert worker.task_queue == "tq-build-test"

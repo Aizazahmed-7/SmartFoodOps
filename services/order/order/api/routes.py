@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import Field
 from smartfood_api import ApiError, ErrorCode, StrictModel
 from smartfood_auth import AuthContext, Role, require_role
-from smartfood_idempotency import BodyMismatch, InProgress, Replay, body_hash
+from smartfood_idempotency import body_hash  # the canonical sha256 — payment shares it
 from smartfood_pricing import (
     InvalidSelection,
     ItemUnavailable,
@@ -32,11 +32,13 @@ from ..domain.ports import (
 from ..domain.service import (
     CancelAlreadyDone,
     CancelSubmitted,
+    HashMismatch,
     InvalidCursor,
     NotCancellable,
     OrderNotFound,
     OrderService,
     Placed,
+    Replayed,
     placement_response,
 )
 
@@ -183,9 +185,9 @@ async def place_order(
     except _PRICING_ERRORS as exc:
         raise _map_pricing_errors(exc) from None
     except SagaUnavailable:
-        # ADR-0023's accepted cost: the orchestrator is now on the checkout
-        # path, so its outage is a checkout outage. Retry-After + an
-        # unreleased key means the client's retry lands on the SAME order id.
+        # ADR-0023's accepted cost: the orchestrator is on the checkout
+        # path, so its outage is a checkout outage. Nothing was written —
+        # the retry re-derives the same order id and simply runs again.
         raise ApiError(
             ErrorCode.DEPENDENCY_UNAVAILABLE,
             "temporarily unavailable",
@@ -200,20 +202,15 @@ async def place_order(
         # row yet. 202 is still the truthful answer — the alternative, a
         # 5xx, would tell the customer to re-order against a live workflow.
         return placement_response(outcome.order_id)
-    if isinstance(outcome, Replay):
+    if isinstance(outcome, Replayed):
+        # The orders row answered (ADR-0024): same shape, CURRENT status —
+        # the truth may have advanced past PLACED, and that is a feature.
         return JSONResponse(
-            status_code=outcome.response_status,
-            content=outcome.response_body,
+            status_code=202,
+            content=placement_response(outcome.order_id, outcome.status),
             headers={"Idempotent-Replay": "true"},
         )
-    if isinstance(outcome, InProgress):
-        raise ApiError(
-            ErrorCode.IDEMPOTENCY_IN_PROGRESS,
-            "a request with this key is already executing",
-            409,
-            headers={"Retry-After": "1"},
-        )
-    assert isinstance(outcome, BodyMismatch)
+    assert isinstance(outcome, HashMismatch)
     raise ApiError(
         ErrorCode.IDEMPOTENCY_KEY_REUSE, "this key was used with a different request body", 422
     )

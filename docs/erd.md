@@ -1,6 +1,6 @@
 # SmartFoodOps — ERD (as built, W3)
 
-**Read this first:** the platform is database-per-service — six PostgreSQL databases, one per owning service, and **no foreign keys ever cross a database**. Real FK lines appear only inside each diagram; references _between_ services travel as plain id columns (shown in the last diagram) and are kept consistent by events + idempotent consumers, not constraints. Two table shapes come from shared libs and repeat across services: `outbox` (smartfood-outbox, 9 columns) and `idempotency_keys` (smartfood-idempotency).
+**Read this first:** the platform is database-per-service — six PostgreSQL databases, one per owning service, and **no foreign keys ever cross a database**. Real FK lines appear only inside each diagram; references _between_ services travel as plain id columns (shown in the last diagram) and are kept consistent by events + idempotent consumers, not constraints. Two table shapes come from shared libs: `outbox` (smartfood-outbox, 9 columns) repeats across services; `idempotency_keys` (smartfood-idempotency) survives only in payment_db — order's copy was retired by ADR-0024 (the orders row itself is placement's idempotency record).
 
 ---
 
@@ -270,6 +270,7 @@ erDiagram
         int aggregate_version
         text payment_method "CHECK: CARD|COD"
         text card_token
+        text request_hash "ADR-0024: body guard; NULL = pre-0024 row"
         int menu_version "pinned at placement"
         json pricing_snapshot "totals; activities READ, never recompute"
         json delivery_address_snapshot
@@ -286,15 +287,6 @@ erDiagram
         int qty "CHECK 1..50"
         json options_snapshot
         int line_total_cents
-    }
-    idempotency_keys {
-        text scope PK "user sub"
-        text idem_key PK
-        text body_hash "same key + new body = 422"
-        text status "IN_PROGRESS|COMPLETE"
-        int response_status
-        json response_body "stored 202, replayed verbatim"
-        timestamptz created_at
     }
     outbox {
         text id PK
@@ -335,11 +327,14 @@ Indexes worth knowing: `ix_orders_history (user_id, placed_at DESC, order_id DES
 | 8                 | OrderDelivered | "order:ord_42:8:OrderDelivered" _(v4–v7 = kitchen + pickup, silent)_                |
 | 9                 | OrderSettled   | "order:ord_42:9:OrderSettled"                                                       |
 
-`idempotency_keys` — the stored answer that makes replays byte-identical:
+**Idempotency without a table (ADR-0024)** — `order_id = ord_ + uuid5(NS, "usr_1:K-7f3a…")`, so the ROW is the record:
 
-| scope | idem_key | status   | response_status | response_body                      |
-| ----- | -------- | -------- | --------------- | ---------------------------------- |
-| usr_1 | K-7f3a…  | COMPLETE | 202             | {order_id: ord_42, status: PLACED} |
+| retry with key K-7f3a… finds | answer |
+| ---------------------------- | ------ |
+| row, `request_hash` matches | 202 `{order_id: ord_42, status: <current>}` + `Idempotent-Replay: true` |
+| row, hash differs | 422 `IDEMPOTENCY_KEY_REUSE` — same key, different cart |
+| no row, workflow running | attaches via `USE_EXISTING` / the `await_placement` probe |
+| no row, nothing running | places fresh — same derived id either way |
 
 ## payment_db — the money
 
