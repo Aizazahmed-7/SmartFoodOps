@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager, suppress
 
 import httpx
 from fastapi import FastAPI
-from smartfood_api import install_error_handlers
+from smartfood_api import install_error_handlers, mount_observability
 from smartfood_idempotency import IdempotencyJanitor, IdempotencyStore
 from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, Topic, topic
 from smartfood_otel import RequestContextMiddleware, setup_logging
@@ -133,6 +133,7 @@ def create_app(
     app = FastAPI(title="order", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
+    mount_observability(app, engine=engine)
     # Exposed for the same reason state.service is: it is this app's one
     # database handle. Tests bind their in-process saga double to it so
     # placement writes land in the app's own (in-memory) database.

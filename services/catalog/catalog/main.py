@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager, suppress
 import httpx
 import redis.asyncio as aioredis
 from fastapi import FastAPI
-from smartfood_api import install_error_handlers
+from smartfood_api import install_error_handlers, mount_observability
 from smartfood_kafka import (
     AvroSerde,
     EventProducer,
@@ -116,6 +116,7 @@ def create_app(
     app = FastAPI(title="catalog", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
+    mount_observability(app, engine=engine)
 
     # Composition root: repo ← service ← routes. The API layer only ever
     # sees app.state.service; the domain only sees the sessionmaker.

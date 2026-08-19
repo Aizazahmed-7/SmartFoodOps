@@ -6,6 +6,7 @@ for the real OpenTelemetry SDK without changing this surface.
 """
 
 from .logging import bind_order, get_logger, setup_logging
+from .metrics import observe_request, render_metrics
 from .middleware import REQUEST_ID_HEADER, RequestContextMiddleware
 from .propagation import (
     current_traceparent,
@@ -16,6 +17,8 @@ from .propagation import (
 
 __all__ = [
     "current_traceparent",
+    "observe_request",
+    "render_metrics",
     "REQUEST_ID_HEADER",
     "RequestContextMiddleware",
     "bind_order",

@@ -2,7 +2,7 @@
 name = "smartfood-otel"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = ["structlog>=24.4"]
+dependencies = ["structlog>=24.4", "prometheus-client>=0.20"]
 
 [build-system]
 requires = ["hatchling"]

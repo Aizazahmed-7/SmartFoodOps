@@ -5,7 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
-from smartfood_api import install_error_handlers
+from smartfood_api import install_error_handlers, mount_observability
 from smartfood_kafka import AvroSerde, EventConsumer, EventProducer, SchemaRegistry, Topic, topic
 from smartfood_otel import RequestContextMiddleware, setup_logging
 from smartfood_outbox import OutboxPoller
@@ -108,6 +108,7 @@ def create_app(
     app = FastAPI(title="inventory", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
+    mount_observability(app, engine=engine)
     app.state.service = service
     app.include_router(router)
 

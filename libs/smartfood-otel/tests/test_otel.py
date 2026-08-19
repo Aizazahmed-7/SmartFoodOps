@@ -172,3 +172,55 @@ def test_middleware_sets_current_traceparent():
     inbound = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
     body = TestClient(app).get("/probe", headers={"traceparent": inbound}).json()
     assert body["traceparent"] == inbound  # request-scoped and propagated
+
+
+# ── metrics ────────────────────────────────────────────────────────
+
+from smartfood_otel import observe_request, render_metrics  # noqa: E402
+from smartfood_otel.metrics import REGISTRY  # noqa: E402
+
+
+def _count(method: str, status: int) -> float:
+    return (
+        REGISTRY.get_sample_value(
+            "http_request_duration_seconds_count", {"method": method, "status": str(status)}
+        )
+        or 0.0
+    )
+
+
+def test_observe_request_records_into_the_histogram():
+    before = _count("GET", 200)
+    observe_request("GET", 200, 0.01)
+    assert _count("GET", 200) == before + 1
+
+
+def test_render_metrics_is_prometheus_exposition():
+    observe_request("POST", 201, 0.02)
+    body, content_type = render_metrics()
+    text = body.decode()
+    assert "http_request_duration_seconds" in text
+    assert 'method="POST"' in text and 'status="201"' in text
+    assert content_type.startswith("text/plain")
+
+
+def test_middleware_instruments_real_requests_but_skips_ops_paths():
+    """A handled request lands in the histogram; the ops endpoints
+    (/metrics, /healthz, /readyz) are excluded so a scrape never measures
+    itself and heartbeats don't drown real traffic."""
+    app = FastAPI()
+    app.add_middleware(RequestContextMiddleware)
+
+    @app.get("/ping")
+    async def ping() -> dict[str, bool]:
+        return {"ok": True}
+
+    @app.get("/readyz")
+    async def readyz() -> dict[str, str]:
+        return {"status": "ready"}
+
+    client = TestClient(app)
+    before = _count("GET", 200)
+    client.get("/ping")  # instrumented → +1
+    client.get("/readyz")  # skipped → +0
+    assert _count("GET", 200) == before + 1

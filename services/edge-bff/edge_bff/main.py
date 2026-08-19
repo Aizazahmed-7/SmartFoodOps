@@ -14,7 +14,7 @@ import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
-from smartfood_api import ApiError, ErrorCode, install_error_handlers
+from smartfood_api import ApiError, ErrorCode, install_error_handlers, mount_observability
 from smartfood_auth import STRIP_HEADERS, JwksVerifier, context_from_claims, headers_for
 from smartfood_otel import RequestContextMiddleware, get_logger, setup_logging
 
@@ -70,6 +70,7 @@ def create_app(
     )
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
+    mount_observability(app)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

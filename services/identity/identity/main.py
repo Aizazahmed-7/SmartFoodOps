@@ -4,7 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
-from smartfood_api import install_error_handlers
+from smartfood_api import install_error_handlers, mount_observability
 from smartfood_auth import TokenIssuer
 from smartfood_kafka import EventConsumer
 from smartfood_otel import RequestContextMiddleware, setup_logging
@@ -81,6 +81,7 @@ def create_app(
     app = FastAPI(title="identity", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
+    mount_observability(app, engine=engine)
 
     key = load_or_generate(settings.signing_key_path)
     issuer = TokenIssuer(

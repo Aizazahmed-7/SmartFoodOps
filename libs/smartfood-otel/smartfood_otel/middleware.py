@@ -17,6 +17,7 @@ from typing import Any
 import structlog
 
 from .logging import get_logger
+from .metrics import observe_request
 from .propagation import (
     extract_traceparent,
     make_traceparent,
@@ -29,6 +30,9 @@ REQUEST_ID_HEADER = "x-request-id"
 # Docker healthchecks poll these every few seconds — logging them would
 # bury real traffic under heartbeat noise.
 _QUIET_PATHS = {"/healthz", "/readyz"}
+# Ops endpoints excluded from the HTTP histogram: a metrics scrape must
+# not measure itself, and the health probes are heartbeat noise.
+_METRICS_SKIP = {"/healthz", "/readyz", "/metrics"}
 
 log = get_logger("smartfood-otel.access")
 
@@ -81,11 +85,17 @@ class RequestContextMiddleware:
             raise
         finally:
             path = scope.get("path", "")
+            duration_s = time.perf_counter() - started
             if path not in _QUIET_PATHS:
                 log.info(
                     "request completed",
                     method=scope.get("method", ""),
                     path=path,
                     status=status["code"],
-                    duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                    duration_ms=round(duration_s * 1000, 1),
                 )
+            # One histogram observation per request, from the same numbers —
+            # status is None only if the response never started (a crash the
+            # error boundary turns into 500, already stamped above).
+            if path not in _METRICS_SKIP and status["code"] is not None:
+                observe_request(scope.get("method", ""), status["code"], duration_s)
