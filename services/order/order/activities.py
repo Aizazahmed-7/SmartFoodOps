@@ -26,6 +26,7 @@ from .db import OrderStatus
 from .domain.ports import InventoryOpsPort, PaymentOpsPort, PaymentStateConflict
 from .domain.service import placement_response
 from .domain.transitions import IllegalTransition, begin_cancel_from, transition
+from .metrics import SAGA_OUTCOMES
 from .values import (
     ActivityName,
     AuthResult,
@@ -230,6 +231,7 @@ class OrderActivities:
             target="SETTLED",
             event=EventType.ORDER_SETTLED,
         )
+        SAGA_OUTCOMES.labels(outcome="settled", reason="").inc()
 
     # ── the unwind (§7 compensation table) ─────────────────────────
 
@@ -273,6 +275,7 @@ class OrderActivities:
             event=EventType.ORDER_CANCELLED,
             cancel_reason=reason,
         )
+        SAGA_OUTCOMES.labels(outcome="cancelled", reason=str(reason)).inc()
 
     # ── helpers ────────────────────────────────────────────────────
 

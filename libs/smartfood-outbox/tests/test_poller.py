@@ -202,3 +202,31 @@ async def test_cancellation_mid_drain_propagates():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert await _unpublished(sessions) == 1  # nothing was marked
+
+
+# ── metrics: what NFR-6's lag SLO is measured with ─────────────────
+
+
+async def test_drain_records_lag_published_and_backlog():
+    from smartfood_otel import REGISTRY
+
+    def sample(name):
+        return REGISTRY.get_sample_value(name) or 0.0
+
+    published_before = sample("outbox_published_total")
+    lag_count_before = sample("outbox_publish_lag_seconds_count")
+
+    sessions = await _sessions()
+    await _stage(sessions, 3)
+    producer = StubProducer()
+    poller = OutboxPoller(
+        sessions, outbox, topic="t", producer=producer, cell_id="c1", batch_size=2
+    )
+
+    assert await poller.drain_once() == 2  # first batch: 2 published, 1 left
+    assert sample("outbox_published_total") == published_before + 2
+    assert sample("outbox_publish_lag_seconds_count") == lag_count_before + 2
+    assert sample("outbox_pending") == 1.0  # the gauge is the batch's leftover
+
+    assert await poller.drain_once() == 1
+    assert sample("outbox_pending") == 0.0

@@ -1,0 +1,65 @@
+# The SLOs the ADRs assert, armed. Thresholds cite their source so nobody
+# has to archaeology them later.
+groups:
+  - name: smartfoodops
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.job }} target is unreachable"
+
+      - alert: HttpErrorRateHigh
+        # >5% of requests answering 5xx over 10m, per service.
+        expr: |
+          sum by (job) (rate(http_request_duration_seconds_count{status=~"5.."}[10m]))
+            / sum by (job) (rate(http_request_duration_seconds_count[10m])) > 0.05
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.job }} 5xx ratio above 5%"
+
+      - alert: PlacementP95Breach
+        # NFR-2: placement p95 < 3s — measured on FRESH placements only
+        # (replays/refusals answer in microseconds and would flatter it).
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(order_placement_seconds_bucket{outcome="placed"}[10m]))) > 3
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "placement p95 above the 3s SLO (NFR-2)"
+
+      - alert: OutboxPublishLagHigh
+        # NFR-6: outbox publish lag p99 < 5s.
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(outbox_publish_lag_seconds_bucket[10m]))) > 5
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "outbox staged→published p99 above 5s (NFR-6)"
+
+      - alert: OutboxBacklogGrowing
+        expr: outbox_pending > 100
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "outbox backlog above 100 rows for 10m — poller stalled?"
+
+      - alert: EventsParkedOnDLQ
+        # ADR-0021: ANY parked event is an ops item — it means five retries
+        # failed or the bytes were undecodable.
+        expr: increase(consumer_events_total{result="dlq"}[10m]) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.group }} parked events to its DLQ"
+
+      - alert: SystemTimeoutCancels
+        # The forward-deadline unwind firing means a dependency stayed down
+        # past forward_deadline_s while customers were ordering.
+        expr: increase(order_saga_outcomes_total{reason="system_timeout"}[10m]) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "orders cancelled by the saga's forward deadline"

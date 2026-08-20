@@ -15,7 +15,13 @@ already identifies which service a series came from, so putting the name in
 the metric too would just be a redundant, higher-cardinality copy.
 """
 
-from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Histogram, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Histogram,
+    generate_latest,
+    start_http_server,
+)
 
 REGISTRY = CollectorRegistry()
 
@@ -42,3 +48,11 @@ def render_metrics() -> tuple[bytes, str]:
     """The /metrics response body + its content type — the text exposition
     format Prometheus scrapes."""
     return generate_latest(REGISTRY), CONTENT_TYPE_LATEST
+
+
+def serve_metrics(port: int) -> int:
+    """Expose the registry over plain HTTP — for processes that are not web
+    apps (the Temporal worker has no FastAPI to mount /metrics on). Returns
+    the BOUND port so callers passing 0 (tests) learn what they got."""
+    server, _thread = start_http_server(port, registry=REGISTRY)
+    return int(server.server_port)

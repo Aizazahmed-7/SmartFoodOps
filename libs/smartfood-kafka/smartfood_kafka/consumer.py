@@ -42,9 +42,22 @@ from typing import Any, Protocol
 
 import structlog
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-from smartfood_otel import get_logger, trace_id_of
+from prometheus_client import Counter
+from smartfood_otel import REGISTRY, get_logger, trace_id_of
 
 from .serde import SerdeError
+
+# One counter, one question per label pair: is this group healthy?
+#   handled — the at-least-once contract delivered value
+#   retried — transient handler failures (rate ~0 in a healthy system)
+#   dlq     — parked forensically; ANY increase is an ops signal (ADR-0021)
+#   crashed — a consume pass died and the supervisor rejoined
+CONSUMER_EVENTS = Counter(
+    "consumer_events_total",
+    "Consumer outcomes by group.",
+    labelnames=("group", "result"),
+    registry=REGISTRY,
+)
 
 log = get_logger("smartfood-kafka.consumer")
 
@@ -158,6 +171,7 @@ class EventConsumer:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                CONSUMER_EVENTS.labels(group=self._group, result="crashed").inc()
                 log.error(
                     "consumer pass crashed — rejoining",
                     group=self._group,
@@ -196,11 +210,13 @@ class EventConsumer:
         for attempt in range(1, self._max_attempts + 1):
             try:
                 await self._handler.handle(event)
+                CONSUMER_EVENTS.labels(group=self._group, result="handled").inc()
                 return
             except Exception as exc:
                 if attempt == self._max_attempts:
                     await self._park(message, dlq, exc, attempts=attempt)
                     return
+                CONSUMER_EVENTS.labels(group=self._group, result="retried").inc()
                 log.warning(
                     "handler failed — retrying",
                     group=self._group,
@@ -226,6 +242,7 @@ class EventConsumer:
             ("dlq.failed_at", datetime.now(UTC).isoformat().encode()),
         ]
         await dlq.send_and_wait(dlq_topic, message.value, key=message.key, headers=headers)
+        CONSUMER_EVENTS.labels(group=self._group, result="dlq").inc()
         log.error(
             "event parked to DLQ — needs ops replay",
             group=self._group,

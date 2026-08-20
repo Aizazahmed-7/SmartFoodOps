@@ -387,7 +387,33 @@ services:
     depends_on:
       redis: { condition: service_started }
 
+  # ── observability (profile obs): make up-obs ─────────────────────
+  prometheus:
+    profiles: [obs]
+    image: prom/prometheus:v2.53.0
+    ports: ["9090:9090"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    profiles: [obs]
+    image: grafana/grafana:11.1.0
+    ports: ["3000:3000"]
+    environment:
+      # Demo posture: no login wall. Anyone on localhost is an editor.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus: { condition: service_started }
+
 volumes:
+  prometheus-data:
   pg-data:
   kafka-data:
   temporal-data:

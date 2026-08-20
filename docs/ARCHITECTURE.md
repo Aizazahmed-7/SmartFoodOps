@@ -686,7 +686,7 @@ OTel everywhere; `order_id`/`delivery_id` in W3C baggage. Outbox rows store `tra
 
 **Metrics backend**: Prometheus scrapes every service (`/metrics`, RED/USE); Grafana renders dashboards and alerts. On AWS: **Amazon Managed Prometheus + Amazon Managed Grafana** — same PromQL and dashboards as the local `obs` profile, zero rewrite between laptop and prod.
 
-**Metric naming**: `smartfood_{service}_{noun}_{unit}`; counters end `_total`; durations are histograms using the shared bucket sets from `smartfood-otel` (`BUCKETS_FAST`/`BUCKETS_SLOW`) — one bucket vocabulary, so latency panels compare like-for-like across services.
+**Metric naming (as built)**: no service prefix — the Prometheus job label already identifies the service, so names carry the *domain* (`order_placement_seconds`, `order_saga_outcomes_total`, `outbox_publish_lag_seconds`, `consumer_events_total`, `http_request_duration_seconds`); counters end `_total`; durations are histograms on the shared registry in `smartfood-otel`. Instruments live in the lib or service that OWNS the behavior (poller metrics in smartfood-outbox, consumer metrics in smartfood-kafka), all against one registry, so a process's `/metrics` is exactly what it declared. The order worker — no web app — serves the registry on `:9106` via `serve_metrics()`; that target is where saga outcomes live.
 
 ### Key signals
 

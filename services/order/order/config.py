@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     idempotency_purge_interval_seconds: float = 3600.0
     idempotency_orphan_ttl_seconds: float = 3600.0
 
+    # The worker is not a web app, so its /metrics rides a bare
+    # prometheus_client HTTP server on this port. 0 disables (unit tests).
+    worker_metrics_port: int = 9106
+
     # Tests use sqlite + create_all; containers run Alembic migrations (S3).
     create_all: bool = False
 

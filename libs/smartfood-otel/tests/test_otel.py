@@ -224,3 +224,15 @@ def test_middleware_instruments_real_requests_but_skips_ops_paths():
     client.get("/ping")  # instrumented → +1
     client.get("/readyz")  # skipped → +0
     assert _count("GET", 200) == before + 1
+
+
+def test_serve_metrics_exposes_the_registry_over_http():
+    """The worker path: no FastAPI, just a bare exposition server. Port 0
+    lets the OS choose — the return value tells us where it landed."""
+    import urllib.request
+
+    from smartfood_otel import serve_metrics
+
+    port = serve_metrics(0)
+    body = urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5).read().decode()
+    assert "http_request_duration_seconds" in body

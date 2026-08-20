@@ -20,12 +20,25 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import sqlalchemy as sa
+from prometheus_client import Counter, Gauge, Histogram
 from smartfood_kafka import DOMAIN_EVENT_SCHEMA, DOMAIN_EVENT_SUBJECT
-from smartfood_otel import get_logger, trace_id_of
+from smartfood_otel import REGISTRY, get_logger, trace_id_of
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = get_logger("smartfood-outbox")
+
+# NFR-6 asserts publish lag p99 < 5s — these are what measure it. Lag is
+# observed at PUBLISH time (now − occurred_at), so a stalled poller shows
+# up as a growing gauge first, then as a lag spike when it recovers.
+OUTBOX_PUBLISHED = Counter("outbox_published_total", "Events drained to Kafka.", registry=REGISTRY)
+OUTBOX_LAG = Histogram(
+    "outbox_publish_lag_seconds",
+    "Staged→published latency per event.",
+    buckets=(0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0),
+    registry=REGISTRY,
+)
+OUTBOX_PENDING = Gauge("outbox_pending", "Rows staged but not yet published.", registry=REGISTRY)
 
 
 class DomainEventSender(Protocol):
@@ -120,11 +133,24 @@ class OutboxPoller:
                 )
             # Mark only after EVERY send in the batch was broker-confirmed —
             # a crash mid-batch re-sends the whole batch (dedupe absorbs it).
+            now = datetime.now(UTC)
+            for row in rows:
+                OUTBOX_LAG.observe((now - _aware(row.occurred_at)).total_seconds())
+            OUTBOX_PUBLISHED.inc(len(rows))
             await session.execute(
                 table.update()
                 .where(table.c.id.in_([row.id for row in rows]))
-                .values(published_at=datetime.now(UTC))
+                .values(published_at=now)
             )
+            # Backlog depth AFTER this batch: an indexed count (partial on
+            # published_at) — cheap at our scale, and the gauge every
+            # backlog alert keys on. Cost noted for the 20k rows/s future.
+            remaining = (
+                await session.execute(
+                    sa.select(sa.func.count()).where(table.c.published_at.is_(None))
+                )
+            ).scalar_one()
+            OUTBOX_PENDING.set(remaining)
             await session.commit()
             return len(rows)
 

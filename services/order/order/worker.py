@@ -14,7 +14,7 @@ import asyncio
 
 import httpx
 from smartfood_idempotency import IdempotencyStore
-from smartfood_otel import get_logger, setup_logging
+from smartfood_otel import get_logger, serve_metrics, setup_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from temporalio.client import Client
 from temporalio.worker import Worker
@@ -42,6 +42,8 @@ def build_worker(client: Client, activities: OrderActivities, *, task_queue: str
 async def main() -> None:  # pragma: no cover — live wiring (compose runs it)
     settings = Settings()
     setup_logging("order-worker")
+    if settings.worker_metrics_port > 0:
+        serve_metrics(settings.worker_metrics_port)  # saga outcomes live HERE
 
     client: Client | None = None
     while client is None:  # temporal may still be booting — retry forever

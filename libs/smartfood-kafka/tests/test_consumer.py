@@ -282,3 +282,52 @@ async def test_injected_doubles_are_reused_across_passes():
     dlq = StubDlq()
     consumer = _consumer(client, RecordingHandler(), dlq)
     assert consumer._make_client() is client and consumer._make_dlq() is dlq
+
+
+# ── metrics: the counters ops alerts key on (ADR-0021) ─────────────
+
+
+def _count(result: str) -> float:
+    from smartfood_otel import REGISTRY
+
+    return (
+        REGISTRY.get_sample_value(
+            "consumer_events_total", {"group": "test.group", "result": result}
+        )
+        or 0.0
+    )
+
+
+async def test_metrics_count_handled_retried_and_dlq():
+    """One flow, three counters: two failures then success = 2 retried +
+    1 handled; a poison message = 1 dlq. Deltas, not absolutes — the
+    registry is shared across the suite."""
+    before = {r: _count(r) for r in ("handled", "retried", "dlq")}
+
+    client = StubKafkaConsumer([_msg("e1")])
+    await _consumer(client, RecordingHandler(fail_times=2), StubDlq()).consume_once()
+
+    client = StubKafkaConsumer([_msg("e2")])
+    dlq = StubDlq()
+    await _consumer(client, RecordingHandler(fail_times=99), dlq, max_attempts=2).consume_once()
+
+    assert _count("handled") == before["handled"] + 1
+    assert _count("retried") == before["retried"] + 3  # 2 pre-success + 1 pre-park
+    assert _count("dlq") == before["dlq"] + 1
+    assert len(dlq.parked) == 1
+
+
+async def test_metrics_count_crashed_passes():
+    before = _count("crashed")
+
+    class ExplodingClient(StubKafkaConsumer):
+        async def start(self):
+            raise RuntimeError("broker gone")
+
+    consumer = _consumer(ExplodingClient([]), RecordingHandler(), StubDlq())
+    task = asyncio.create_task(consumer.run())
+    await _until(lambda: _count("crashed") > before)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _count("crashed") >= before + 1

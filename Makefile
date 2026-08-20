@@ -32,13 +32,17 @@ up-m3: ## Notifications milestone working set: the m2 set + notification
 	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
 	@echo "✔ m3 stack up — gateway :8080 · temporal-ui :8233 · notifications :8008"
 
+up-obs: ## m3 working set + Prometheus (:9090) + Grafana (:3000, anonymous)
+	$(COMPOSE) --profile core --profile apps --profile obs up -d --wait postgres redis kafka schema-registry temporal mock-psp gateway identity catalog edge-bff inventory order order-worker payment notification prometheus grafana
+	@echo "✔ obs stack up — grafana http://localhost:3000 · prometheus http://localhost:9090"
+
 up-full: up up-apps up-ui
 
 down:
-	$(COMPOSE) --profile core --profile apps --profile ui down
+	$(COMPOSE) --profile core --profile apps --profile ui --profile obs down
 
 nuke: ## Down + delete all volumes (fresh start)
-	$(COMPOSE) --profile core --profile apps --profile ui down -v
+	$(COMPOSE) --profile core --profile apps --profile ui --profile obs down -v
 
 # Profile flags are required even for logs: compose can't resolve a
 # profile-gated service (or its depends_on chain) without them.

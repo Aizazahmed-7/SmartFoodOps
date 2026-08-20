@@ -4,6 +4,7 @@ The route is a translator: DTOs → domain → responses, with the pricing and
 idempotency outcomes mapped onto the api-standards code catalog. No
 business logic lives here."""
 
+import time
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -39,6 +40,7 @@ from ..domain.service import (
     Placed,
     placement_response,
 )
+from ..metrics import PLACEMENT_SECONDS
 
 router = APIRouter()
 
@@ -162,6 +164,11 @@ async def place_order(
             422,
             details=[{"field": "Idempotency-Key", "issue": "required header"}],
         )
+    started = time.perf_counter()
+
+    def observed(outcome: str) -> None:
+        PLACEMENT_SECONDS.labels(outcome=outcome).observe(time.perf_counter() - started)
+
     try:
         outcome = await _svc(request).place(
             user_id=ctx.sub,
@@ -174,6 +181,7 @@ async def place_order(
             card_token=body.card_token,
         )
     except AddressNotFound:
+        observed("refused")
         raise ApiError(
             ErrorCode.NOT_FOUND,
             "unknown address",
@@ -181,11 +189,13 @@ async def place_order(
             details=[{"field": "address_id", "issue": "no such saved address"}],
         ) from None
     except _PRICING_ERRORS as exc:
+        observed("refused")
         raise _map_pricing_errors(exc) from None
     except SagaUnavailable:
         # ADR-0023's accepted cost: the orchestrator is now on the checkout
         # path, so its outage is a checkout outage. Retry-After + an
         # unreleased key means the client's retry lands on the SAME order id.
+        observed("saga_unavailable")
         raise ApiError(
             ErrorCode.DEPENDENCY_UNAVAILABLE,
             "temporarily unavailable",
@@ -194,19 +204,23 @@ async def place_order(
         ) from None
 
     if isinstance(outcome, Placed):
+        observed("placed")
         return placement_response(outcome.order_id, outcome.status)
     if isinstance(outcome, PlacementPending):
+        observed("pending")
         # The saga has the order and is durable; it just has not written the
         # row yet. 202 is still the truthful answer — the alternative, a
         # 5xx, would tell the customer to re-order against a live workflow.
         return placement_response(outcome.order_id)
     if isinstance(outcome, Replay):
+        observed("replay")
         return JSONResponse(
             status_code=outcome.response_status,
             content=outcome.response_body,
             headers={"Idempotent-Replay": "true"},
         )
     if isinstance(outcome, InProgress):
+        observed("in_progress")
         raise ApiError(
             ErrorCode.IDEMPOTENCY_IN_PROGRESS,
             "a request with this key is already executing",
@@ -214,6 +228,7 @@ async def place_order(
             headers={"Retry-After": "1"},
         )
     assert isinstance(outcome, BodyMismatch)
+    observed("body_mismatch")
     raise ApiError(
         ErrorCode.IDEMPOTENCY_KEY_REUSE, "this key was used with a different request body", 422
     )
