@@ -8,6 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
+    # OTLP/HTTP collector for span export (Jaeger). Empty = tracing off —
+    # the default everywhere without a collector, unit tests included.
+    otlp_endpoint: str = ""
+
     database_url: str = "postgresql+asyncpg://order_svc:order_svc@localhost:5432/order_db"
 
     # Synchronous reads: catalog's pricing snapshot + identity's address
@@ -65,6 +69,9 @@ class Settings(BaseSettings):
     # The worker is not a web app, so its /metrics rides a bare
     # prometheus_client HTTP server on this port. 0 disables (unit tests).
     worker_metrics_port: int = 9106
+    # Temporal's OWN metrics (schedule-to-start latency — THE worker
+    # autoscaling signal, ARCHITECTURE §14) on a second port. 0 disables.
+    worker_temporal_metrics_port: int = 9107
 
     # Tests use sqlite + create_all; containers run Alembic migrations (S3).
     create_all: bool = False

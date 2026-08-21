@@ -1,0 +1,25 @@
+# Alert ROUTING — Prometheus decides WHAT fires; this decides WHO hears.
+# Dev posture: alerts group and display in the Alertmanager UI (:9093) but
+# route to a receiver with no integrations (a deliberate blackhole). Going
+# to prod = adding e.g. slack_configs/pagerduty_configs to 'team' below —
+# the rules and this plumbing do not change.
+route:
+  receiver: team
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+
+receivers:
+  - name: team   # no integrations yet: visible in the UI, delivered nowhere
+
+# ── going live: put a real destination on `team` ───────────────────
+# 1. Create an incoming webhook in your Slack workspace (api.slack.com/apps
+#    → Incoming Webhooks) — a URL only you should ever see.
+# 2. Uncomment and paste; restart alertmanager. Nothing else changes.
+#
+#  - name: team
+#    slack_configs:
+#      - api_url: https://hooks.slack.com/services/XXX/YYY/ZZZ
+#        channel: "#smartfood-alerts"
+#        send_resolved: true

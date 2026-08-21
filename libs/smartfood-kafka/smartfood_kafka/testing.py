@@ -37,6 +37,7 @@ class StubKafkaConsumer:
         self.stopped = False
         self.commits = 0
         self.fail_commits = 0  # script N commit failures (at-least-once tests)
+        self._drained = False
 
     async def start(self) -> None:
         self.starts += 1
@@ -50,6 +51,14 @@ class StubKafkaConsumer:
             self.fail_commits -= 1
             raise RuntimeError("commit failed")
         self.commits += 1
+
+    async def getmany(self, timeout_ms: int = 0) -> dict[str, list[StubMessage]]:
+        """Bounded read for the DLQ replayer: everything once, then empty —
+        what a caught-up consumer group looks like."""
+        if self._drained:
+            return {}
+        self._drained = True
+        return {"tp-0": list(self._messages)} if self._messages else {}
 
     def __aiter__(self) -> Any:
         async def gen() -> Any:

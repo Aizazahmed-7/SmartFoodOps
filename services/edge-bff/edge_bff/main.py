@@ -16,7 +16,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse
 from smartfood_api import ApiError, ErrorCode, install_error_handlers, mount_observability
 from smartfood_auth import STRIP_HEADERS, JwksVerifier, context_from_claims, headers_for
-from smartfood_otel import RequestContextMiddleware, get_logger, setup_logging
+from smartfood_otel import RequestContextMiddleware, get_logger, setup_logging, setup_tracing
 
 from .config import Settings
 from .openapi import merge_specs
@@ -43,6 +43,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("edge-bff")
+    setup_tracing("edge-bff", settings.otlp_endpoint)
 
     http_client = http or httpx.AsyncClient(
         timeout=httpx.Timeout(settings.proxy_timeout_seconds, connect=3.0)

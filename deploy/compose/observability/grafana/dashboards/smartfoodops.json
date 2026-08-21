@@ -9,12 +9,45 @@
   },
   "panels": [
     {
+      "id": 9,
+      "title": "Request rate by service (RPS) \u2014 the R in RED",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (job) (rate(http_request_duration_seconds_count[5m]))",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum (rate(http_request_duration_seconds_count[5m]))",
+          "legendFormat": "TOTAL",
+          "refId": "B"
+        }
+      ]
+    },
+    {
       "id": 1,
       "title": "HTTP p95 latency by service",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 8,
         "w": 12,
         "h": 8
       },
@@ -32,7 +65,8 @@
         {
           "expr": "histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket[5m])))",
           "legendFormat": "{{job}}",
-          "refId": "A"
+          "refId": "A",
+          "exemplar": true
         }
       ]
     },
@@ -42,7 +76,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 0,
+        "y": 8,
         "w": 12,
         "h": 8
       },
@@ -70,7 +104,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 16,
         "w": 12,
         "h": 8
       },
@@ -88,12 +122,14 @@
         {
           "expr": "histogram_quantile(0.95, sum by (le) (rate(order_placement_seconds_bucket{outcome=\"placed\"}[5m])))",
           "legendFormat": "p95 placed",
-          "refId": "A"
+          "refId": "A",
+          "exemplar": true
         },
         {
           "expr": "histogram_quantile(0.99, sum by (le) (rate(order_placement_seconds_bucket{outcome=\"placed\"}[5m])))",
           "legendFormat": "p99 placed",
-          "refId": "B"
+          "refId": "B",
+          "exemplar": true
         }
       ]
     },
@@ -103,7 +139,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 8,
+        "y": 16,
         "w": 12,
         "h": 8
       },
@@ -131,7 +167,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 16,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -159,7 +195,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 16,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -192,7 +228,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 32,
         "w": 12,
         "h": 8
       },
@@ -220,7 +256,7 @@
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 24,
+        "y": 32,
         "w": 12,
         "h": 8
       },
@@ -239,6 +275,123 @@
           "expr": "up",
           "legendFormat": "{{job}}",
           "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Container CPU (cores) \u2014 cAdvisor (name label empty on Docker Desktop)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum by (name, id) (rate(container_cpu_usage_seconds_total{id=~\"/docker/.+\"}[2m])))",
+          "legendFormat": "{{name}}{{id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Container memory \u2014 cAdvisor",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "topk(10, container_memory_usage_bytes{id=~\"/docker/.+\"})",
+          "legendFormat": "{{name}}{{id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Kafka consumer lag by group (broker truth)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (consumergroup, topic) (kafka_consumergroup_lag)",
+          "legendFormat": "{{consumergroup}} {{topic}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Worker: activity schedule\u2192start p95 + DB pool in use",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(temporal_activity_schedule_to_start_latency_bucket[5m])))",
+          "legendFormat": "schedule\u2192start p95 (s)",
+          "refId": "A"
+        },
+        {
+          "expr": "db_pool_connections{state=\"in_use\"}",
+          "legendFormat": "{{job}} pool in_use",
+          "refId": "B"
         }
       ]
     }

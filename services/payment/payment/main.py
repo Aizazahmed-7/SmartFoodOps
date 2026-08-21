@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from smartfood_api import install_error_handlers, mount_observability
 from smartfood_idempotency import IdempotencyStore
 from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, Topic, topic
-from smartfood_otel import RequestContextMiddleware, setup_logging
+from smartfood_otel import RequestContextMiddleware, setup_logging, setup_tracing
 from smartfood_outbox import OutboxPoller
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -43,6 +43,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("payment")
+    setup_tracing("payment", settings.otlp_endpoint)
 
     engine_kwargs: dict = {}
     if settings.database_url.startswith("sqlite"):

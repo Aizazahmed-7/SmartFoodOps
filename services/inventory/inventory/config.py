@@ -8,6 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
+    # OTLP/HTTP collector for span export (Jaeger). Empty = tracing off —
+    # the default everywhere without a collector, unit tests included.
+    otlp_endpoint: str = ""
+
     database_url: str = (
         "postgresql+asyncpg://inventory_svc:inventory_svc@localhost:5432/inventory_db"
     )

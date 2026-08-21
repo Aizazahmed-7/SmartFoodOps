@@ -247,7 +247,7 @@ async def test_saga_signal_connect_failure_is_503_not_500(monkeypatch):
         OSError("dns says no"),  # socket-layer failure below the RPC layer
     ):
 
-        async def refuse(address, *, _exc=refusal):
+        async def refuse(address, *, _exc=refusal, **kwargs):
             raise _exc
 
         monkeypatch.setattr(temporal_client.Client, "connect", refuse)

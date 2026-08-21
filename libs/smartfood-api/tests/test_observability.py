@@ -12,7 +12,7 @@ def test_metrics_endpoint_serves_prometheus_text():
     resp = TestClient(app).get("/metrics")
     assert resp.status_code == 200
     assert "http_request_duration_seconds" in resp.text
-    assert resp.headers["content-type"].startswith("text/plain")
+    assert resp.headers["content-type"].startswith("application/openmetrics-text")
 
 
 def test_readyz_is_200_when_the_database_answers():
@@ -52,3 +52,16 @@ def test_readyz_without_an_engine_is_liveness_only():
     resp = TestClient(app).get("/readyz")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ready"}
+
+
+def test_metrics_scrape_samples_the_db_pool():
+    """Capacity's USE side for the database: in_use/idle/size gauges,
+    refreshed on every scrape from THIS process's engine."""
+    from sqlalchemy.pool import AsyncAdaptedQueuePool
+
+    app = FastAPI()
+    engine = create_async_engine("sqlite+aiosqlite://", poolclass=AsyncAdaptedQueuePool)
+    mount_observability(app, engine=engine)
+    body = TestClient(app).get("/metrics").text
+    assert 'db_pool_connections{state="size"}' in body
+    assert 'db_pool_connections{state="in_use"}' in body

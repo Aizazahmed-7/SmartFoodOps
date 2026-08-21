@@ -32,9 +32,12 @@ up-m3: ## Notifications milestone working set: the m2 set + notification
 	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
 	@echo "✔ m3 stack up — gateway :8080 · temporal-ui :8233 · notifications :8008"
 
-up-obs: ## m3 working set + Prometheus (:9090) + Grafana (:3000, anonymous)
-	$(COMPOSE) --profile core --profile apps --profile obs up -d --wait postgres redis kafka schema-registry temporal mock-psp gateway identity catalog edge-bff inventory order order-worker payment notification prometheus grafana
-	@echo "✔ obs stack up — grafana http://localhost:3000 · prometheus http://localhost:9090"
+dlq-replay: ## Replay parked DLQ events after a fix: make dlq-replay TOPIC=c1.orders.events.dlq
+	uv run --package smartfood-kafka python -m smartfood_kafka.replay $(TOPIC)
+
+up-obs: ## m3 set + Prometheus (:9090), Grafana (:3000), Jaeger (:16686), Alertmanager (:9093)
+	OTLP_ENDPOINT=http://jaeger:4318 $(COMPOSE) --profile core --profile apps --profile obs up -d --wait postgres redis kafka schema-registry temporal mock-psp gateway identity catalog edge-bff inventory order order-worker payment notification prometheus grafana jaeger alertmanager cadvisor kafka-exporter loki promtail canary
+	@echo "✔ obs stack up — grafana :3000 · prometheus :9090 · jaeger :16686 · alertmanager :9093"
 
 up-full: up up-apps up-ui
 
@@ -70,7 +73,7 @@ cov: ## Unit tests + coverage report
 		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency \
 		--cov=identity --cov=edge_bff \
 		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification \
-		--cov=mock_psp --cov=seed \
+		--cov=mock_psp --cov=seed --cov=canary \
 		--cov-fail-under=100 \
 		--cov-report=term-missing
 

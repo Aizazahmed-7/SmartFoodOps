@@ -331,3 +331,50 @@ async def test_metrics_count_crashed_passes():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert _count("crashed") >= before + 1
+
+
+async def test_consumer_exports_a_child_span_of_the_producing_request():
+    """The async hop as a trace edge: the consumer span's parent is the
+    span that produced the message (via the Kafka traceparent header)."""
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import SpanKind
+    from smartfood_otel import (
+        make_traceparent,
+        reset_tracing,
+        setup_tracing,
+        span_id_of,
+        trace_id_of,
+    )
+
+    exporter = InMemorySpanExporter()
+    setup_tracing("test-consumer", "", exporter=exporter)
+    try:
+        producer_tp = make_traceparent()
+        client = StubKafkaConsumer([_msg("e1", headers=[("traceparent", producer_tp.encode())])])
+        await _consumer(client, RecordingHandler(), StubDlq()).consume_once()
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        span = spans[0]
+        assert span.context is not None
+        assert span.name == "consume c1.test.events"
+        assert format(span.context.trace_id, "032x") == trace_id_of(producer_tp)
+        assert span.parent is not None
+        assert format(span.parent.span_id, "016x") == span_id_of(producer_tp)
+        assert span.kind == SpanKind.CONSUMER
+        assert span.attributes is not None and span.attributes["result"] == "handled"
+
+        # And the sad path: a poison message's span is marked result=dlq
+        # with ERROR status — the trace-level twin of the metrics counter.
+        from opentelemetry.trace import StatusCode
+
+        poison = StubKafkaConsumer(
+            [_msg("e2", headers=[("traceparent", make_traceparent().encode())])]
+        )
+        await _consumer(
+            poison, RecordingHandler(fail_times=99), StubDlq(), max_attempts=1
+        ).consume_once()
+        dlq_span = exporter.get_finished_spans()[-1]
+        assert dlq_span.attributes is not None and dlq_span.attributes["result"] == "dlq"
+        assert dlq_span.status.status_code == StatusCode.ERROR
+    finally:
+        reset_tracing()

@@ -16,13 +16,15 @@ Week 3 adds Debezium mode; both emit the same wire format via smartfood-kafka.
 
 import asyncio
 import json
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import sqlalchemy as sa
+from opentelemetry.trace import SpanKind
 from prometheus_client import Counter, Gauge, Histogram
 from smartfood_kafka import DOMAIN_EVENT_SCHEMA, DOMAIN_EVENT_SUBJECT
-from smartfood_otel import REGISTRY, get_logger, trace_id_of
+from smartfood_otel import REGISTRY, extract_context, get_logger, get_tracer, trace_id_of
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -99,6 +101,18 @@ class OutboxPoller:
         """Publish one batch of unpublished rows; returns how many."""
         table = self._table
         async with self._sessions() as session:
+            # Backlog gauge FIRST, success or not: if Kafka is fully down,
+            # this pass will raise at send — but the gauge already told the
+            # truth, so OutboxBacklogGrowing fires. A gauge only set on
+            # success goes blind exactly when the outbox is most broken
+            # (the same lesson as `up`: one signal per failure that does
+            # not depend on the failing thing succeeding).
+            backlog = (
+                await session.execute(
+                    sa.select(sa.func.count()).where(table.c.published_at.is_(None))
+                )
+            ).scalar_one()
+            OUTBOX_PENDING.set(backlog)
             rows = (
                 await session.execute(
                     sa.select(table)
@@ -112,14 +126,28 @@ class OutboxPoller:
                 return 0
             for row in rows:
                 traceparent = getattr(row, "traceparent", None)
-                await self._producer.send(
-                    self._topic,
-                    subject=DOMAIN_EVENT_SUBJECT,
-                    schema=DOMAIN_EVENT_SCHEMA,
-                    key=row.aggregate_id,
-                    record=_record(row, self._cell_id),
-                    headers=([("traceparent", traceparent.encode())] if traceparent else []),
+                # The async hop's PRODUCER span, parented on the request
+                # that STAGED the row (its traceparent was stored in the
+                # column). No traceparent = plain send, no span.
+                span_cm = (
+                    get_tracer().start_as_current_span(
+                        f"outbox publish {row.event_type}",
+                        context=extract_context({"traceparent": traceparent}),
+                        kind=SpanKind.PRODUCER,
+                        attributes={"messaging.destination": self._topic},
+                    )
+                    if traceparent
+                    else nullcontext(None)
                 )
+                with span_cm:
+                    await self._producer.send(
+                        self._topic,
+                        subject=DOMAIN_EVENT_SUBJECT,
+                        schema=DOMAIN_EVENT_SCHEMA,
+                        key=row.aggregate_id,
+                        record=_record(row, self._cell_id),
+                        headers=([("traceparent", traceparent.encode())] if traceparent else []),
+                    )
                 # The poller runs outside any request, so the row's stored
                 # traceparent is stamped explicitly — this line is what makes
                 # `grep trace_id` cross the async hop.
@@ -142,15 +170,6 @@ class OutboxPoller:
                 .where(table.c.id.in_([row.id for row in rows]))
                 .values(published_at=now)
             )
-            # Backlog depth AFTER this batch: an indexed count (partial on
-            # published_at) — cheap at our scale, and the gauge every
-            # backlog alert keys on. Cost noted for the 20k rows/s future.
-            remaining = (
-                await session.execute(
-                    sa.select(sa.func.count()).where(table.c.published_at.is_(None))
-                )
-            ).scalar_one()
-            OUTBOX_PENDING.set(remaining)
             await session.commit()
             return len(rows)
 

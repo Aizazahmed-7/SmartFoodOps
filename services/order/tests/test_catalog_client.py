@@ -42,13 +42,13 @@ async def test_success_stamps_system_identity_and_params():
 
 
 async def test_traceparent_forwarded_only_inside_request_context():
-    from smartfood_otel.propagation import set_current_traceparent
+    from smartfood_otel.propagation import use_traceparent
 
     tp = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
-    set_current_traceparent(tp)
-    client, calls = make([200])
-    await client.get_snapshot("rst_1", ["itm_a"])
-    assert calls["requests"][0].headers["traceparent"] == tp
+    with use_traceparent(tp):
+        client, calls = make([200])
+        await client.get_snapshot("rst_1", ["itm_a"])
+        assert calls["requests"][0].headers["traceparent"] == tp
 
 
 async def test_no_traceparent_outside_requests():

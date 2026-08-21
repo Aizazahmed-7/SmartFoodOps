@@ -37,13 +37,13 @@ async def test_success_stamps_system_identity():
 
 
 async def test_traceparent_forwarded_when_in_context():
-    from smartfood_otel.propagation import set_current_traceparent
+    from smartfood_otel.propagation import use_traceparent
 
     tp = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
-    set_current_traceparent(tp)
-    client, calls = make([200])
-    await client.get_address("usr_1", "adr_1")
-    assert calls["requests"][0].headers["traceparent"] == tp
+    with use_traceparent(tp):
+        client, calls = make([200])
+        await client.get_address("usr_1", "adr_1")
+        assert calls["requests"][0].headers["traceparent"] == tp
 
 
 async def test_404_is_address_not_found_no_retry():

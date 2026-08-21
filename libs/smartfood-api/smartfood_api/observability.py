@@ -16,15 +16,38 @@ handlers stay named, referenced values — the strict-tier reportUnusedFunction
 has nothing to flag, and no per-line ignore is needed.
 """
 
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
-from smartfood_otel import render_metrics
+from prometheus_client import Gauge
+from smartfood_otel import REGISTRY, render_metrics
+
+_DB_POOL = Gauge(
+    "db_pool_connections",
+    "This process's SQLAlchemy pool, sampled at scrape time.",
+    labelnames=("state",),
+    registry=REGISTRY,
+)
+
+
+def _sample_pool(engine: Any) -> None:
+    """Refresh the pool gauges from the live pool. Sampled per scrape (15s)
+    rather than event-hooked: capacity questions need trends, not ticks."""
+    pool = engine.pool
+    # Not every pool keeps books: QueuePool (production/Postgres) has all
+    # three; sqlite's StaticPool has none. Sample what exists, skip the rest.
+    for state, attr in (("in_use", "checkedout"), ("idle", "checkedin"), ("size", "size")):
+        fn: Callable[[], float] | None = getattr(pool, attr, None)
+        if callable(fn):
+            _DB_POOL.labels(state=state).set(fn())
 
 
 def mount_observability(app: FastAPI, *, engine: Any | None = None) -> None:
     async def metrics() -> Response:
+        if engine is not None:
+            _sample_pool(engine)
         body, content_type = render_metrics()
         return Response(content=body, media_type=content_type)
 

@@ -14,9 +14,11 @@ import asyncio
 
 import httpx
 from smartfood_idempotency import IdempotencyStore
-from smartfood_otel import get_logger, serve_metrics, setup_logging
+from smartfood_otel import get_logger, serve_metrics, setup_logging, setup_tracing
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from temporalio.client import Client
+from temporalio.contrib.opentelemetry import TracingInterceptor
+from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
 from .activities import OrderActivities
@@ -42,13 +44,41 @@ def build_worker(client: Client, activities: OrderActivities, *, task_queue: str
 async def main() -> None:  # pragma: no cover — live wiring (compose runs it)
     settings = Settings()
     setup_logging("order-worker")
+    setup_tracing("order-worker", settings.otlp_endpoint)
     if settings.worker_metrics_port > 0:
         serve_metrics(settings.worker_metrics_port)  # saga outcomes live HERE
+
+    runtime: Runtime | None = None
+    if settings.worker_temporal_metrics_port > 0:
+        # temporal_activity_schedule_to_start_latency etc. — the USE side
+        # of worker capacity, served by the SDK core on its own port.
+        runtime = Runtime(
+            telemetry=TelemetryConfig(
+                metrics=PrometheusConfig(
+                    bind_address=f"0.0.0.0:{settings.worker_temporal_metrics_port}",
+                    # The SDK core defaults to INTEGER MILLISECONDS. Every
+                    # other histogram in this platform is seconds (Prometheus
+                    # convention, and what the dashboards label their axes),
+                    # so a raw default made the schedule->start panel read
+                    # 1000x high — on the one number worker autoscaling is
+                    # decided by. Opt into seconds at the source.
+                    durations_as_seconds=True,
+                )
+            )
+        )
 
     client: Client | None = None
     while client is None:  # temporal may still be booting — retry forever
         try:
-            client = await Client.connect(settings.temporal_address)
+            client = await Client.connect(
+                settings.temporal_address,
+                runtime=runtime,
+                # Workflow + activity spans (contrib interceptor): the
+                # worker inherits these from its client, closing the
+                # "trace ends at the 202" gap — activity httpx/SQL spans
+                # chain under their activity span automatically.
+                interceptors=[TracingInterceptor()],
+            )
         except Exception as exc:
             log.warning("temporal not ready — retrying", error=str(exc))
             await asyncio.sleep(2)

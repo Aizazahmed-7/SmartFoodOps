@@ -28,6 +28,7 @@ from temporalio.client import (
     WorkflowUpdateRPCTimeoutOrCancelledError,
 )
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -74,7 +75,13 @@ class TemporalSaga:
             # tests always inject. The lock serializes concurrent first-starts.
             async with self._lock:
                 if self._client is None:
-                    self._client = await Client.connect(self._address)
+                    self._client = await Client.connect(
+                        self._address,
+                        # OTel spans for every start/update/signal, and the
+                        # trace context rides INTO the workflow via payload
+                        # headers — the worker's interceptor picks it up.
+                        interceptors=[TracingInterceptor()],
+                    )
         return self._client
 
     async def place(self, placement: PlacementInput) -> PlacementAck | PlacementPending:

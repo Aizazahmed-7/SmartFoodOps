@@ -15,13 +15,14 @@ already identifies which service a series came from, so putting the name in
 the metric too would just be a redundant, higher-cardinality copy.
 """
 
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    CollectorRegistry,
-    Histogram,
-    generate_latest,
-    start_http_server,
-)
+from typing import cast
+
+from opentelemetry import trace as _trace
+from prometheus_client import CollectorRegistry, Gauge, Histogram, start_http_server
+
+# The openmetrics exposition module ships no type information — alias it
+# and cast at the two touch points instead of ignoring per-symbol.
+from prometheus_client.openmetrics import exposition as _openmetrics
 
 REGISTRY = CollectorRegistry()
 
@@ -39,15 +40,38 @@ HTTP_DURATION = Histogram(
 )
 
 
+# Config drift is invisible by nature: a service recreated without an OTLP
+# endpoint keeps serving traffic, keeps logging, and simply stops tracing —
+# which nobody notices until an incident needs the traces that were never
+# recorded. So the process REPORTS its own tracing state and the obs stack
+# alerts on it. setup_tracing owns the value; 0 is the honest default for
+# any process that imports this module and never arms.
+TRACING_ARMED = Gauge(
+    "tracing_armed",
+    "1 when this process exports spans to a collector, 0 when tracing is off.",
+    registry=REGISTRY,
+)
+
+
 def observe_request(method: str, status: int, duration_s: float) -> None:
-    """Record one completed HTTP request. Called by the middleware, once."""
-    HTTP_DURATION.labels(method=method, status=str(status)).observe(duration_s)
+    """Record one completed HTTP request. Called by the middleware, once —
+    inside the request's span, so the observation carries an EXEMPLAR: a
+    sample trace_id pinned to the histogram bucket. Grafana renders these
+    as dots you click through to Jaeger — the metrics→traces bridge."""
+    exemplar = None
+    span = _trace.get_current_span()
+    ctx = span.get_span_context()
+    if span.is_recording() and ctx.is_valid:
+        exemplar = {"trace_id": format(ctx.trace_id, "032x")}
+    HTTP_DURATION.labels(method=method, status=str(status)).observe(duration_s, exemplar=exemplar)
 
 
 def render_metrics() -> tuple[bytes, str]:
-    """The /metrics response body + its content type — the text exposition
-    format Prometheus scrapes."""
-    return generate_latest(REGISTRY), CONTENT_TYPE_LATEST
+    """The /metrics response body + its content type. OPENMETRICS format
+    (not the classic exposition): it is what carries exemplars, and
+    Prometheus parses it natively."""
+    body = cast(bytes, _openmetrics.generate_latest(REGISTRY))  # pyright: ignore[reportUnknownMemberType]
+    return body, cast(str, _openmetrics.CONTENT_TYPE_LATEST)
 
 
 def serve_metrics(port: int) -> int:

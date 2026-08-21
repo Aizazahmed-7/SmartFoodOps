@@ -15,7 +15,7 @@ from smartfood_kafka import (
     ensure_compacted_topic,
     topic,
 )
-from smartfood_otel import RequestContextMiddleware, setup_logging
+from smartfood_otel import RequestContextMiddleware, setup_logging, setup_tracing
 from smartfood_outbox import OutboxPoller
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -53,6 +53,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("catalog")
+    setup_tracing("catalog", settings.otlp_endpoint)
 
     engine_kwargs: dict = {}
     if settings.database_url.startswith("sqlite"):
