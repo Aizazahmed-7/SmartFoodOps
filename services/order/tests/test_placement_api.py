@@ -174,3 +174,24 @@ def test_owner_can_place_orders_too(client, catalog, make_snapshot, make_order_b
         "/v1/orders", json=make_order_body(), headers={**owner, "Idempotency-Key": "k-own"}
     )
     assert r.status_code == 202
+
+
+def test_placement_metrics_classify_placed_and_replay(
+    client, catalog, saga, make_snapshot, make_order_body
+):
+    """The SLO histogram is labelled by OUTCOME so replays (microseconds)
+    cannot flatter the p95 the fresh path is measured against."""
+    from smartfood_otel import REGISTRY
+
+    def count(outcome):
+        return (
+            REGISTRY.get_sample_value("order_placement_seconds_count", {"outcome": outcome}) or 0.0
+        )
+
+    catalog.snapshot = make_snapshot()
+    placed_before, replay_before = count("placed"), count("replay")
+    key = uuid.uuid4().hex
+    client.post("/v1/orders", json=make_order_body(), headers=_headers(key))
+    client.post("/v1/orders", json=make_order_body(), headers=_headers(key))
+    assert count("placed") == placed_before + 1
+    assert count("replay") == replay_before + 1

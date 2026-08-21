@@ -7,7 +7,9 @@ import { defineConfig } from "vite";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    port: 5173,
+    // The preview harness assigns a free port via PORT (autoPort);
+    // 5173 stays the default for a bare `npm run dev`.
+    port: Number(process.env.PORT) || 5173,
     proxy: {
       "/v1": "http://localhost:8080",
       "/openapi.json": "http://localhost:8080",

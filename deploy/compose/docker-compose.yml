@@ -20,6 +20,9 @@ x-app-base: &app-base
     KAFKA_BOOTSTRAP: kafka:9092
     TEMPORAL_ADDRESS: temporal:7233
     OUTBOX_MODE: ${OUTBOX_MODE:-poller}
+    # Set by `make up-obs` (the only profile that runs a collector);
+    # empty everywhere else so services never export into a void.
+    OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
     SCHEMA_REGISTRY_URL: http://schema-registry:8081
     KAFKA_CONSUMERS: "on"
     AWS_ENDPOINT_URL: http://localstack:4566
@@ -168,6 +171,7 @@ services:
         "--port",
         "9080",
         "--reload",
+        "--no-access-log",
       ]
     depends_on: {}
 
@@ -201,6 +205,7 @@ services:
         "--port",
         "8001",
         "--reload",
+        "--no-access-log",
       ]
 
   catalog:
@@ -224,6 +229,7 @@ services:
         "--port",
         "8002",
         "--reload",
+        "--no-access-log",
       ]
 
   inventory:
@@ -248,6 +254,7 @@ services:
         "--port",
         "8005",
         "--reload",
+        "--no-access-log",
       ]
 
   order:
@@ -276,6 +283,7 @@ services:
         "--port",
         "8006",
         "--reload",
+        "--no-access-log",
       ]
 
   order-worker:
@@ -310,6 +318,7 @@ services:
         "--port",
         "8007",
         "--reload",
+        "--no-access-log",
       ]
 
   notification:
@@ -334,6 +343,7 @@ services:
         "--port",
         "8008",
         "--reload",
+        "--no-access-log",
       ]
 
   edge-bff:
@@ -356,6 +366,7 @@ services:
         "--port",
         "8000",
         "--reload",
+        "--no-access-log",
       ]
 
   # ── ui profile — management consoles ────────────────────────────
@@ -387,7 +398,103 @@ services:
     depends_on:
       redis: { condition: service_started }
 
+  # ── observability (profile obs): make up-obs ─────────────────────
+  jaeger:
+    profiles: [obs]
+    image: jaegertracing/all-in-one:1.57
+    ports: ["16686:16686"]   # UI; OTLP intake on 4318 stays compose-internal
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+  alertmanager:
+    profiles: [obs]
+    image: prom/alertmanager:v0.27.0
+    ports: ["9093:9093"]
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+
+  canary:
+    # Deliberately NOT *app-base: the anchor's depends_on names core-profile
+    # services, which breaks obs-profile validation. The canary needs only
+    # the gateway URL and the workspace mount — it retries on its own.
+    profiles: [obs]
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    working_dir: /repo
+    restart: unless-stopped
+    volumes:
+      - ../..:/repo
+      - uv-cache:/root/.cache/uv
+      - venvs:/venvs
+    environment:
+      UV_LINK_MODE: copy
+      UV_PROJECT_ENVIRONMENT: /venvs/canary
+      GATEWAY_URL: http://gateway:80
+      CANARY_INTERVAL_SECONDS: "60"
+    command: ["uv", "run", "--package", "canary", "python", "-m", "canary.main"]
+
+  loki:
+    profiles: [obs]
+    image: grafana/loki:2.9.8
+    ports: ["3100:3100"]
+
+  promtail:
+    profiles: [obs]
+    image: grafana/promtail:3.4.0
+    command: ["-config.file=/etc/promtail/promtail.yml"]
+    volumes:
+      - ./observability/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  cadvisor:
+    profiles: [obs]
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    ports: ["8082:8080"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+
+  kafka-exporter:
+    profiles: [obs]
+    image: danielqsj/kafka-exporter:v1.7.0
+    command: ["--kafka.server=kafka:9092"]
+    # No depends_on: kafka lives in the core profile, and cross-profile
+    # dependencies break profile-scoped validation. The exporter simply
+    # crash-restarts until the broker answers.
+    restart: unless-stopped
+
+  prometheus:
+    profiles: [obs]
+    image: prom/prometheus:v2.53.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --enable-feature=exemplar-storage   # store the trace_id dots
+    ports: ["9090:9090"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    profiles: [obs]
+    image: grafana/grafana:11.1.0
+    ports: ["3000:3000"]
+    environment:
+      # Demo posture: no login wall. Anyone on localhost is an editor.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus: { condition: service_started }
+
 volumes:
+  prometheus-data:
   pg-data:
   kafka-data:
   temporal-data:

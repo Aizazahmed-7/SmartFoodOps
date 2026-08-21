@@ -37,14 +37,30 @@ dedupe (deterministic event ids) absorbs anything already applied.
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import structlog
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-from smartfood_otel import get_logger, trace_id_of
+from opentelemetry.context import Context
+from opentelemetry.trace import INVALID_SPAN, SpanKind, Status, StatusCode
+from prometheus_client import Counter
+from smartfood_otel import REGISTRY, extract_context, get_logger, get_tracer, trace_id_of
 
 from .serde import SerdeError
+
+# One counter, one question per label pair: is this group healthy?
+#   handled — the at-least-once contract delivered value
+#   retried — transient handler failures (rate ~0 in a healthy system)
+#   dlq     — parked forensically; ANY increase is an ops signal (ADR-0021)
+#   crashed — a consume pass died and the supervisor rejoined
+CONSUMER_EVENTS = Counter(
+    "consumer_events_total",
+    "Consumer outcomes by group.",
+    labelnames=("group", "result"),
+    registry=REGISTRY,
+)
 
 log = get_logger("smartfood-kafka.consumer")
 
@@ -86,11 +102,12 @@ class RawProducer(Protocol):
     ) -> Any: ...
 
 
-def _bind_trace(message: Any) -> None:
+def _bind_trace(message: Any) -> Context | None:
     # Rebind the producer's trace context from the Kafka headers: the
     # consumer's log lines join the SAME trace_id the original HTTP
-    # request logged under — grep crosses the async hop. Failure-proof on
-    # purpose: Kafka permits null/garbage header values, and a mangled
+    # request logged under, and the returned OTel context parents this
+    # hop's CONSUMER span on the producing request's span. Failure-proof
+    # on purpose: Kafka permits null/garbage header values, and a mangled
     # header must degrade to "no trace", never to a poison pill that
     # bypasses the retry/park boundary.
     structlog.contextvars.clear_contextvars()
@@ -101,6 +118,8 @@ def _bind_trace(message: Any) -> None:
     )
     if traceparent and (trace_id := trace_id_of(traceparent)):
         structlog.contextvars.bind_contextvars(trace_id=trace_id)
+        return extract_context({"traceparent": traceparent})
+    return None
 
 
 class EventConsumer:
@@ -158,6 +177,7 @@ class EventConsumer:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                CONSUMER_EVENTS.labels(group=self._group, result="crashed").inc()
                 log.error(
                     "consumer pass crashed — rejoining",
                     group=self._group,
@@ -184,31 +204,59 @@ class EventConsumer:
             await dlq.stop()
 
     async def _process(self, message: Any, dlq: RawProducer) -> None:
-        _bind_trace(message)
-        try:
-            event = await self._serde.decode(message.value)
-        except SerdeError as exc:
-            # The bytes themselves are bad — no retry can fix them. Any
-            # OTHER decode failure (registry down, transport) propagates:
-            # crash the pass, rejoin, redeliver.
-            await self._park(message, dlq, exc, attempts=0)
-            return
-        for attempt in range(1, self._max_attempts + 1):
+        ctx = _bind_trace(message)
+        # The async hop as a CONSUMER span, child of the producing request.
+        # No header = no span (nothing to join); handler work INSIDE the
+        # span inherits it, so anything the handler stages chains onward.
+        span_cm = (
+            get_tracer().start_as_current_span(
+                f"consume {', '.join(self._topics)}",
+                context=ctx,
+                kind=SpanKind.CONSUMER,
+                attributes={"messaging.consumer.group": self._group},
+            )
+            if ctx is not None
+            else nullcontext(INVALID_SPAN)
+        )
+        with span_cm as span:
+
+            def mark(result: str) -> None:
+                # TOTAL by construction: a tracing bug in here once parked
+                # a healthy message to the DLQ during development.
+                if span.is_recording():
+                    span.set_attribute("result", result)
+                    if result == "dlq":
+                        span.set_status(Status(StatusCode.ERROR))
+
             try:
-                await self._handler.handle(event)
+                event = await self._serde.decode(message.value)
+            except SerdeError as exc:
+                # The bytes themselves are bad — no retry can fix them. Any
+                # OTHER decode failure (registry down, transport) propagates:
+                # crash the pass, rejoin, redeliver.
+                await self._park(message, dlq, exc, attempts=0)
+                mark("dlq")
                 return
-            except Exception as exc:
-                if attempt == self._max_attempts:
-                    await self._park(message, dlq, exc, attempts=attempt)
+            for attempt in range(1, self._max_attempts + 1):
+                try:
+                    await self._handler.handle(event)
+                    CONSUMER_EVENTS.labels(group=self._group, result="handled").inc()
+                    mark("handled")
                     return
-                log.warning(
-                    "handler failed — retrying",
-                    group=self._group,
-                    event_id=str(event.get("event_id")),
-                    attempt=attempt,
-                    error=str(exc),
-                )
-                await asyncio.sleep(self._backoff_seconds * 2 ** (attempt - 1))
+                except Exception as exc:
+                    if attempt == self._max_attempts:
+                        await self._park(message, dlq, exc, attempts=attempt)
+                        mark("dlq")
+                        return
+                    CONSUMER_EVENTS.labels(group=self._group, result="retried").inc()
+                    log.warning(
+                        "handler failed — retrying",
+                        group=self._group,
+                        event_id=str(event.get("event_id")),
+                        attempt=attempt,
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(self._backoff_seconds * 2 ** (attempt - 1))
 
     async def _park(
         self, message: Any, dlq: RawProducer, error: BaseException, *, attempts: int
@@ -226,6 +274,7 @@ class EventConsumer:
             ("dlq.failed_at", datetime.now(UTC).isoformat().encode()),
         ]
         await dlq.send_and_wait(dlq_topic, message.value, key=message.key, headers=headers)
+        CONSUMER_EVENTS.labels(group=self._group, result="dlq").inc()
         log.error(
             "event parked to DLQ — needs ops replay",
             group=self._group,

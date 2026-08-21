@@ -8,6 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
+    # OTLP/HTTP collector for span export (Jaeger). Empty = tracing off —
+    # the default everywhere without a collector, unit tests included.
+    otlp_endpoint: str = ""
+
     database_url: str = "postgresql+asyncpg://catalog_svc:catalog_svc@localhost:5432/catalog_db"
     # 6380 = compose host mapping (6379 is taken by another local project);
     # in-container the env var overrides this with redis://redis:6379/0.

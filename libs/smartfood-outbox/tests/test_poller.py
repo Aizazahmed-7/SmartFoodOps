@@ -202,3 +202,83 @@ async def test_cancellation_mid_drain_propagates():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert await _unpublished(sessions) == 1  # nothing was marked
+
+
+# ── metrics: what NFR-6's lag SLO is measured with ─────────────────
+
+
+async def test_drain_records_lag_published_and_backlog():
+    from smartfood_otel import REGISTRY
+
+    def sample(name):
+        return REGISTRY.get_sample_value(name) or 0.0
+
+    published_before = sample("outbox_published_total")
+    lag_count_before = sample("outbox_publish_lag_seconds_count")
+
+    sessions = await _sessions()
+    await _stage(sessions, 3)
+    producer = StubProducer()
+    poller = OutboxPoller(
+        sessions, outbox, topic="t", producer=producer, cell_id="c1", batch_size=2
+    )
+
+    assert await poller.drain_once() == 2  # first batch: 2 published
+    assert sample("outbox_published_total") == published_before + 2
+    assert sample("outbox_publish_lag_seconds_count") == lag_count_before + 2
+    assert sample("outbox_pending") == 3.0  # gauge = backlog at PASS START
+
+    assert await poller.drain_once() == 1
+    assert sample("outbox_pending") == 1.0
+    assert await poller.drain_once() == 0
+    assert sample("outbox_pending") == 0.0  # the empty pass still reports
+
+
+async def test_poller_exports_producer_spans_parented_on_the_staging_request():
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.trace import SpanKind
+    from smartfood_otel import (
+        make_traceparent,
+        reset_tracing,
+        setup_tracing,
+        span_id_of,
+        trace_id_of,
+    )
+
+    exporter = InMemorySpanExporter()
+    setup_tracing("test-poller", "", exporter=exporter)
+    try:
+        staging_tp = make_traceparent()
+        sessions = await _sessions()
+        await _stage(sessions, 1, traceparent=staging_tp)
+        poller = OutboxPoller(sessions, outbox, topic="t", producer=StubProducer(), cell_id="c1")
+        assert await poller.drain_once() == 1
+        # Auto-instrumentation now also exports this test's OWN sqlite
+        # spans — phase-2 depth working. Filter to the PRODUCER span.
+        spans = [s for s in exporter.get_finished_spans() if s.kind == SpanKind.PRODUCER]
+        assert len(spans) == 1
+        span = spans[0]
+        assert span.context is not None
+        assert span.name == "outbox publish ItemAdded"
+        assert format(span.context.trace_id, "032x") == trace_id_of(staging_tp)
+        assert span.parent is not None
+        assert format(span.parent.span_id, "016x") == span_id_of(staging_tp)
+        assert span.kind == SpanKind.PRODUCER
+    finally:
+        reset_tracing()
+
+
+async def test_backlog_gauge_tells_the_truth_even_when_kafka_is_down():
+    """THE blind-spot fix: a pass that fails at send has already set the
+    gauge, so OutboxBacklogGrowing can fire during a full Kafka outage —
+    previously both outbox alerts went silent exactly then."""
+    from smartfood_otel import REGISTRY
+
+    sessions = await _sessions()
+    await _stage(sessions, 5)
+    poller = OutboxPoller(
+        sessions, outbox, topic="t", producer=StubProducer(fail_times=99), cell_id="c1"
+    )
+    with pytest.raises(RuntimeError):
+        await poller.drain_once()  # kafka down — the pass dies at send…
+    assert REGISTRY.get_sample_value("outbox_pending") == 5.0  # …but the gauge spoke first

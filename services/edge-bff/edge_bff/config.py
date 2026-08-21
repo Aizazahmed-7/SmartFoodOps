@@ -10,6 +10,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
+    # OTLP/HTTP collector for span export (Jaeger). Empty = tracing off —
+    # the default everywhere without a collector, unit tests included.
+    otlp_endpoint: str = ""
+
     identity_base_url: str = "http://localhost:8001"
     catalog_base_url: str = "http://localhost:8002"
     inventory_base_url: str = "http://localhost:8005"

@@ -83,10 +83,10 @@ async def test_release_and_commit_failures_raise():
 
 
 async def test_traceparent_forwarded_when_in_context():
-    from smartfood_otel.propagation import set_current_traceparent
+    from smartfood_otel.propagation import use_traceparent
 
     tp = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
-    set_current_traceparent(tp)
-    client, calls = make([(200, {})])
-    await client.release("ord_1")
-    assert calls["requests"][0].headers["traceparent"] == tp
+    with use_traceparent(tp):
+        client, calls = make([(200, {})])
+        await client.release("ord_1")
+        assert calls["requests"][0].headers["traceparent"] == tp

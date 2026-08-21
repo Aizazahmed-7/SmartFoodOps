@@ -399,3 +399,49 @@ async def test_replayed_activity_transition_is_a_noop():
     await acts.validate_and_reserve("ord_1", _price())
     await acts.validate_and_reserve("ord_1", _price())  # retry — no error
     assert await _status(sessions) == "VALIDATED"
+
+
+async def test_saga_outcome_counters_move_on_settle_and_cancel():
+    """order_saga_outcomes_total is counted where outcomes become FINAL —
+    the worker's activities — so cancel-reason spikes are graphable."""
+    from smartfood_otel import REGISTRY
+
+    def count(outcome, reason):
+        return (
+            REGISTRY.get_sample_value(
+                "order_saga_outcomes_total", {"outcome": outcome, "reason": reason}
+            )
+            or 0.0
+        )
+
+    settled_before = count("settled", "")
+    declined_before = count("cancelled", "payment_declined")
+
+    from order.db import OrderStatus
+
+    acts, sessions, _, _ = await _setup()
+    walk: list[tuple[OrderStatus, OrderStatus]] = [
+        ("PLACED", "VALIDATED"),
+        ("VALIDATED", "PAYMENT_CLEARED"),
+        ("PAYMENT_CLEARED", "CONFIRMED"),
+        ("CONFIRMED", "ACCEPTED"),
+        ("ACCEPTED", "PREPARING"),
+        ("PREPARING", "READY"),
+        ("READY", "PICKED_UP"),
+        ("PICKED_UP", "DELIVERED"),
+    ]
+    for expected, target in walk:
+        await transition(sessions, "ord_1", expected=expected, target=target)
+    await acts.settle_order("ord_1")
+    assert count("settled", "") == settled_before + 1
+
+    acts2, sessions2, _, _ = await _setup()
+    await transition(
+        sessions2,
+        "ord_1",
+        expected="PLACED",
+        target="CANCELLING",
+        cancel_reason=CancelReason.PAYMENT_DECLINED,
+    )
+    await acts2.finish_cancel("ord_1", CancelReason.PAYMENT_DECLINED)
+    assert count("cancelled", "payment_declined") == declined_before + 1

@@ -1,0 +1,136 @@
+# The SLOs the ADRs assert, armed. Thresholds cite their source so nobody
+# has to archaeology them later.
+groups:
+  - name: smartfoodops
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.job }} target is unreachable"
+          runbook: docs/runbooks.md#servicedown
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: HttpErrorRateHigh
+        # >5% of requests answering 5xx over 10m, per service.
+        expr: |
+          sum by (job) (rate(http_request_duration_seconds_count{status=~"5.."}[10m]))
+            / sum by (job) (rate(http_request_duration_seconds_count[10m])) > 0.05
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.job }} 5xx ratio above 5%"
+          runbook: docs/runbooks.md#httperrorratehigh
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: PlacementP95Breach
+        # NFR-2: placement p95 < 3s — measured on FRESH placements only
+        # (replays/refusals answer in microseconds and would flatter it).
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(order_placement_seconds_bucket{outcome="placed"}[10m]))) > 3
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "placement p95 above the 3s SLO (NFR-2)"
+          runbook: docs/runbooks.md#placementp95breach
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: OutboxPublishLagHigh
+        # NFR-6: outbox publish lag p99 < 5s.
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(outbox_publish_lag_seconds_bucket[10m]))) > 5
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "outbox staged→published p99 above 5s (NFR-6)"
+          runbook: docs/runbooks.md#outboxpublishlaghigh
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: OutboxBacklogGrowing
+        expr: outbox_pending > 100
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "outbox backlog above 100 rows for 10m — poller stalled?"
+          runbook: docs/runbooks.md#outboxbackloggrowing
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: EventsParkedOnDLQ
+        # ADR-0021: ANY parked event is an ops item — it means five retries
+        # failed or the bytes were undecodable.
+        expr: increase(consumer_events_total{result="dlq"}[10m]) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.group }} parked events to its DLQ"
+          runbook: docs/runbooks.md#eventsparkedondlq
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: SystemTimeoutCancels
+        # The forward-deadline unwind firing means a dependency stayed down
+        # past forward_deadline_s while customers were ordering.
+        expr: increase(order_saga_outcomes_total{reason="system_timeout"}[10m]) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "orders cancelled by the saga's forward deadline"
+          runbook: docs/runbooks.md#systemtimeoutcancels
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: ConsumerLagGrowing
+        # Real lag from the broker's books (kafka-exporter) — a group
+        # falling behind its topic. Trend matters more than the number.
+        expr: sum by (consumergroup, topic) (kafka_consumergroup_lag) > 100
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "{{ $labels.consumergroup }} is {{ $value }} events behind on {{ $labels.topic }}"
+          runbook: docs/runbooks.md#consumerlaggrowing
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: CanarySilent
+        # The synthetic customer has not completed an order in 5 minutes —
+        # or has NEVER succeeded (absent). "Everything up, nothing working"
+        # is exactly the failure every per-component signal misses.
+        expr: |
+          (time() - canary_last_success_timestamp_seconds > 300)
+            or absent(canary_last_success_timestamp_seconds) == 1
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "the canary cannot place an order — customers likely cannot either"
+          runbook: docs/runbooks.md#canarysilent
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: WorkerTargetAbsent
+        # ServiceDown (up == 0) CANNOT see this one. order-worker is found by
+        # dns_sd, and a dead container means Docker DNS returns nothing at
+        # all -- Prometheus reads an empty target list, so `up` goes ABSENT
+        # rather than 0 and the page never fires. Absence IS the symptom for
+        # every discovery-based target, and this is the process whose death
+        # stalls every saga (compensations still run, but only on the 300s
+        # forward deadline -- the customer waits either way).
+        expr: |
+          absent(up{job="order-worker"}) == 1
+            or absent(up{job="order-worker-temporal"}) == 1
+        for: 2m
+        labels: { severity: page }
+        annotations:
+          summary: "no order-worker instance is being discovered — sagas are not advancing"
+          runbook: docs/runbooks.md#workertargetabsent
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: TracingDisarmed
+        # A service recreated outside `make up-obs` comes back with an empty
+        # OTLP_ENDPOINT: still serving, still logging, silently NOT tracing.
+        # Nobody notices until an incident needs traces that were never
+        # recorded. The canary is excluded on purpose -- it is a client, it
+        # never arms tracing, and its 0 is not drift.
+        expr: min by (job) (tracing_armed{job!="canary"}) == 0
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "{{ $labels.job }} is running without tracing — recreate it via make up-obs"
+          runbook: docs/runbooks.md#tracingdisarmed
+          dashboard: http://localhost:3000/d/smartfoodops-slo

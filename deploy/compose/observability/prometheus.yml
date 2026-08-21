@@ -1,0 +1,44 @@
+# Scrape map for the SmartFoodOps cell. Every FastAPI service exposes
+# /metrics via mount_observability; the order WORKER (no HTTP app) serves a
+# bare exposition server on :9106 — that target is where saga outcomes live.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs: [{ targets: ["alertmanager:9093"] }]
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: identity
+    static_configs: [{ targets: ["identity:8001"] }]
+  - job_name: catalog
+    static_configs: [{ targets: ["catalog:8002"] }]
+  - job_name: inventory
+    static_configs: [{ targets: ["inventory:8005"] }]
+  - job_name: order
+    static_configs: [{ targets: ["order:8006"] }]
+  # DNS service discovery, not a static target: compose DNS returns one
+  # A-record per replica, so `--scale order-worker=3` yields three scraped
+  # instances instead of three IPs blurring into one series.
+  - job_name: order-worker
+    dns_sd_configs: [{ names: ["order-worker"], type: A, port: 9106 }]
+  - job_name: order-worker-temporal   # the SDK's own metrics (schedule-to-start)
+    dns_sd_configs: [{ names: ["order-worker"], type: A, port: 9107 }]
+  - job_name: payment
+    static_configs: [{ targets: ["payment:8007"] }]
+  - job_name: notification
+    static_configs: [{ targets: ["notification:8008"] }]
+  - job_name: edge-bff
+    static_configs: [{ targets: ["edge-bff:8000"] }]
+  - job_name: cadvisor            # container CPU/memory — the U in USE
+    static_configs: [{ targets: ["cadvisor:8080"] }]
+  - job_name: kafka-exporter      # real consumer-group lag, per topic
+    static_configs: [{ targets: ["kafka-exporter:9308"] }]
+  - job_name: canary              # the synthetic customer (obs profile)
+    static_configs: [{ targets: ["canary:9108"] }]
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"] }]

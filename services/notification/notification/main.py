@@ -6,9 +6,9 @@ from collections.abc import Sequence
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
-from smartfood_api import install_error_handlers
+from smartfood_api import install_error_handlers, mount_observability
 from smartfood_kafka import AvroSerde, EventConsumer, SchemaRegistry, Topic, topic
-from smartfood_otel import RequestContextMiddleware, setup_logging
+from smartfood_otel import RequestContextMiddleware, setup_logging, setup_tracing
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -36,6 +36,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("notification")
+    setup_tracing("notification", settings.otlp_endpoint)
 
     engine_kwargs: dict = {}
     if settings.database_url.startswith("sqlite"):
@@ -90,6 +91,7 @@ def create_app(
     app = FastAPI(title="notification", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
+    mount_observability(app, engine=engine)
     app.state.service = NotificationService(sessions)
     app.include_router(router)
 

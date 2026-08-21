@@ -2,7 +2,7 @@
 name = "smartfood-api"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = ["fastapi>=0.115", "pydantic>=2.9", "structlog>=24.4", "smartfood-otel"]
+dependencies = ["fastapi>=0.115", "pydantic>=2.9", "structlog>=24.4", "smartfood-otel", "sqlalchemy[asyncio]>=2.0"]
 
 [tool.uv.sources]
 smartfood-otel = { workspace = true }
