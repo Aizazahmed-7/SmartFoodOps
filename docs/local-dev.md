@@ -333,3 +333,29 @@ Everything now runs on the canonical ports. Three things on this machine previou
 ---
 
 *Anything here marked (proposed) is a local-dev detail not fixed by the design plan; treat the plan as authoritative if they ever diverge.*
+
+## CDC lane (S6): Debezium instead of the poller
+
+The dev poller and Debezium are two implementations of the same contract —
+"outbox rows become Kafka events, exactly-once-ish, ordered per aggregate".
+The poller is the dev default; the CDC lane exists to prove the production
+path and to carry the one thing flows.md diagram 5 promises across it: the
+`traceparent` column riding into a Kafka HEADER, so the async hop stays
+stitched in Jaeger.
+
+```bash
+make up-cdc          # postgres already runs wal_level=logical; starts Connect (:8083)
+make cdc-register    # PUT the order-outbox connector (idempotent)
+```
+
+Events stream to the PARALLEL namespace `cdc.c1.orders.events` (watch it in
+the Kafka console :8085 — headers included). Parallel on purpose: the live
+topics carry the poller's Avro DomainEvent envelope under Schema Registry
+subjects, and Debezium's EventRouter emits a different value shape — routing
+it at the same subjects would poison SR compatibility for every consumer.
+The cutover (making `outbox_mode=debezium` real end-to-end) needs one of:
+  1. a custom SMT that rebuilds the exact DomainEvent Avro envelope, or
+  2. moving consumers' serde to Connect-managed schemas (a coordinated
+     migration of every consumer group).
+Both are deployment-scale changes, documented here so the choice is made
+deliberately — not smuggled in at 4am.

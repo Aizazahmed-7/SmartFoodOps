@@ -211,3 +211,49 @@ block — the partner window restates baseURL explicitly.
 blocks npx at the repo root; `frontend/.npmrc` already pins the public
 registry, so all Playwright installs ran from frontend/. The earlier newman
 failure had the same cause.
+
+## S6 — Debezium CDC lane (infrastructure complete; live demo gated on an image pull)
+
+**What outbox_mode=debezium is FOR:** the dev poller is single-instance by
+design (ordering) — it is the one component more order-API pods do not
+scale. CDC moves publishing into WAL decoding: no polling load on PG,
+lower latency, ordered per key, horizontal. Same contract, different
+engine.
+
+**Landed and verified:**
+- postgres now runs `wal_level=logical` (recreated live; verified with
+  SHOW wal_level) — the prerequisite Debezium's pgoutput plugin decodes.
+- A `cdc` compose profile with Kafka Connect (no cross-profile depends_on —
+  the kafka-exporter lesson; restart-until-broker-up covers ordering).
+- The order-outbox connector config, including THE promise from flows.md
+  diagram 5: `table.fields.additional.placement=traceparent:header:…` —
+  the traceparent column lifted into a Kafka HEADER so the async trace hop
+  stays stitched. Plus event_type and aggregate_version headers.
+- `make up-cdc` / `make cdc-register` (idempotent PUT), local-dev docs.
+
+**The deliberate scope cut (staff call, documented in local-dev.md):**
+events route to a PARALLEL namespace `cdc.c1.orders.events`, not the live
+topics. The live topics carry the poller's Avro DomainEvent envelope under
+Schema Registry subjects; EventRouter emits a different value shape, and
+pointing it at the same subjects would poison SR compatibility for every
+consumer. TRUE cutover needs either a custom SMT rebuilding the exact
+envelope, or migrating every consumer's serde to Connect-managed schemas —
+a coordinated change to make deliberately, not smuggle in at 4am.
+
+**The one unverified step:** watching rows stream live. Both quay.io and
+Docker Hub stalled the ~1GB connect image at literally zero bytes for 25+
+minutes tonight (byte counts checked via nettop, not vibes); a pull is
+still running with a watcher armed. Morning command if it landed:
+`make up-cdc && make cdc-register`, then place an order and watch
+cdc.c1.orders.events in the Kafka console (:8085) with headers visible.
+
+## The 3am war story (keep this for the mentor)
+
+Recreating postgres for wal_level briefly broke the worker's connection
+pool (dead connections from the old server). What happened next, with no
+human action: Temporal retried the failing activities, each retry burned
+a dead connection out of the pool, the canary went back to green 44s
+after the last failure — and BOTH new-tonight alerts (WorkerTargetAbsent,
+CanarySilent) went pending during the window and stood down after it.
+The system detected, reported, healed, and un-reported an infra bounce
+end to end. That is the whole observability + saga story in one incident.

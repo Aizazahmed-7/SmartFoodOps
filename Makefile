@@ -109,3 +109,15 @@ migrate: ## Apply one service's Alembic migrations: make migrate SVC=identity [D
 	cfg = Config(); cfg.set_main_option('script_location', 'services/$(SVC)/migrations'); \
 	cfg.set_main_option('sqlalchemy.url', os.environ.get('DATABASE_URL') or Settings().database_url); \
 	command.upgrade(cfg, 'head')"
+
+up-cdc: ## Debezium CDC lane (S6): logical decoding on postgres + Kafka Connect (:8083)
+	$(COMPOSE) --profile core --profile cdc up -d --wait postgres kafka
+	$(COMPOSE) --profile core --profile cdc up -d kafka-connect
+	@echo "✔ connect up — register with make cdc-register, watch cdc.c1.orders.events"
+
+cdc-register: ## Register (or update) the order-outbox Debezium connector
+	@curl -s -X PUT http://localhost:8083/connectors/order-outbox/config \
+	  -H 'Content-Type: application/json' \
+	  -d @deploy/compose/cdc/order-outbox.json.config >/dev/null \
+	  || (echo "connect not up yet — make up-cdc first" && exit 1)
+	@curl -s http://localhost:8083/connectors/order-outbox/status | python3 -m json.tool

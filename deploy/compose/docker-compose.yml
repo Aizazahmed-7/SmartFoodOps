@@ -63,6 +63,9 @@ services:
     profiles: [core]
     image: postgres:15
     ports: ["5432:5432"]
+    # logical WAL: what Debezium's pgoutput plugin decodes (S6). Costs a
+    # little WAL volume; changes nothing for normal SQL clients.
+    command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_USER: sfo
       POSTGRES_PASSWORD: sfo
@@ -426,6 +429,26 @@ services:
       REDIS_HOSTS: global-redis:redis:6379
     depends_on:
       redis: { condition: service_started }
+
+  # ── CDC (profile cdc): make up-cdc — Debezium replaces the poller ──
+  kafka-connect:
+    profiles: [cdc]
+    # Docker Hub, not quay.io: quay stalled indefinitely from this network
+    # (two 10-minute pulls with zero bytes) while the Hub mirror flowed.
+    image: debezium/connect:2.7
+    restart: unless-stopped
+    ports: ["8083:8083"]
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: sfo-cdc
+      CONFIG_STORAGE_TOPIC: _connect.config
+      OFFSET_STORAGE_TOPIC: _connect.offsets
+      STATUS_STORAGE_TOPIC: _connect.status
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+    # No depends_on: cross-profile validation breaks (the kafka-exporter
+    # lesson); restart-until-broker-is-up covers boot ordering.
 
   # ── observability (profile obs): make up-obs ─────────────────────
   jaeger:

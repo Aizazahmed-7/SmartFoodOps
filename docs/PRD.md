@@ -180,9 +180,9 @@ stateDiagram-v2
 
 | ID | Requirement | Pri | Acceptance criteria |
 |---|---|---|---|
-| FR-36 | Real-time customer tracking over SSE | P0 | 2s cadence en-route via Redis sharded pub/sub → tracking-gateway; jittered 15–30 min connection lifetime (uniform-random per connection, full-jitter reconnect backoff) |
+| FR-36 | Real-time customer tracking over SSE | P0 | 2s cadence en-route via Redis sharded pub/sub → tracking-gateway; jittered 15–30 min connection lifetime (uniform-random per connection, full-jitter reconnect backoff) *(As built, W3: order-STATUS push live — /sse/track/{id} via the gateway (the phase-2 nginx mount, real now), Redis pub/sub per order fed post-commit from the transition choke points, 15s heartbeats, jittered 15–30 min lifetime ending in an explicit `reconnect` event; the FE idles its 3s poll while streaming and falls back on any failure. Rider positions swap into the same transport at dispatch.)* |
 | FR-37 | Durable tracking read model | P0 | Connect/reconnect serves snapshot from DDB `order_tracking`; read-repair via workflow query if stale >60s; pub/sub loss can never strand a customer on stale state |
-| FR-38 | SSE ticket auth | P0 | `POST /v1/track/ticket` (JWT-authed, ownership-checked) issues single-use 60s Redis ticket (`GETDEL` on connect); no tokens in query strings |
+| FR-38 | SSE ticket auth | P0 | `POST /v1/track/ticket` (JWT-authed, ownership-checked) issues single-use 60s Redis ticket (`GETDEL` on connect); no tokens in query strings *(As built, W3: exactly this — the stream bypasses the edge entirely, a mismatched ticket burns on redemption, and a missing bus answers 503 so the FE keeps polling.)* |
 | FR-56 | Rider route guidance | P2 | Offer payload and active-delivery view include pickup/dropoff coordinates, OSRM route polyline, and ETA; rider app renders the route or deep-links to the device's navigation. Riders drive freely — GPS is the truth of the actual route (FR-27); custom in-app route editing is explicitly out of scope (§7) |
 | FR-39 | Geofence arrival detection | P1 | In-memory check at rider-gateway fires `rider_arrived` signal at 75m |
 
@@ -198,10 +198,10 @@ stateDiagram-v2
 
 | ID | Requirement | Pri | Acceptance criteria |
 |---|---|---|---|
-| FR-43 | Nine required metrics from the event pipeline | P0 | Total orders; orders per restaurant; peak-hour load; avg delivery time; rider utilization rate; cancellation rate; restaurant acceptance rate; delivery success rate; failed events/workflow issues — all derived from Kafka consumers, 5s micro-batch upserts to PG; duration metrics via emitter-enriched terminal events (no stream joins) |
+| FR-43 | Nine required metrics from the event pipeline | P0 | Total orders; orders per restaurant; peak-hour load; avg delivery time; rider utilization rate; cancellation rate; restaurant acceptance rate; delivery success rate; failed events/workflow issues — all derived from Kafka consumers, 5s micro-batch upserts to PG; duration metrics via emitter-enriched terminal events (no stream joins) *(As built, W3: `services/analytics` — one order_facts row per order upserted by `EventConsumer.run_batches` (true 5s/500-event micro-batch, one tx + one commit, poison degrades to singles); aggregates computed at read time because increments cannot absorb at-least-once redelivery; eight of nine metrics live at GET /v1/internal/analytics/metrics — rider utilization reports null until dispatch exists; failed-events points at the Prometheus DLQ/consumer counters.)* |
 | FR-44 | Raw event lake + drift check | P1 | Raw events → S3 (Parquet) via Connect; nightly Athena recompute; drift >0.1% alarms |
 | FR-45 | Dashboards | P1 | Grafana dashboards over PG aggregates for UC-17 |
-| FR-55 | Restaurant-facing performance view | P2 | Restaurant admin reads **their own** metrics (orders, acceptance rate, cancellation rate, avg prep time, revenue) via edge-bff from `sfo-aurora-analytics` aggregates, scoped by the `restaurant_id` claim — the same pipeline that feeds ops dashboards (FR-43), exposed per-tenant |
+| FR-55 | Restaurant-facing performance view | P2 | Restaurant admin reads **their own** metrics (orders, acceptance rate, cancellation rate, avg prep time, revenue) via edge-bff from `sfo-aurora-analytics` aggregates, scoped by the `restaurant_id` claim — the same pipeline that feeds ops dashboards (FR-43), exposed per-tenant *(As built, W3: GET /v1/restaurant/analytics — scoped by the `restaurant_id` CLAIM with no id in the path, so cross-tenant reads are unrepresentable; daily orders/cancelled/delivered/revenue (settled only) + acceptance and cancellation rates; prep time awaits kitchen-state events.)* |
 
 ### 3.9 Admin & operations
 
