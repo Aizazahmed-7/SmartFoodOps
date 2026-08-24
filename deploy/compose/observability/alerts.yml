@@ -134,3 +134,15 @@ groups:
           summary: "{{ $labels.job }} is running without tracing — recreate it via make up-obs"
           runbook: docs/runbooks.md#tracingdisarmed
           dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: RateLimitSpike
+        # Sustained throttling of one class: either an attack the limiter is
+        # correctly absorbing, or a broken client (retry loop) burning its
+        # own budget — both worth a human look, neither worth a page.
+        expr: sum by (route_class) (rate(rate_limited_total[5m])) * 60 > 30
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "{{ $labels.route_class }} traffic throttled at {{ $value | printf \"%.0f\" }}/min for 10m"
+          runbook: docs/runbooks.md#ratelimitspike
+          dashboard: http://localhost:3000/d/smartfoodops-slo

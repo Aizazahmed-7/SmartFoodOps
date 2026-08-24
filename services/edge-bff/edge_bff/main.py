@@ -5,6 +5,7 @@ verified identity headers, forward to the owning service. No business logic,
 no database — deliberately thin so it scales as N identical tasks.
 """
 
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -19,8 +20,9 @@ from smartfood_auth import STRIP_HEADERS, JwksVerifier, context_from_claims, hea
 from smartfood_otel import RequestContextMiddleware, get_logger, setup_logging, setup_tracing
 
 from .config import Settings
+from .limiter import RateLimiter
 from .openapi import merge_specs
-from .routing import RULES, match, needs_auth, resolve
+from .routing import RULES, limit_class_for, match, needs_auth, resolve
 
 log = get_logger("edge-bff")
 
@@ -40,6 +42,7 @@ def create_app(
     *,
     http: httpx.AsyncClient | None = None,
     verifier: JwksVerifier | None = None,
+    limiter: RateLimiter | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("edge-bff")
@@ -54,11 +57,24 @@ def create_app(
         audience=settings.token_audience,
         cache_ttl=settings.jwks_cache_ttl,
     )
+    if limiter is None:
+        import redis.asyncio as aioredis
+
+        limiter = RateLimiter(
+            aioredis.from_url(settings.redis_url) if settings.redis_url else None,
+            limits={
+                "auth": settings.rate_limit_auth_per_window,
+                "read": settings.rate_limit_read_per_window,
+                "write": settings.rate_limit_write_per_window,
+            },
+            window_seconds=settings.rate_limit_window_seconds,
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         yield
         await http_client.aclose()
+        await limiter.aclose()
 
     # Default docs disabled: they would describe the edge itself (a catch-all
     # proxy — useless). /docs + /openapi.json below serve the MERGED spec.
@@ -120,6 +136,11 @@ def create_app(
             raise ApiError(ErrorCode.NOT_FOUND, "no such route", 404)
 
         # 1. Authenticate when the route demands it.
+        forwarded = request.headers.get("x-forwarded-for", "")
+        client_ip = forwarded.split(",")[0].strip() or (
+            request.client.host if request.client else "unknown"
+        )
+        scope = f"ip:{client_ip}"  # overridden with the verified sub below
         stamped: dict[str, str] = {}
         if needs_auth(rule, request.method):
             auth_header = request.headers.get("authorization", "")
@@ -148,6 +169,28 @@ def create_app(
                     headers={"WWW-Authenticate": "Bearer"},
                 ) from None
             stamped = headers_for(context_from_claims(claims))
+            scope = f"sub:{claims.get('sub', 'unknown')}"
+
+        # 1b. Rate limit — AFTER auth on purpose: an authed caller is
+        # limited by who they are (one NAT full of customers must not share
+        # a bucket), an anonymous one by where they came from. Trusting the
+        # first X-Forwarded-For hop is fine HERE because the gateway in
+        # front of us sets it; expose this edge directly and that hop
+        # becomes client-controlled — a deploy-topology invariant, noted in
+        # the runbook.
+        decision = await limiter.check(limit_class_for(rule, request.method), scope)
+        if decision is not None and not decision.allowed:
+            raise ApiError(
+                ErrorCode.RATE_LIMITED,
+                "too many requests — slow down",
+                429,
+                headers={
+                    "Retry-After": str(max(1, decision.reset_epoch - int(time.time()))),
+                    "RateLimit-Limit": str(decision.limit),
+                    "RateLimit-Remaining": str(decision.remaining),
+                    "RateLimit-Reset": str(decision.reset_epoch),
+                },
+            )
 
         # 2. Build forward headers: inbound minus identity/hop-by-hop, plus stamped.
         #    Client-supplied X-Auth-* dies here, verified or not (ADR-0005).

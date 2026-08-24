@@ -394,6 +394,40 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 14,
+      "title": "Rate limited /min by class (429s the edge refused)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (route_class) (rate(rate_limited_total[5m])) * 60",
+          "legendFormat": "{{route_class}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(rate_limit_errors_total[5m]) * 60",
+          "legendFormat": "redis errors (failing OPEN)",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "schemaVersion": 39

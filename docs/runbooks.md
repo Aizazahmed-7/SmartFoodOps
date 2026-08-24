@@ -143,3 +143,21 @@ jobs reporting 0; confirm with
 recreates the app tier with it. Verify: `tracing_armed` is 1 for every job, and
 a fresh order produces a trace spanning all services rather than a partial one
 (Jaeger → the `edge-bff POST /v1/orders` root should carry ~80 spans).
+
+## RateLimitSpike
+
+**Means**: one route class has been refusing requests with 429 at a sustained
+rate — a credential-stuffing run against `auth`, a scraper against `read`, or
+a broken client retry-looping against `write` (its own 429s feed the loop).
+The limiter is WORKING; the question is who is hitting it.
+**Check**: `sum by (route_class) (rate(rate_limited_total[5m]))` for the class;
+then edge-bff logs for the scope — authed abuse logs the `sub`, anonymous
+logs the first X-Forwarded-For hop (trustworthy only because the gateway in
+front of the edge sets it; if the edge is ever exposed directly, that hop
+becomes attacker-controlled and this runbook needs a redesign, not a tweak).
+`rate_limit_errors_total` moving instead means Redis is unhealthy and every
+check is failing OPEN — the limiter is off while it climbs.
+**Fix**: abusive `sub` → suspend the account; abusive IP → block upstream of
+the edge; legitimate bursts (a launch, a demo) → raise the class budget in
+edge-bff config (`rate_limit_*_per_window`) — a restart-only change. Verify:
+the class's refusal rate returns to zero without the success rate dropping.

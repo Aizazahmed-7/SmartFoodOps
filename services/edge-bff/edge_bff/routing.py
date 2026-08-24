@@ -20,6 +20,11 @@ class Rule:
     prefix: str
     upstream: str  # settings attribute name — bind with resolve() at startup
     mode: RouteMode
+    # Rate-limit class. "auth" is explicit on the credential endpoints (the
+    # attack there is guessing, so the budget is tight regardless of verb);
+    # None = derive from the verb at request time (GET/HEAD -> "read",
+    # writes -> "write"). See limit_class_for().
+    limit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -30,6 +35,7 @@ class ResolvedRule:
     prefix: str
     base_url: str
     mode: RouteMode
+    limit: str | None = None
 
 
 class _HasPrefix(Protocol):
@@ -39,14 +45,15 @@ class _HasPrefix(Protocol):
 
 def resolve(rules: "Sequence[Rule]", settings: object) -> list[ResolvedRule]:
     return [
-        ResolvedRule(rule.prefix, getattr(settings, rule.upstream), rule.mode) for rule in rules
+        ResolvedRule(rule.prefix, getattr(settings, rule.upstream), rule.mode, rule.limit)
+        for rule in rules
     ]
 
 
 RULES = [
-    Rule("/v1/auth/register", "identity_base_url", "public"),
-    Rule("/v1/auth/login", "identity_base_url", "public"),
-    Rule("/v1/auth/refresh", "identity_base_url", "public"),
+    Rule("/v1/auth/register", "identity_base_url", "public", limit="auth"),
+    Rule("/v1/auth/login", "identity_base_url", "public", limit="auth"),
+    Rule("/v1/auth/refresh", "identity_base_url", "public", limit="auth"),
     Rule("/v1/auth", "identity_base_url", "auth"),
     Rule("/v1/me", "identity_base_url", "auth"),
     Rule("/v1/restaurants", "catalog_base_url", "public_read"),
@@ -77,3 +84,11 @@ def needs_auth(rule: "Rule | ResolvedRule", method: str) -> bool:
     if rule.mode == "public_read":
         return method.upper() not in ("GET", "HEAD")
     return True
+
+
+def limit_class_for(rule: "Rule | ResolvedRule", method: str) -> str:
+    """The bucket a request draws from. Explicit tag first (auth), then the
+    verb: reads are cheap and plentiful, writes cost money paths."""
+    if rule.limit is not None:
+        return rule.limit
+    return "read" if method.upper() in ("GET", "HEAD") else "write"

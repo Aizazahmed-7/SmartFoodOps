@@ -353,6 +353,9 @@ services:
     environment:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/edge-bff
+      # Rate limiting (db 1 — catalog's cache owns db 0; separate keyspaces
+      # so flushing one can never clear the other).
+      REDIS_URL: redis://redis:6379/1
     command:
       [
         "uv",
