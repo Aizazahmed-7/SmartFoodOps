@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     # in-container the env var overrides this with redis://redis:6379/0.
     redis_url: str = "redis://localhost:6380/0"
 
+    # The zone a new restaurant's posted hours are read in when the owner
+    # does not name one. Wall-clock local is the only reading a restaurateur
+    # would accept, so SOME zone must be chosen — this makes it a deployment
+    # decision instead of a constant buried in a migration.
+    default_timezone: str = "America/Chicago"
+
     # Internal grant call on self-serve onboarding (service-ownership.md: Catalog → Identity).
     identity_base_url: str = "http://localhost:8001"
 

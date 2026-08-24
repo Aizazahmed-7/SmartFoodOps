@@ -186,6 +186,7 @@ dependencies = [
     { name = "smartfood-kafka" },
     { name = "smartfood-otel" },
     { name = "smartfood-outbox" },
+    { name = "smartfood-pricing" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn" },
 ]
@@ -203,6 +204,7 @@ requires-dist = [
     { name = "smartfood-kafka", editable = "libs/smartfood-kafka" },
     { name = "smartfood-otel", editable = "libs/smartfood-otel" },
     { name = "smartfood-outbox", editable = "libs/smartfood-outbox" },
+    { name = "smartfood-pricing", editable = "libs/smartfood-pricing" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "uvicorn", specifier = ">=0.32" },
 ]

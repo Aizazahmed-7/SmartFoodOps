@@ -14,6 +14,7 @@ from .errors import (
     PricingError,
     RestaurantClosed,
 )
+from .hours import is_open_at
 from .models import (
     DEFAULT_CONFIG,
     Line,
@@ -39,5 +40,6 @@ __all__ = [
     "RestaurantClosed",
     "Selection",
     "Totals",
+    "is_open_at",
     "price_order",
 ]

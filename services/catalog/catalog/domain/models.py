@@ -19,4 +19,5 @@ class Restaurant:
     lat: float | None
     lon: float | None
     hours: dict[str, Any] | None
+    timezone: str
     version: int

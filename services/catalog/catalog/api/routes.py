@@ -7,6 +7,7 @@ bypass scoping (every admin mutation will gain an audit row with W3 logging).
 
 import re
 from typing import Annotated
+from zoneinfo import available_timezones
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import Field, field_validator, model_validator
@@ -43,6 +44,15 @@ def _slugify(values: list[str]) -> list[str]:
     return out
 
 
+def _valid_timezone(v: str) -> str:
+    """IANA zone names only. Validating at the write boundary is what lets
+    is_open_at treat an unknown zone as a data bug it may degrade around
+    (open) rather than a case it must reason about."""
+    if v not in available_timezones():
+        raise ValueError("unknown IANA timezone")
+    return v
+
+
 class RestaurantCreate(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     city: str = Field(min_length=1, max_length=64)
@@ -50,11 +60,17 @@ class RestaurantCreate(StrictModel):
     lat: float | None = Field(default=None, ge=-90, le=90)
     lon: float | None = Field(default=None, ge=-180, le=180)
     hours: dict[str, list[str]] | None = None
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
 
     @field_validator("cuisines")
     @classmethod
     def _normalize_cuisines(cls, v: list[str]) -> list[str]:
         return _slugify(v)
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, v: str | None) -> str | None:
+        return None if v is None else _valid_timezone(v)
 
     @field_validator("city")
     @classmethod
@@ -70,11 +86,17 @@ class RestaurantUpdate(StrictModel):
     lat: float | None = Field(default=None, ge=-90, le=90)
     lon: float | None = Field(default=None, ge=-180, le=180)
     hours: dict[str, list[str]] | None = None
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
 
     @field_validator("cuisines")
     @classmethod
     def _normalize_cuisines(cls, v: list[str] | None) -> list[str] | None:
         return None if v is None else _slugify(v)
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, v: str | None) -> str | None:
+        return None if v is None else _valid_timezone(v)
 
 
 class RestaurantOut(StrictModel):
@@ -86,6 +108,7 @@ class RestaurantOut(StrictModel):
     lat: float | None
     lon: float | None
     hours: dict[str, list[str]] | None
+    timezone: str
     version: int
 
 
@@ -151,6 +174,7 @@ async def create_restaurant(
             lat=body.lat,
             lon=body.lon,
             hours=body.hours,
+            timezone=body.timezone,
         )
     except GrantRejected:
         raise ApiError(ErrorCode.GRANT_CONFLICT, "onboarding grant rejected", 409) from None

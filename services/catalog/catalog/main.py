@@ -123,7 +123,9 @@ def create_app(
     # sees app.state.service; the domain only sees the sessionmaker.
     if search is None:
         search = PostgresSearch(sessions)  # PG-only SQL — fine: prod IS Postgres
-    app.state.service = CatalogService(sessions, grants, cache, search)
+    app.state.service = CatalogService(
+        sessions, grants, cache, search, default_timezone=settings.default_timezone
+    )
 
     app.include_router(router)
 

@@ -34,6 +34,9 @@ restaurants = sa.Table(
     sa.Column("status", sa.Text, nullable=False, server_default="open"),
     sa.CheckConstraint(f"status IN {RESTAURANT_STATUSES!r}", name="ck_restaurants_status"),
     sa.Column("hours", sa.JSON, nullable=True),  # {"mon": ["11:00", "23:00"], ...}
+    # Hours are wall-clock local, so they are meaningless without the zone
+    # they are read in (smartfood_pricing.is_open_at does the arithmetic).
+    sa.Column("timezone", sa.Text, nullable=False, server_default="America/Chicago"),
     # cache version.
     sa.Column("version", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),

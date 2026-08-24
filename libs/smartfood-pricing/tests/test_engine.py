@@ -285,3 +285,23 @@ def test_line_model_bounds():
         )
     with pytest.raises(ValidationError):
         Line(item_id="itm_a", qty=1, unknown_field=1)  # type: ignore[call-arg]
+
+
+def test_closed_by_schedule_even_when_status_is_open():
+    """The second way to be shut: the owner never paused, but the posted
+    hours say the kitchen is dark right now. Catalog computes open_now;
+    the engine only has to honour it."""
+    snapshot = snap(items=[item()])
+    snapshot["restaurant"]["open_now"] = False
+    with pytest.raises(RestaurantClosed):
+        price_order(snapshot, [Line(item_id="itm_a", qty=1)])
+
+
+def test_open_now_absent_preserves_pre_hours_behaviour():
+    """A snapshot from a catalog that predates hours has no open_now key.
+    It must price exactly as before — this default is what let the feature
+    ship without a lockstep deploy."""
+    snapshot = snap(items=[item()])
+    assert "open_now" not in snapshot["restaurant"]
+    priced = price_order(snapshot, [Line(item_id="itm_a", qty=1)])
+    assert priced.totals.subtotal_cents == 1000

@@ -26,6 +26,7 @@ from typing import Any
 
 from smartfood_kafka import EventType
 from smartfood_otel import get_logger
+from smartfood_pricing import is_open_at
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -96,11 +97,13 @@ class CatalogService:
         grants: GrantsPort,
         cache: CachePort,
         search: SearchPort,
+        default_timezone: str = "America/Chicago",
     ):
         self._sessions = sessions
         self._grants = grants
         self._cache = cache
         self._search = search
+        self._default_timezone = default_timezone
 
     # ── reads & snapshots ──────────────────────────────────────────
 
@@ -119,6 +122,7 @@ class CatalogService:
             lat=row.lat,
             lon=row.lon,
             hours=row.hours,
+            timezone=row.timezone,
             version=row.version,
         )
 
@@ -137,6 +141,7 @@ class CatalogService:
             "lat": restaurant.lat,
             "lon": restaurant.lon,
             "hours": restaurant.hours,
+            "timezone": restaurant.timezone,
         }
 
     @staticmethod
@@ -258,6 +263,9 @@ class CatalogService:
         lat: float | None,
         lon: float | None,
         hours: dict[str, Any] | None,
+        # Optional so the config default applies: an owner who never
+        # names a zone still gets a correct schedule for the deployment.
+        timezone: str | None = None,
     ) -> tuple[Restaurant, bool]:
         """Self-serve onboarding, idempotent by owner (phase-1 claim model:
         one restaurant per user, enforced by UNIQUE(owner_user_id)).
@@ -280,6 +288,7 @@ class CatalogService:
                         lat=lat,
                         lon=lon,
                         hours=hours,
+                        timezone=timezone or self._default_timezone,
                         now=_now(),
                     )
                     await repo.set_cuisines(restaurant_id, cuisines)
@@ -637,6 +646,10 @@ class CatalogService:
                 "name": restaurant.name,
                 "city": restaurant.city,
                 "status": restaurant.status,  # paused → pricing rejects placement
+                # The OTHER way to be shut, evaluated here because catalog is
+                # the only party holding both the schedule and the clock. The
+                # engine stays pure: it reads a boolean, not a timezone.
+                "open_now": is_open_at(restaurant.hours, restaurant.timezone, _now()),
                 "version": restaurant.version,
             },
             "items": [

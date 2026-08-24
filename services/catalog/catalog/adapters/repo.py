@@ -43,6 +43,7 @@ class CatalogRepo:
         lat: float | None,
         lon: float | None,
         hours: dict[str, Any] | None,
+        timezone: str,
         now: datetime,
     ) -> str:
         restaurant_id = f"rst_{uuid.uuid4().hex}"
@@ -55,6 +56,7 @@ class CatalogRepo:
                 lat=lat,
                 lon=lon,
                 hours=hours,
+                timezone=timezone,
                 created_at=now,
                 updated_at=now,
             )

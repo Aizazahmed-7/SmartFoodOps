@@ -44,7 +44,12 @@ def price_order(
     if expected_menu_version is not None and expected_menu_version != restaurant["version"]:
         raise MenuVersionChanged(current=restaurant["version"])
 
-    if restaurant["status"] != "open":
+    # Two independent ways to be shut, kept separate on purpose: `status` is
+    # the owner's explicit pause, `open_now` is the posted schedule (computed
+    # by catalog, which owns the clock and the timezone — this engine stays a
+    # pure function of its snapshot). Absent = True so a snapshot from an
+    # older catalog behaves exactly as it did before hours existed.
+    if restaurant["status"] != "open" or restaurant.get("open_now", True) is False:
         raise RestaurantClosed(restaurant["id"])
 
     if not lines:
