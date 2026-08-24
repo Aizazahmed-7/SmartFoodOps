@@ -22,6 +22,7 @@ import sqlalchemy as sa
 from smartfood_kafka import EventType
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .. import tracking
 from ..adapters.repo import OrderRepo
 from ..db import OrderStatus, order_items, orders
 
@@ -89,6 +90,9 @@ async def transition(
                 order_id=order_id, version=version, event_type=event, payload=payload, now=now
             )
         await session.commit()
+    # Post-commit on purpose: the stream hint must never describe a write
+    # that rolled back, and its failure must never undo one that landed.
+    await tracking.publish_status(order_id, target)
     return TransitionResult(applied=True, version=version)
 
 
@@ -121,6 +125,7 @@ async def begin_cancel_from(
         applied = result.one_or_none() is not None
         await session.commit()
         if applied:
+            await tracking.publish_status(order_id, "CANCELLING")
             return True
         current = (
             await session.execute(sa.select(orders.c.status).where(orders.c.order_id == order_id))

@@ -1,6 +1,7 @@
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { cancelOrder, getOrder } from "../api/client";
+import { cancelOrder, getOrder, getTrackTicket } from "../api/client";
 import { hasCode } from "../api/errors";
 import {
   CANCEL_FAMILY, CANCELLABLE_STATUSES, TERMINAL_STATUSES,
@@ -52,6 +53,14 @@ function Journey({ status }: { status: OrderStatus }) {
 export default function OrderDetail() {
   const { id } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
+  // S4: live tracking. The stream pushes STATUS HINTS; every render still
+  // comes from the GET (the database stays the only truth), so a lost or
+  // phantom hint costs one refetch at most. While the stream is up the
+  // poll idles; any stream failure silently returns to the 3s poll — the
+  // customer never sees the difference, only the latency.
+  const [streaming, setStreaming] = useState(false);
+  const esRef = useRef<EventSource | null>(null);
+
   const order = useQuery({
     queryKey: ["order", id],
     queryFn: () => getOrder(id!),
@@ -60,7 +69,11 @@ export default function OrderDetail() {
       // yet: a placement whose saga answered slowly hands back a real id
       // seconds before the row exists (ADR-0023's pending case), so a 404
       // right after checkout means "being placed", not "no such order".
-      !query.state.data || !TERMINAL_STATUSES.includes(query.state.data.status) ? 3000 : false,
+      streaming
+        ? false // the stream is the ticker; the poll is the floor beneath it
+        : !query.state.data || !TERMINAL_STATUSES.includes(query.state.data.status)
+          ? 3000
+          : false,
     refetchIntervalInBackground: true, // tracking keeps moving in a background tab
     retry: (failureCount, error) => hasCode(error, "NOT_FOUND") && failureCount < 5,
   });
@@ -70,6 +83,48 @@ export default function OrderDetail() {
     // 202 and 200 both resolve; either way the poll shows the truth next tick.
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["order", id] }),
   });
+
+  const status = order.data?.status;
+  useEffect(() => {
+    if (!id || !status || TERMINAL_STATUSES.includes(status)) return;
+    let cancelled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+
+    const connect = async () => {
+      try {
+        const { ticket } = await getTrackTicket(id);
+        if (cancelled) return;
+        const es = new EventSource(`/sse/track/${id}?ticket=${encodeURIComponent(ticket)}`);
+        esRef.current = es;
+        es.addEventListener("status", () => {
+          // A hint, not a payload: refetch and let the GET be the truth.
+          queryClient.invalidateQueries({ queryKey: ["order", id] });
+        });
+        es.addEventListener("reconnect", () => {
+          // Jittered lifetime reached (FR-36) — reopen with a fresh ticket.
+          es.close();
+          if (!cancelled) retry = setTimeout(connect, 250);
+        });
+        es.onopen = () => setStreaming(true);
+        es.onerror = () => {
+          // Tickets are single-use, so EventSource's built-in reconnect
+          // would just 401 — close, fall back to the poll, try again soon.
+          es.close();
+          setStreaming(false);
+          if (!cancelled) retry = setTimeout(connect, 5000);
+        };
+      } catch {
+        setStreaming(false); // 503 = tracking off; the poll carries on
+      }
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (retry) clearTimeout(retry);
+      esRef.current?.close();
+      setStreaming(false);
+    };
+  }, [id, status && TERMINAL_STATUSES.includes(status), queryClient]);
 
   if (order.isLoading) return <Spinner />;
   // A single failed poll must not blank a working tracking screen: only

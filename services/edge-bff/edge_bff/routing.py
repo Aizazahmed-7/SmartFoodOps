@@ -66,6 +66,9 @@ RULES = [
     # "/" right after the prefix, and "restaurants"[10] is "s", not "/".
     Rule("/v1/restaurant", "order_base_url", "auth"),
     Rule("/v1/notifications", "notification_base_url", "auth"),
+    # Only the ticket POST — the SSE stream rides /sse/track/* straight
+    # from the gateway to order (the ticket IS its auth, FR-38).
+    Rule("/v1/track", "order_base_url", "auth"),
     # Longer prefix beats "/v1/restaurant" -> order: the owner's metrics
     # view rides the analytics service, everything else under /v1/restaurant
     # stays kitchen ops.

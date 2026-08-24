@@ -51,6 +51,18 @@ class Settings(BaseSettings):
     # latency grows; lower it to fail fast toward the pending screen.
     placement_await_seconds: float = 2.0
 
+    # Live tracking (S4): empty = off (unit tests; any install without
+    # Redis) — the FE then keeps its polling loop, by design. Compose's
+    # app-env REDIS_URL arms it fleet-wide; tracking keys/channels are
+    # namespaced sfo:track:/sfo:ticket: so sharing db 0 with catalog's
+    # cache is collision-free.
+    redis_url: str = ""
+    track_ticket_ttl_seconds: int = 60
+    track_heartbeat_seconds: float = 15.0
+    # FR-36: jittered connection lifetime — reconnects spread, never thunder.
+    track_lifetime_min_seconds: float = 900.0
+    track_lifetime_max_seconds: float = 1800.0
+
     # The worker is not a web app, so its /metrics rides a bare
     # prometheus_client HTTP server on this port. 0 disables (unit tests).
     worker_metrics_port: int = 9106

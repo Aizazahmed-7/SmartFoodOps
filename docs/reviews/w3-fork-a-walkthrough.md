@@ -120,3 +120,54 @@ days of place-and-cancel — cancellation_rate 0.9848, exactly what the canary
 does); avg_delivery_seconds 53.4 (= the simulated courier's 20+30s timers);
 owner view through gateway→edge→analytics shows daily revenue 12288¢ =
 3 settled × 4096¢. 676 tests, 100% cov.
+
+## S4 — SSE live tracking (FR-36 transport, FR-38 auth)
+
+**The auth design (FR-38), and why it is shaped this way:** EventSource
+cannot send an Authorization header, and a JWT in a query string soaks into
+access logs and referrers. So the edge-authed `POST /v1/track/ticket`
+(ownership-checked, not-yours → 404) sells a 60-second single-use ticket;
+the stream endpoint redeems it with Redis **GETDEL** — atomic
+read-and-destroy, so replay is structurally impossible rather than merely
+forbidden. A mismatched ticket is burned too: a probe learns nothing and
+loses its ticket trying. Verified live: second use → 401.
+
+**The topology:** `/sse/track/*` goes gateway → order DIRECTLY, bypassing
+the edge — that is the point of the ticket: the stream fleet never touches
+JWTs/JWKS. The nginx location that held the phase-2 "tracking-gateway lands
+later" 503 is now the real thing, so when the dedicated gateway arrives it
+mounts at the same URL and the FE never changes. The ticket POST still
+rides the edge (it IS the auth step).
+
+**Hints, not payloads — the one decision that buys the failure story.** The
+stream pushes bare status strings; the FE treats each as "refetch now" and
+renders only what the GET returns. Therefore: a publish lost to a Redis
+blip costs seconds of staleness (the poll floor still exists); a publish
+raced by a rollback costs one harmless refetch; the bus fails OPEN and
+lives entirely off the money path. Publishes fire POST-COMMIT from the
+three choke points every status write already funnels through
+(transition(), begin_cancel_from(), create_order) via a module-level
+publisher seam — the otel arming idiom, so no signature changed.
+
+**FR-36's jittered lifetime** (15–30 min, injected rng): the server ends
+each stream with an `event: reconnect`, the FE reopens with a fresh ticket
+— a fleet's reconnects spread instead of thundering. Heartbeat comments
+every 15s keep proxies from reaping quiet streams.
+
+**FE:** while the stream is open the 3s poll idles (`refetchInterval:
+false`); ANY stream failure silently returns to polling. Tickets being
+single-use means EventSource's built-in reconnect would 401 — so onerror
+closes and re-tickets instead.
+
+**Verified live, twice:** (1) curl on /sse/track watched VALIDATED →
+PAYMENT_CLEARED → CONFIRMED arrive from the WORKER process (cross-process
+via Redis) then ACCEPTED from the kitchen; (2) in the browser, the network
+log shows GET order → POST ticket 201 → SSE 200 open, then the kitchen
+accepted from OUTSIDE the browser and the tracker advanced to "Cooking"
+with exactly ONE hint-triggered GET and zero polling. 693 tests, 100% cov.
+
+**Scale notes:** pub/sub is fire-and-forget by design (a tracking hint has
+no value five seconds later — nothing to reap, nothing to store); per-order
+channels shard by key hash across a Redis cluster; the subscriber side is
+what moves to the dedicated SSE fleet at 400–500k connections (NFR-7), and
+the jittered lifetime is what makes that fleet's deploys rollable.

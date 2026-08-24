@@ -19,11 +19,15 @@ from smartfood_pricing import PricingConfig
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from . import tracking
 from .adapters.catalog_client import CatalogClient
 from .adapters.identity_client import IdentityClient
 from .adapters.temporal_client import TemporalSaga
+from .adapters.tracking import RedisTracking
 from .api.restaurant import router as restaurant_router
 from .api.routes import router
+from .api.track import TrackingConfig, TrackingPort
+from .api.track import router as track_router
 from .config import Settings
 from .db import metadata, outbox
 from .domain.kitchen import KitchenService
@@ -51,6 +55,7 @@ def create_app(
     identity: IdentityPort | None = None,
     saga: SagaPort | None = None,
     poller: OutboxPoller | None = None,
+    tracking_port: TrackingPort | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("order")
@@ -61,6 +66,17 @@ def create_app(
         engine_kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
     engine = create_async_engine(settings.database_url, **engine_kwargs)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    # Live tracking (S4): the ticket store + status bus. Armed only with a
+    # redis_url; otherwise the FE's polling loop remains the whole story.
+    own_tracking: RedisTracking | None = None
+    if tracking_port is None and settings.redis_url:  # pragma: no cover — live wiring
+        import redis.asyncio as aioredis
+
+        own_tracking = RedisTracking(aioredis.from_url(settings.redis_url))
+        tracking_port = own_tracking
+    if tracking_port is not None:
+        tracking.set_publisher(tracking_port)  # type: ignore[arg-type]
 
     # DI seams: tests inject fakes; production builds the real adapters and
     # owns their clients' lifecycles in the lifespan below.
@@ -116,6 +132,9 @@ def create_app(
         if own_producer is not None:  # pragma: no cover — live path
             await own_producer.stop()
         await engine.dispose()
+        tracking.reset_publisher()
+        if own_tracking is not None:  # pragma: no cover — live wiring
+            await own_tracking.aclose()
         if own_http is not None:
             await own_http.aclose()
 
@@ -138,8 +157,16 @@ def create_app(
         saga=saga,
     )
     app.state.kitchen = KitchenService(sessions, saga=saga)
+    app.state.tracking = tracking_port
+    app.state.tracking_config = TrackingConfig(
+        ticket_ttl_s=settings.track_ticket_ttl_seconds,
+        heartbeat_s=settings.track_heartbeat_seconds,
+        lifetime_min_s=settings.track_lifetime_min_seconds,
+        lifetime_max_s=settings.track_lifetime_max_seconds,
+    )
     app.include_router(router)
     app.include_router(restaurant_router)
+    app.include_router(track_router)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

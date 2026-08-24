@@ -46,6 +46,15 @@ async def main() -> None:  # pragma: no cover — live wiring (compose runs it)
     if settings.worker_metrics_port > 0:
         serve_metrics(settings.worker_metrics_port)  # saga outcomes live HERE
 
+    if settings.redis_url:
+        # The worker owns MOST transitions, so it publishes most hints.
+        import redis.asyncio as aioredis
+
+        from . import tracking
+        from .adapters.tracking import RedisTracking
+
+        tracking.set_publisher(RedisTracking(aioredis.from_url(settings.redis_url)))
+
     runtime: Runtime | None = None
     if settings.worker_temporal_metrics_port > 0:
         # temporal_activity_schedule_to_start_latency etc. — the USE side

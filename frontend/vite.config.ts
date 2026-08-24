@@ -12,6 +12,9 @@ export default defineConfig({
     port: Number(process.env.PORT) || 5173,
     proxy: {
       "/v1": "http://localhost:8080",
+      // SSE tracking stream — http-proxy streams responses by default, so
+      // EventSource works through the dev server unmodified.
+      "/sse": "http://localhost:8080",
       "/openapi.json": "http://localhost:8080",
     },
   },

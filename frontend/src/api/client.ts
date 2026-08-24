@@ -254,6 +254,15 @@ export const placeOrder = (body: PlaceOrderBody) =>
     headers: { "Idempotency-Key": idemKeyFor(body) },
   });
 
+/** Buy a 60s single-use ticket for the SSE stream (FR-38): EventSource
+ * cannot send Authorization, and a JWT in a query string would soak into
+ * access logs — so the authed POST trades the JWT for a ticket, and the
+ * stream URL carries only that. 503 = tracking off; the poll carries on. */
+export const getTrackTicket = (orderId: string) =>
+  request<{ ticket: string; expires_in: number; stream: string }>(
+    "POST", "/v1/track/ticket", { order_id: orderId },
+  );
+
 export const listOrders = (cursor?: string) =>
   request<OrderList>("GET", `/v1/orders${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
 

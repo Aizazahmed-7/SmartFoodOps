@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from . import tracking
 from .adapters.repo import OrderRepo
 from .db import OrderStatus
 from .domain.ports import InventoryOpsPort, PaymentOpsPort, PaymentStateConflict
@@ -126,6 +127,7 @@ class OrderActivities:
             except IntegrityError:
                 await session.rollback()
                 return False
+        await tracking.publish_status(placement.order_id, "PLACED")
         return True
 
     async def _adopt_existing(self, placement: PlacementInput) -> str:
