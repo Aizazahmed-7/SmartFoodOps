@@ -1,7 +1,7 @@
 # Panel demo — Postman collection
 
 Import `SmartFoodOps.postman_collection.json` (Postman → Import → File). One
-collection, 54 requests in 8 folders, run **top to bottom, one Send at a
+collection, 69 requests in 9 folders, run **top to bottom, one Send at a
 time**. Every request carries PASS/FAIL tests (watch the **Test Results** tab
 go green) and captures what the next request needs into collection variables —
 nothing is ever pasted by hand.
@@ -32,6 +32,7 @@ the server to it. That one green check is ADR-0023/0024 in a single frame.
 | **05 · Cancel & decline** | cancel 202/200/409-too-late; `tok_decline` still 202s — the decline arrives as order state (`payment_declined`), never a 500 |
 | **06 · Notifications** | the bell narrates everything the panel just did; mark-read; owner's restaurant view |
 | **07 · Chaos (optional)** | each description names the docker command: Temporal down → **503 with nothing written**, same key retries onto the predicted id; worker down → **202 pending**, 404 read window, then the order materializes |
+| **08 · Onboarding** | a stranger becomes a restaurant: create → **403 on the stale token** → refresh → `restaurant_admin` → menu → **first order CANCELLED `item_unavailable`** (strict stock, the row inventory created at 0 over Kafka) → stock it → CONFIRMED, 50 → 48 |
 
 ## Chaos commands (folder 07 descriptions repeat these)
 
@@ -52,6 +53,11 @@ docker compose -f deploy/compose/docker-compose.yml --profile core --profile app
   status appears (saga ~2s; courier pickup ~20s; SETTLED ~50s after ready).
 - The whole run is repeatable: every placement mints a fresh key, the panelist
   user is minted per run, and pause/resume cleans up after itself.
+- Folder 08 depends on folder 00 only (it reuses `customerToken` + `addressId`
+  for the buying half) and is otherwise self-contained — it mints its own owner,
+  restaurant, category and item on every run, so it never collides with the seed.
+- Folder 08's two "Read it" requests are poll points like folder 04's: the saga
+  needs a moment. Re-send if the status has not landed yet.
 
 Every expected status code in this collection was verified against the live
 stack before it was committed (see the ADR-0024 drills) — the tests assert
