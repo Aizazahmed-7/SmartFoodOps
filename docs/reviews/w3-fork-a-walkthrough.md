@@ -171,3 +171,43 @@ no value five seconds later — nothing to reap, nothing to store); per-order
 channels shard by key hash across a Redis cluster; the subscriber side is
 what moves to the dedicated SSE fleet at 400–500k connections (NFR-7), and
 the jittered lifetime is what makes that fleet's deploys rollable.
+
+## S5 — Playwright smoke (the two-window story)
+
+**Two specs against the LIVE stack (deliberately unmocked):** the value is
+that a real saga, kitchen, and courier sit behind every click.
+
+1. *The two-window story* (~57s): customer signs in, fills a cart, pays
+   with the approving card, watches CONFIRMED arrive; a SECOND browser
+   context signs in as the owner, accepts / starts preparing / marks food
+   ready in the kitchen feed; the simulated courier's timers run; the
+   customer's screen reaches DELIVERED/SETTLED with no further clicks
+   anywhere. The entire FR-19 lifecycle, driven through the actual UI.
+2. *The declined card*: tok_decline placement still 202s, the saga turns
+   the 402 into order state, and the UI shows CANCELLED with the honest
+   copy "your card was declined" — never an error page.
+
+**Four bugs the suite's own development bought (each now a comment in the
+spec, so the next author doesn't re-pay):**
+- Playwright's default ACTION timeout is unlimited — one un-actionable
+  click silently consumed the whole test budget and made every failure
+  look like a hang. Every click in the flow is now time-boxed.
+- The retry loop clicked "Add" while its own previous attempt's modal was
+  open — hitting the backdrop and CLOSING it: the loop kept killing its
+  own progress. Order now: never click Add when a modal is up.
+- **The real root cause:** the modal's "Add to cart" is `disabled` until
+  required modifier groups are satisfied (min_select) — and a disabled
+  button passes every visibility check while failing every click,
+  silently. The loop now picks the chip before the button (seed-agnostic
+  XPath) instead of hardcoding option names.
+- `getByText("CANCELLED")` strict-mode-collided with the banner containing
+  the same word — only when the banner had rendered, so it passed solo and
+  failed in the suite. Exact-match on the tag.
+
+Also: `browser.newContext()` inherits nothing from the config's `use`
+block — the partner window restates baseURL explicitly.
+
+**npm registry note:** the corporate CodeArtifact registry (expired token)
+blocks npx at the repo root; `frontend/.npmrc` already pins the public
+registry, so all Playwright installs ran from frontend/. The earlier newman
+failure had the same cause.
