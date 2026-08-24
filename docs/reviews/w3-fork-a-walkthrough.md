@@ -241,11 +241,19 @@ envelope, or migrating every consumer's serde to Connect-managed schemas —
 a coordinated change to make deliberately, not smuggle in at 4am.
 
 **The one unverified step:** watching rows stream live. Both quay.io and
-Docker Hub stalled the ~1GB connect image at literally zero bytes for 25+
-minutes tonight (byte counts checked via nettop, not vibes); a pull is
-still running with a watcher armed. Morning command if it landed:
-`make up-cdc && make cdc-register`, then place an order and watch
-cdc.c1.orders.events in the Kafka console (:8085) with headers visible.
+Docker Hub stalled the ~1GB connect image at literally zero bytes for over
+NINETY minutes tonight (byte counts checked via nettop, not vibes — ~2.7KB
+total after an hour); the pulls were killed rather than left thrashing.
+Morning commands, on a working network:
+
+    docker pull debezium/connect:2.7
+    make up-cdc && make cdc-register
+    make demo   # then watch cdc.c1.orders.events in the Kafka console
+                # (:8085) — value = payload JSON, headers = traceparent,
+                # event_type, aggregate_version
+
+Everything else in the slice is committed and the wal_level prerequisite is
+live and verified.
 
 ## The 3am war story (keep this for the mentor)
 
@@ -257,3 +265,31 @@ after the last failure — and BOTH new-tonight alerts (WorkerTargetAbsent,
 CanarySilent) went pending during the window and stood down after it.
 The system detected, reported, healed, and un-reported an infra bounce
 end to end. That is the whole observability + saga story in one incident.
+
+---
+
+## The night in numbers
+
+| Slice | Commit | Suite after it |
+|---|---|---|
+| S1 hours enforcement | f59e1be | 638 tests, 100% |
+| S2 edge rate limiting | 1093798 | 648 tests, 100% |
+| S3 analytics service | 00c0618 | 676 tests, 100% |
+| S4 SSE live tracking | 3b53733 | 693 tests, 100% |
+| S5 Playwright smoke | 69172fb | +2 e2e (~1 min, real stack) |
+| S6 CDC lane | d1d78dd | infra committed; live demo needs the image |
+
+5,736 statements at 100.00% branch coverage; ruff + strict pyright clean
+throughout; 12 alert rules ↔ 12 runbook sections in exact parity.
+
+**Bugs found by verifying live, not by the unit gates** (the running theme):
+the Avro payload-is-a-string TypeError that parked the whole topic (healed
+by our own dlq-replay); the dual OrderPlaced payload shape; the missing
+ANALYTICS_BASE_URL in the app-env anchor; the four Playwright traps; and
+two alerts built this same day (WorkerTargetAbsent, TracingDisarmed) each
+catching a real event within hours of existing.
+
+**Still open, deliberately:** the CDC live demo (image pull — first command
+above); the envelope cutover decision (two paths in local-dev.md); rider
+utilization (needs dispatch); FE unit tests beyond e2e (Playwright is the
+W3 scope); the load test (explicitly parked by the user).
