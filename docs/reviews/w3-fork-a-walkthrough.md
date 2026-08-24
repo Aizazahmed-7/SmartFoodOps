@@ -68,3 +68,55 @@ clears the other.
 Retry-After + RateLimit-Limit/Remaining/Reset; `docker stop redis` → 5/5
 requests still 200 with `rate_limit_errors_total` = 5; redis back → limiting
 resumes. 648 tests, 100% cov, lint clean.
+
+## S3 — Analytics service (FR-43 + FR-55)
+
+**Shape:** a new `services/analytics` mirroring notification (consumer-fed,
+PG-backed, read API) — but a PROJECTOR, not an inbox.
+
+**The central design argument — facts, not counters.** The obvious schema
+(a counters table incremented per event) cannot survive at-least-once
+delivery: `orders = orders + 1` applied twice is a lie, and no natural key
+saves an increment. Instead ONE `order_facts` row per order holds absolute
+values (status, total, one timestamp per milestone), upserted by order_id —
+so a redelivered batch CONVERGES instead of double-counting. Aggregates
+(daily rollups, rates, peak hour) are computed at read time from facts;
+materializing them is the named scale knob, done then as periodic
+recomputation, never as increments.
+
+**Micro-batching (FR-43's "5s micro-batch") went into the LIB, done right:**
+`EventConsumer.run_batches()` — getmany up to 500 events / 5s, ONE handler
+call, ONE transaction, ONE offset commit. Failure containment in layers:
+undecodable bytes park during assembly; a failing batch DEGRADES TO SINGLES
+so one poison event costs its own DLQ slot, not the batch's progress;
+nothing commits until the batch is accounted for. Stated trade-off: batch
+mode drops per-message CONSUMER spans.
+
+**One consumer loop, not two** (deviation from the plan's two): every one of
+the eight buildable metrics derives from order events alone — payments
+events add nothing. Less to operate; documented.
+
+**Two deliberate nulls in the API:** `rider_utilization: null` (blocked on
+dispatch — named, not faked) and rates answer `null` on an empty window
+("no data" ≠ "perfectly zero"). FR-55's view scopes by the CLAIM — there is
+no /{restaurant_id} to probe, so cross-tenant reads are unrepresentable.
+
+**Two real bugs the live stack caught (the whole point of verifying live):**
+1. The Avro envelope's `payload` is a JSON STRING; I indexed it like a dict.
+   The batch runtime did exactly its job: degraded to singles, parked every
+   event with forensics. Fixed, then `make dlq-replay` healed the parked
+   history — the tooling recovering from the bug that its own tests missed.
+2. Two producer shapes share the topic: transition events stamp
+   `occurred_at`, create_order's OrderPlaced stamps `placed_at`. History is
+   immutable, so the READER tolerates both.
+
+Also fixed while wiring: `up-obs` now converges initdb like up-m3 (else the
+new database only appears via up-m3), and the app-env anchor gained
+ANALYTICS_BASE_URL (the edge was resolving its localhost default inside the
+container — DEPENDENCY_UNAVAILABLE until then).
+
+**Verified live:** 654 historical orders folded from the topic (the canary's
+days of place-and-cancel — cancellation_rate 0.9848, exactly what the canary
+does); avg_delivery_seconds 53.4 (= the simulated courier's 20+30s timers);
+owner view through gateway→edge→analytics shows daily revenue 12288¢ =
+3 settled × 4096¢. 676 tests, 100% cov.

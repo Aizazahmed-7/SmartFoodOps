@@ -52,7 +52,9 @@ class StubKafkaConsumer:
             raise RuntimeError("commit failed")
         self.commits += 1
 
-    async def getmany(self, timeout_ms: int = 0) -> dict[str, list[StubMessage]]:
+    async def getmany(
+        self, *partitions: object, timeout_ms: int = 0, max_records: int | None = None
+    ) -> dict[str, list[StubMessage]]:
         """Bounded read for the DLQ replayer: everything once, then empty —
         what a caught-up consumer group looks like."""
         if self._drained:

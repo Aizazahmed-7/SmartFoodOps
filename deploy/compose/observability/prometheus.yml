@@ -32,6 +32,8 @@ scrape_configs:
     static_configs: [{ targets: ["payment:8007"] }]
   - job_name: notification
     static_configs: [{ targets: ["notification:8008"] }]
+  - job_name: analytics
+    static_configs: [{ targets: ["analytics:8009"] }]
   - job_name: edge-bff
     static_configs: [{ targets: ["edge-bff:8000"] }]
   - job_name: cadvisor            # container CPU/memory — the U in USE

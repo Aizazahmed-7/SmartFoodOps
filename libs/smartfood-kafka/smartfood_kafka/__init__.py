@@ -6,7 +6,7 @@ at-least-once discipline have one implementation to audit. Test doubles
 live in `smartfood_kafka.testing` (imported explicitly, never from here).
 """
 
-from .consumer import EventConsumer, EventHandler
+from .consumer import BatchHandler, EventConsumer, EventHandler
 from .envelope import DOMAIN_EVENT_SCHEMA, DOMAIN_EVENT_SUBJECT
 from .producer import EventProducer, ensure_compacted_topic
 from .registry import SchemaRegistry, SchemaRegistryError
@@ -20,6 +20,7 @@ __all__ = [
     "SerdeError",
     "SchemaRegistry",
     "SchemaRegistryError",
+    "BatchHandler",
     "EventConsumer",
     "EventHandler",
     "EventProducer",

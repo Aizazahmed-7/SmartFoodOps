@@ -378,3 +378,168 @@ async def test_consumer_exports_a_child_span_of_the_producing_request():
         assert dlq_span.status.status_code == StatusCode.ERROR
     finally:
         reset_tracing()
+
+
+# ── micro-batch mode (FR-43) ────────────────────────────────────────
+
+
+class RecordingBatchHandler:
+    """Counts CALLS separately from events — the batching itself is the
+    behavior under test. `fail_batches_of` > 1 makes multi-event calls
+    raise (forcing the degrade-to-singles path) while singles succeed;
+    `poison` makes one specific event fail every time it is seen."""
+
+    def __init__(self, *, fail_batches_of: int = 0, poison: str | None = None):
+        self.calls: list[int] = []
+        self.events: list[dict[str, Any]] = []
+        self._fail_batches_of = fail_batches_of
+        self._poison = poison
+
+    async def handle_batch(self, events: list[dict[str, Any]]) -> None:
+        self.calls.append(len(events))
+        if self._fail_batches_of and len(events) >= self._fail_batches_of:
+            raise RuntimeError("batch write failed")
+        if self._poison is not None and any(e["event_id"] == self._poison for e in events):
+            raise RuntimeError("poison event")
+        self.events.extend(events)
+
+
+async def test_batch_mode_one_handler_call_one_commit():
+    """The point of the mode: N messages -> ONE handle_batch call -> ONE
+    commit. Per-message mode would be N calls and N commits."""
+    client = StubKafkaConsumer([_msg("e1"), _msg("e2"), _msg("e3")])
+    handler = RecordingBatchHandler()
+    dlq = StubDlq()
+    await _consumer(client, handler, dlq).consume_batches_once(handler)
+    assert handler.calls == [3]
+    assert [e["event_id"] for e in handler.events] == ["e1", "e2", "e3"]
+    assert client.commits == 1
+    assert client.stopped and dlq.stopped and dlq.parked == []
+
+
+async def test_batch_mode_parks_undecodable_bytes_and_handles_the_rest():
+    """Serde poison never reaches the handler — parked during assembly,
+    exactly like per-message mode."""
+    client = StubKafkaConsumer([_msg("good1"), StubMessage(value=b"\xff not json"), _msg("good2")])
+    handler = RecordingBatchHandler()
+    dlq = StubDlq()
+    await _consumer(client, handler, dlq).consume_batches_once(handler)
+    assert [e["event_id"] for e in handler.events] == ["good1", "good2"]
+    assert len(dlq.parked) == 1
+    assert client.commits == 1  # the pass still commits past the parked one
+
+
+async def test_failing_batch_degrades_to_singles_and_isolates_poison():
+    """A poison EVENT (decodable, handler-fatal) costs its own DLQ slot,
+    not the batch's progress: the batch call fails, singles retry each
+    event, the poison one exhausts its attempts and parks, the healthy
+    ones land."""
+    client = StubKafkaConsumer([_msg("ok1"), _msg("bad"), _msg("ok2")])
+    handler = RecordingBatchHandler(fail_batches_of=2, poison="bad")
+    dlq = StubDlq()
+    await _consumer(client, handler, dlq, max_attempts=2).consume_batches_once(handler)
+    assert handler.calls[0] == 3  # the batch attempt
+    assert [e["event_id"] for e in handler.events] == ["ok1", "ok2"]
+    parked_headers = dict(dlq.parked[0][3])
+    assert parked_headers["dlq.error.message"] == b"poison event"
+    assert parked_headers["dlq.attempts"] == b"2"
+    assert client.commits == 1  # committed only after full accounting
+
+
+async def test_batch_mode_empty_poll_returns_on_injected_client():
+    client = StubKafkaConsumer([])
+    handler = RecordingBatchHandler()
+    dlq = StubDlq()
+    await _consumer(client, handler, dlq).consume_batches_once(handler)
+    assert handler.calls == [] and client.commits == 0
+
+
+async def test_run_batches_supervises_crashes_like_run():
+    """A crashed batch pass (client.start refuses) logs, counts, and
+    rejoins — the same never-die supervision as per-message mode."""
+
+    class RefusingClient(StubKafkaConsumer):
+        def __init__(self):
+            super().__init__([])
+            self.attempts = 0
+
+        async def start(self):
+            self.attempts += 1
+            raise RuntimeError("broker not ready")
+
+    client = RefusingClient()
+    handler = RecordingBatchHandler()
+    consumer = _consumer(client, handler, StubDlq())
+    task = asyncio.create_task(consumer.run_batches(handler))
+    await _until(lambda: client.attempts >= 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_run_batches_cancellation_is_shutdown():
+    client = StubKafkaConsumer([_msg("e1")])
+    handler = RecordingBatchHandler()
+    consumer = _consumer(client, handler, StubDlq())
+    task = asyncio.create_task(consumer.run_batches(handler))
+    await _until(lambda: len(handler.events) == 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_run_batches_cancel_mid_poll_re_raises():
+    """Cancellation arriving INSIDE a pass (parked on getmany) must
+    propagate out as CancelledError — shutdown, not a crash-rejoin."""
+
+    class HangingClient(StubKafkaConsumer):
+        def __init__(self):
+            super().__init__([])
+            self.polling = False
+
+        async def getmany(self, *partitions, timeout_ms: int = 0, max_records: int | None = None):
+            self.polling = True
+            await asyncio.Event().wait()  # forever — only cancel ends this
+            raise AssertionError("unreachable")
+
+    client = HangingClient()
+    consumer = _consumer(client, RecordingBatchHandler(), StubDlq())
+    task = asyncio.create_task(consumer.run_batches(RecordingBatchHandler()))
+    await _until(lambda: client.polling)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_batch_of_only_poison_bytes_still_commits_past_them():
+    """Every message parked, nothing to hand the handler — the pass must
+    still commit, or the poison would redeliver forever."""
+    client = StubKafkaConsumer([StubMessage(value=b"\xff"), StubMessage(value=b"\xfe")])
+    handler = RecordingBatchHandler()
+    dlq = StubDlq()
+    await _consumer(client, handler, dlq).consume_batches_once(handler)
+    assert handler.calls == []
+    assert len(dlq.parked) == 2 and client.commits == 1
+
+
+async def test_degraded_singles_retry_then_succeed():
+    """The singles path keeps per-message mode's retry-with-backoff: a
+    transient failure costs a retry, not a DLQ slot."""
+
+    class FlakyOnce(RecordingBatchHandler):
+        def __init__(self):
+            super().__init__(fail_batches_of=2)
+            self._failed_once = False
+
+        async def handle_batch(self, events: list[dict[str, Any]]) -> None:
+            if len(events) == 1 and not self._failed_once:
+                self._failed_once = True
+                raise RuntimeError("transient blip")
+            await super().handle_batch(events)
+
+    client = StubKafkaConsumer([_msg("a"), _msg("b")])
+    handler = FlakyOnce()
+    dlq = StubDlq()
+    await _consumer(client, handler, dlq, max_attempts=3).consume_batches_once(handler)
+    assert [e["event_id"] for e in handler.events] == ["a", "b"]
+    assert dlq.parked == [] and client.commits == 1

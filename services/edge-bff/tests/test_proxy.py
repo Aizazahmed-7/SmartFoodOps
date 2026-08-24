@@ -43,6 +43,7 @@ def client(upstream):
         catalog_base_url="http://catalog.svc",
         order_base_url="http://down.test",
         notification_base_url="http://notification.svc",
+        analytics_base_url="http://analytics.svc",
         identity_jwks_url="http://identity.test/.well-known/jwks.json",
         token_issuer=ISS,
     )
@@ -222,3 +223,11 @@ def test_notifications_forward_to_notification_service(client, upstream):
     r = client.get("/v1/notifications", headers=bearer())
     assert r.status_code == 201
     assert upstream.last.url == "http://notification.svc/v1/notifications"
+
+
+def test_restaurant_analytics_outranks_the_kitchen_prefix(client, upstream):
+    """Longest-prefix routing: /v1/restaurant/analytics must reach the
+    analytics service while /v1/restaurant/orders stays with order."""
+    r = client.get("/v1/restaurant/analytics", headers=bearer(role="restaurant_admin"))
+    assert r.status_code == 201
+    assert upstream.last.url.host == "analytics.svc"

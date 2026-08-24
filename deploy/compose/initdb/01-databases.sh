@@ -38,3 +38,4 @@ create_db inventory_db inventory_svc
 create_db order_db order_svc
 create_db payment_db payment_svc
 create_db notification_db notification_svc
+create_db analytics_db analytics_svc

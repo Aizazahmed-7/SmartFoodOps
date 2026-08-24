@@ -65,6 +65,14 @@ CONSUMER_EVENTS = Counter(
 log = get_logger("smartfood-kafka.consumer")
 
 
+class BatchHandler(Protocol):
+    """Micro-batch consumption (FR-43): one call per poll's worth of decoded
+    events, one commit after. The handler's writes must be idempotent —
+    a crashed pass redelivers the WHOLE batch."""
+
+    async def handle_batch(self, events: list[dict[str, Any]]) -> None: ...
+
+
 class EventHandler(Protocol):
     """What a service registers: one decoded envelope in, side effects out.
     Raise to invoke the retry-then-DLQ policy; return to commit."""
@@ -88,6 +96,9 @@ class ConsumerClient(Protocol):
     async def stop(self) -> None: ...
     async def commit(self) -> None: ...
     def __aiter__(self) -> AsyncIterator[Any]: ...
+    async def getmany(
+        self, *partitions: Any, timeout_ms: int = ..., max_records: int | None = ...
+    ) -> dict[Any, list[Any]]: ...
 
 
 class RawProducer(Protocol):
@@ -202,6 +213,103 @@ class EventConsumer:
                 await client.stop()
         finally:
             await dlq.stop()
+
+    async def run_batches(
+        self, batch_handler: BatchHandler, *, max_batch: int = 500, wait_ms: int = 5000
+    ) -> None:
+        """The micro-batch sibling of run(): poll up to `wait_ms` for up to
+        `max_batch` messages, hand the DECODED batch to one handler call,
+        commit once. Amortizes the transaction cost that dominates
+        per-event upserts at volume (FR-43's 5s micro-batch).
+
+        Failure containment, in order:
+        - Undecodable bytes park to the DLQ during assembly (same policy as
+          per-message mode) and never reach the handler.
+        - A failing BATCH degrades to singles: each event retried with the
+          per-message backoff, exhausted ones parked — so one poison EVENT
+          costs its own DLQ slot, not the batch's progress.
+        - Nothing commits until the batch is fully accounted for; a crash
+          redelivers everything (handler writes must be idempotent).
+
+        Trade-off, stated: batch mode does not open per-message CONSUMER
+        spans (a span per batch would orphan-root; per message would defeat
+        the batching). The DLQ headers still carry full forensics.
+        """
+        while True:
+            try:
+                await self.consume_batches_once(batch_handler, max_batch=max_batch, wait_ms=wait_ms)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                CONSUMER_EVENTS.labels(group=self._group, result="crashed").inc()
+                log.error(
+                    "batch consumer pass crashed — rejoining", group=self._group, error=str(exc)
+                )
+            await asyncio.sleep(self._restart_seconds)
+
+    async def consume_batches_once(
+        self, batch_handler: BatchHandler, *, max_batch: int = 500, wait_ms: int = 5000
+    ) -> None:
+        """One client session of batch polling. A drained INJECTED client
+        (tests) returns; a live client polls forever."""
+        dlq = self._make_dlq()
+        await dlq.start()
+        try:
+            client = self._make_client()
+            await client.start()
+            try:
+                while True:
+                    records = await client.getmany(timeout_ms=wait_ms, max_records=max_batch)
+                    if not records:
+                        if self._injected_client is not None:
+                            return  # stub drained — the test seam
+                        continue  # pragma: no cover — live idle poll
+                    batch: list[tuple[Any, dict[str, Any]]] = []
+                    messages: list[Any]
+                    for messages in records.values():
+                        message: Any
+                        for message in messages:
+                            try:
+                                batch.append((message, await self._serde.decode(message.value)))
+                            except SerdeError as exc:
+                                await self._park(message, dlq, exc, attempts=0)
+                    if batch:
+                        await self._handle_batch(batch, batch_handler, dlq)
+                    await client.commit()
+            finally:
+                await client.stop()
+        finally:
+            await dlq.stop()
+
+    async def _handle_batch(
+        self,
+        batch: list[tuple[Any, dict[str, Any]]],
+        batch_handler: BatchHandler,
+        dlq: RawProducer,
+    ) -> None:
+        try:
+            await batch_handler.handle_batch([event for _, event in batch])
+            CONSUMER_EVENTS.labels(group=self._group, result="handled").inc(len(batch))
+            return
+        except Exception as exc:
+            log.warning(
+                "batch handler failed — degrading to singles for poison isolation",
+                group=self._group,
+                batch=len(batch),
+                error=str(exc),
+            )
+        for message, event in batch:
+            for attempt in range(1, self._max_attempts + 1):
+                try:
+                    await batch_handler.handle_batch([event])
+                    CONSUMER_EVENTS.labels(group=self._group, result="handled").inc()
+                    break
+                except Exception as exc:
+                    if attempt == self._max_attempts:
+                        await self._park(message, dlq, exc, attempts=attempt)
+                        break
+                    CONSUMER_EVENTS.labels(group=self._group, result="retried").inc()
+                    await asyncio.sleep(self._backoff_seconds * 2 ** (attempt - 1))
 
     async def _process(self, message: Any, dlq: RawProducer) -> None:
         ctx = _bind_trace(message)

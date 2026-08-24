@@ -66,6 +66,10 @@ RULES = [
     # "/" right after the prefix, and "restaurants"[10] is "s", not "/".
     Rule("/v1/restaurant", "order_base_url", "auth"),
     Rule("/v1/notifications", "notification_base_url", "auth"),
+    # Longer prefix beats "/v1/restaurant" -> order: the owner's metrics
+    # view rides the analytics service, everything else under /v1/restaurant
+    # stays kitchen ops.
+    Rule("/v1/restaurant/analytics", "analytics_base_url", "auth"),
 ]
 
 
