@@ -433,9 +433,10 @@ services:
   # ── CDC (profile cdc): make up-cdc — Debezium replaces the poller ──
   kafka-connect:
     profiles: [cdc]
-    # Docker Hub, not quay.io: quay stalled indefinitely from this network
-    # (two 10-minute pulls with zero bytes) while the Hub mirror flowed.
-    image: debezium/connect:2.7
+    # quay.io is Debezium's canonical registry — Docker Hub has no 2.7 tag
+    # (learned the hard way during a night the network stalled both, which
+    # masked the not-found as a hang until morning).
+    image: quay.io/debezium/connect:2.7
     restart: unless-stopped
     ports: ["8083:8083"]
     environment:

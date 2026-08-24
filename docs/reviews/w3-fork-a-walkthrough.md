@@ -240,20 +240,20 @@ consumer. TRUE cutover needs either a custom SMT rebuilding the exact
 envelope, or migrating every consumer's serde to Connect-managed schemas —
 a coordinated change to make deliberately, not smuggle in at 4am.
 
-**The one unverified step:** watching rows stream live. Both quay.io and
-Docker Hub stalled the ~1GB connect image at literally zero bytes for over
-NINETY minutes tonight (byte counts checked via nettop, not vibes — ~2.7KB
-total after an hour); the pulls were killed rather than left thrashing.
-Morning commands, on a working network:
+**Verified live (morning retry — the overnight stall was pure network, and
+quay is the only registry with the tag; Docker Hub's 2.7 does not exist,
+which the dead network had masked as a hang):** connector RUNNING, then one
+`make demo` while a console consumer watched `cdc.c1.orders.events`:
 
-    docker pull debezium/connect:2.7
-    make up-cdc && make cdc-register
-    make demo   # then watch cdc.c1.orders.events in the Kafka console
-                # (:8085) — value = payload JSON, headers = traceparent,
-                # event_type, aggregate_version
+    id:9ab1bfb3…, traceparent:00-d44d4c66…-660a6b44…-03,
+    event_type:OrderPlaced, aggregate_version:0   key=ord_3748a8…
+    id:f976e3c6…, traceparent:00-d44d4c66…-c68524ae…-03,
+    event_type:OrderConfirmed, aggregate_version:3 key=ord_3748a8…
 
-Everything else in the slice is committed and the wal_level prerequisite is
-live and verified.
+OrderPlaced and OrderConfirmed carry the SAME trace id in their headers
+(different span ids) — the saga's events joined to one trace, lifted from
+the outbox column by the EventRouter placement, exactly the diagram-5
+promise. Key = order_id (per-order ordering), value = full-state payload.
 
 ## The 3am war story (keep this for the mentor)
 
@@ -277,7 +277,7 @@ end to end. That is the whole observability + saga story in one incident.
 | S3 analytics service | 00c0618 | 676 tests, 100% |
 | S4 SSE live tracking | 3b53733 | 693 tests, 100% |
 | S5 Playwright smoke | 69172fb | +2 e2e (~1 min, real stack) |
-| S6 CDC lane | d1d78dd | infra committed; live demo needs the image |
+| S6 CDC lane | d1d78dd | verified live next morning: traceparent headers on cdc.c1.orders.events |
 
 5,736 statements at 100.00% branch coverage; ruff + strict pyright clean
 throughout; 12 alert rules ↔ 12 runbook sections in exact parity.
