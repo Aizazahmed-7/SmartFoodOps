@@ -1,0 +1,206 @@
+{
+  "uid": "smartfoodops-business",
+  "title": "SmartFoodOps \u2014 Business",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Orders per day",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT date_trunc('day', placed_at) AS time, count(*) AS orders FROM order_facts WHERE $__timeFilter(placed_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Revenue per day (settled, $)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT date_trunc('day', settled_at) AS time, sum(total_cents)/100.0 AS revenue FROM order_facts WHERE settled_at IS NOT NULL AND $__timeFilter(settled_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Cancellation rate per day",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT date_trunc('day', placed_at) AS time, avg(CASE WHEN cancelled_at IS NOT NULL THEN 1.0 ELSE 0.0 END) AS rate FROM order_facts WHERE $__timeFilter(placed_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Top restaurants (window)",
+      "type": "table",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT restaurant_id, count(*) AS orders, sum(CASE WHEN settled_at IS NOT NULL THEN total_cents ELSE 0 END)/100.0 AS revenue FROM order_facts WHERE $__timeFilter(placed_at) GROUP BY 1 ORDER BY orders DESC LIMIT 10",
+          "format": "table",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Lifetime revenue (settled, $)",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT sum(total_cents)/100.0 AS revenue FROM order_facts WHERE settled_at IS NOT NULL",
+          "format": "table",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Lifetime orders",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT count(*) AS orders FROM order_facts",
+          "format": "table",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ]
+    }
+  ]
+}

@@ -9,9 +9,10 @@ import type { MenuItem } from "../api/types";
 import { useAuth } from "../state/auth";
 import { ErrorNote, Money, Spinner } from "../components/ui";
 import PartnerOrders from "./PartnerOrders";
+import PartnerInsights from "./PartnerInsights";
 import PartnerStock from "./PartnerStock";
 
-type Tab = "orders" | "menu" | "stock";
+type Tab = "orders" | "menu" | "stock" | "insights";
 
 interface GroupDraft {
   name: string;
@@ -196,11 +197,13 @@ export default function PartnerDashboard() {
           {tabButton("orders", "Orders")}
           {tabButton("menu", "Menu")}
           {tabButton("stock", "Stock")}
+          {tabButton("insights", "Insights")}
         </nav>
       </div>
 
       {tab === "orders" && <PartnerOrders />}
       {tab === "stock" && <PartnerStock rid={rid} />}
+      {tab === "insights" && <PartnerInsights />}
       {tab !== "menu" ? null : (<>
       <ErrorNote error={removeCategory.error ?? toggle86.error ?? removeItem.error} />
 

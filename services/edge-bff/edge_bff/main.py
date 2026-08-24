@@ -170,6 +170,22 @@ def create_app(
                 ) from None
             stamped = headers_for(context_from_claims(claims))
             scope = f"sub:{claims.get('sub', 'unknown')}"
+        elif request.headers.get("authorization", "").lower().startswith("bearer "):
+            # Opportunistic identity on PUBLIC routes (S8): the route does
+            # not demand a token, but the caller OFFERED one — read it so
+            # downstream telemetry (browse events) can name the viewer and
+            # the rate limiter can scope by sub instead of NAT. Best-effort
+            # on purpose: an expired or garbage token here degrades to
+            # anonymous rather than 401 — a stale session must never break
+            # public browsing, and the FE attaches its token to everything.
+            try:
+                claims = await token_verifier.verify(
+                    request.headers["authorization"].partition(" ")[2]
+                )
+                stamped = headers_for(context_from_claims(claims))
+                scope = f"sub:{claims.get('sub', 'unknown')}"
+            except Exception:  # noqa: BLE001 — any verification failure = anonymous
+                pass
 
         # 1b. Rate limit — AFTER auth on purpose: an authed caller is
         # limited by who they are (one NAT full of customers must not share

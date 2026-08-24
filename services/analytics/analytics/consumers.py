@@ -23,6 +23,7 @@ from .adapters.repo import AnalyticsRepo
 log = get_logger("analytics.projector")
 
 GROUP_FACTS = "analytics.facts.orders"
+GROUP_VIEWS = "analytics.views.browse"
 
 
 class FactsProjector:
@@ -51,3 +52,28 @@ class FactsProjector:
                 await repo.apply_event(str(event.get("event_type", "")), payload)
             await session.commit()
         log.info("facts folded", events=len(events))
+
+
+class ViewsProjector:
+    """The browse loop's handler (S8): folds MenuViewed into menu_views.
+    Separate loop, separate group — the notification split-loop rule: a
+    backlog of browse telemetry must never sit in front of the order facts
+    the dashboards actually bill by."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
+        self._sessions = sessions
+
+    async def handle(self, event: dict[str, Any]) -> None:
+        await self.handle_batch([event])
+
+    async def handle_batch(self, events: list[dict[str, Any]]) -> None:
+        async with self._sessions() as session:
+            repo = AnalyticsRepo(session)
+            for event in events:
+                if str(event.get("event_type", "")) != "MenuViewed":
+                    continue  # forward compatibility on a shared topic
+                raw = event.get("payload") or {}
+                payload: dict[str, Any] = json.loads(raw) if isinstance(raw, str) else raw
+                await repo.apply_view(payload, str(event.get("event_id", "")))
+            await session.commit()
+        log.info("views folded", events=len(events))

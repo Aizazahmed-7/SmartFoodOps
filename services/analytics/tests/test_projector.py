@@ -168,3 +168,44 @@ async def test_create_orders_placed_shape_folds_too():
     )
     row = await _row(sessions, "ord_real")
     assert row is not None and row.placed_at is not None and row.total_cents == 4096
+
+
+# ── the views projector (S8) ────────────────────────────────────────
+
+
+def _view(event_id, user: str | None = "usr_1", restaurant="rst_1", at="2026-08-24T10:00:00+00:00"):
+    import json as _json
+
+    return {
+        "event_type": "MenuViewed",
+        "event_id": event_id,
+        "payload": _json.dumps({"restaurant_id": restaurant, "user_id": user, "viewed_at": at}),
+    }
+
+
+async def test_views_fold_and_redelivery_collapses_on_the_pk():
+    from analytics.consumers import ViewsProjector
+    from analytics.db import menu_views
+
+    sessions = await _sessions()
+    projector = ViewsProjector(sessions)
+    batch = [_view("v1"), _view("v2", user=None)]
+    await projector.handle_batch(batch)
+    await projector.handle_batch(batch)  # redelivery: same view_ids → no-ops
+    async with sessions() as s:
+        rows = (await s.execute(sa.select(menu_views).order_by(menu_views.c.view_id))).all()
+    assert len(rows) == 2
+    assert rows[0].user_id == "usr_1" and rows[1].user_id is None
+
+
+async def test_views_loop_skips_foreign_event_types_and_handles_singles():
+    from analytics.consumers import ViewsProjector
+    from analytics.db import menu_views
+
+    sessions = await _sessions()
+    projector = ViewsProjector(sessions)
+    await projector.handle({"event_type": "SomethingElse", "event_id": "x", "payload": "{}"})
+    await projector.handle(_view("v9"))
+    async with sessions() as s:
+        count = (await s.execute(sa.select(sa.func.count()).select_from(menu_views))).scalar_one()
+    assert count == 1

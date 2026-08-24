@@ -24,6 +24,9 @@ class _KafkaProducer(Protocol):
     async def send_and_wait(
         self, topic: str, value: bytes, *, key: bytes, headers: list[tuple[str, bytes]]
     ) -> Any: ...
+    async def send(
+        self, topic: str, value: bytes, *, key: bytes, headers: list[tuple[str, bytes]]
+    ) -> Any: ...
 
 
 class EventProducer:
@@ -55,6 +58,26 @@ class EventProducer:
     ) -> None:
         value = await self._serde.encode(subject, schema, record)
         await self._client.send_and_wait(topic, value, key=key.encode(), headers=headers or [])
+
+    async def send_nowait(
+        self,
+        topic: str,
+        *,
+        subject: str,
+        schema: dict[str, Any],
+        key: str,
+        record: dict[str, Any],
+        headers: list[tuple[str, bytes]] | None = None,
+    ) -> None:
+        """Fire-and-forget: append to the client's buffer and return without
+        awaiting the broker's ack. For TELEMETRY (browse events) where the
+        request being observed must never wait on Kafka — the outbox path
+        keeps send() and its ack, because business facts are owed one.
+        aiokafka's own bounded buffer is the backpressure: when it is full
+        this raises, and the CALLER decides to drop (telemetry always does).
+        """
+        value = await self._serde.encode(subject, schema, record)
+        await self._client.send(topic, value, key=key.encode(), headers=headers or [])
 
 
 async def ensure_compacted_topic(

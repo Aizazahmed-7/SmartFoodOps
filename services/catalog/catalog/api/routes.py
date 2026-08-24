@@ -9,6 +9,7 @@ import re
 from typing import Annotated
 from zoneinfo import available_timezones
 
+import structlog
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import Field, field_validator, model_validator
 from smartfood_api import ApiError, ErrorCode, StrictModel
@@ -477,6 +478,19 @@ async def get_menu(
         raise ApiError(
             ErrorCode.NOT_FOUND, "menu version no longer available — refetch the menu", 404
         ) from None
+    # Browse telemetry (S8) — AFTER the read succeeded (a 404 is not a
+    # view), fire-and-forget. The viewer may be anonymous: public_read GETs
+    # arrive with no stamped identity, and the funnel counts them toward
+    # volume only. X-Auth-Sub is trustworthy here because only the edge can
+    # set it (the gateway strips client-supplied copies).
+    browse = getattr(request.app.state, "browse", None)
+    if browse is not None:
+        ctxvars = structlog.contextvars.get_contextvars()
+        await browse.menu_viewed(
+            restaurant_id,
+            user_id=request.headers.get("x-auth-sub"),
+            request_id=str(ctxvars.get("request_id", "")) or f"anon-{id(request)}",
+        )
     response.headers["Cache-Control"] = (
         "public, max-age=604800, immutable" if v is not None else "public, max-age=5"
     )

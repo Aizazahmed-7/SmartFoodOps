@@ -31,3 +31,16 @@ datasources:
           matcherRegex: '"trace_id": "([a-f0-9]{32})"'
           datasourceUid: Jaeger
           url: "$${__value.raw}"
+  - name: AnalyticsDB
+    # The BUSINESS truth (order facts), next to the operational truth.
+    # grafana_ro: SELECT-only by role — a dashboard may look, never touch.
+    type: postgres
+    uid: AnalyticsDB
+    url: postgres:5432
+    user: grafana_ro
+    secureJsonData:
+      password: grafana_ro
+    jsonData:
+      database: analytics_db
+      sslmode: disable
+      postgresVersion: 1500

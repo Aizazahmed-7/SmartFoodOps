@@ -39,3 +39,24 @@ create_db order_db order_svc
 create_db payment_db payment_svc
 create_db notification_db notification_svc
 create_db analytics_db analytics_svc
+
+# Read-only role for Grafana's business dashboard (S7). SELECT and nothing
+# else: a dashboard is a guest in the database — it may look, never touch.
+# Default privileges cover tables analytics_svc creates AFTER this grant
+# (migrations run at service boot, often later than this script).
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-'SQL'
+  DO $$
+  BEGIN
+    CREATE ROLE grafana_ro LOGIN PASSWORD 'grafana_ro';
+  EXCEPTION WHEN duplicate_object THEN
+    NULL;
+  END
+  $$;
+  GRANT CONNECT ON DATABASE analytics_db TO grafana_ro;
+SQL
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -d analytics_db <<-'SQL'
+  GRANT USAGE ON SCHEMA public TO grafana_ro;
+  GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_ro;
+  ALTER DEFAULT PRIVILEGES FOR ROLE analytics_svc IN SCHEMA public
+    GRANT SELECT ON TABLES TO grafana_ro;
+SQL

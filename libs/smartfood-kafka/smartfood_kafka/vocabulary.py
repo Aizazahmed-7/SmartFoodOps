@@ -45,6 +45,8 @@ class EventType(StrEnum):
     ORDER_SETTLED = "OrderSettled"
 
     # payment — aggregate "payment" (doc-mandated names, ADR-0018)
+    MENU_VIEWED = "MenuViewed"
+
     PAYMENT_AUTHORIZED = "PaymentAuthorized"
     PAYMENT_CAPTURED = "PaymentCaptured"
     REFUND_PROCESSED = "RefundProcessed"
@@ -58,6 +60,9 @@ class Topic(StrEnum):
     ORDERS_EVENTS = "orders.events"
     INVENTORY_EVENTS = "inventory.events"
     PAYMENTS_EVENTS = "payments.events"
+    # Telemetry, not business facts: browse events skip the outbox entirely
+    # (nothing transactional to be atomic with) and tolerate loss.
+    BROWSE_EVENTS = "browse.events"
 
 
 def topic(cell_id: str, suffix: Topic) -> str:

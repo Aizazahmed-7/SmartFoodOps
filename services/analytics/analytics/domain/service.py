@@ -48,6 +48,7 @@ class AnalyticsService:
                 else round(1 - counts["rejected"] / counts["confirmed"], 4)
             ),
             "delivery_success_rate": _rate(counts["delivered"], counts["confirmed"]),
+            "revenue_cents": counts["revenue_cents"],
             "failed_events": "see prometheus: consumer_events_total{result='dlq'}",
             "rider_utilization": None,  # blocked on the dispatch milestone
         }
@@ -58,14 +59,36 @@ class AnalyticsService:
             repo = AnalyticsRepo(session)
             days_rows = await repo.daily(restaurant_id, since)
             counts = await repo.restaurant_counts(restaurant_id, since)
+            lifetime = await repo.restaurant_lifetime(restaurant_id)
+            funnel = await repo.funnel(restaurant_id, since)
+        # AOV in integer cents, floor division — the house money rule. None
+        # (not 0) when nothing has settled: "no sales yet" and "average of
+        # zero" are different answers.
+        aov = None if lifetime["settled"] == 0 else lifetime["revenue_cents"] // lifetime["settled"]
         return {
             "restaurant_id": restaurant_id,
             "window_days": days,
             "days": days_rows,
+            "window": {
+                "orders": counts["placed"],
+                "settled": counts["settled"],
+                "cancelled": counts["cancelled"],
+            },
             "cancellation_rate": _rate(counts["cancelled"], counts["placed"]),
             "acceptance_rate": (
                 None
                 if counts["confirmed"] == 0
                 else round(1 - counts["rejected"] / counts["confirmed"], 4)
             ),
+            "totals": {
+                **lifetime,
+                "aov_cents": aov,
+                "repeat_rate": _rate(lifetime["repeat_customers"], lifetime["customers"]),
+            },
+            # Conversion over SIGNED-IN viewers (anonymous views count toward
+            # volume only); sampled at the emitter — a rate survives sampling.
+            "funnel": {
+                **funnel,
+                "conversion_rate": _rate(funnel["converted_viewers"], funnel["viewers"]),
+            },
         }

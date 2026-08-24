@@ -231,3 +231,19 @@ def test_restaurant_analytics_outranks_the_kitchen_prefix(client, upstream):
     r = client.get("/v1/restaurant/analytics", headers=bearer(role="restaurant_admin"))
     assert r.status_code == 201
     assert upstream.last.url.host == "analytics.svc"
+
+
+def test_public_read_with_a_valid_token_gets_stamped_identity(client, upstream):
+    """Opportunistic identity (S8): the route never demands a token, but a
+    presented one is read — browse telemetry can name the viewer."""
+    r = client.get("/v1/menus/rest_1", headers=bearer())
+    assert r.status_code == 201
+    assert upstream.last.headers["x-auth-sub"] == "usr_1"
+
+
+def test_public_read_with_a_bad_token_degrades_to_anonymous(client, upstream):
+    """A stale session must never break public browsing: garbage tokens on
+    public routes pass unstamped instead of 401ing."""
+    r = client.get("/v1/menus/rest_1", headers={"Authorization": "Bearer garbage"})
+    assert r.status_code == 201
+    assert "x-auth-sub" not in upstream.last.headers

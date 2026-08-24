@@ -34,3 +34,18 @@ order_facts = sa.Table(
     sa.Column("cancel_reason", sa.Text, nullable=True),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
 )
+
+# One row per SAMPLED menu view (S8). view_id is uuid5(request_id) minted at
+# the emitter, so at-least-once redelivery collapses on this PK — the same
+# natural-key dedupe as everything else, applied to telemetry. user_id NULL
+# = anonymous browser: counts toward volume, excluded from conversion (you
+# cannot join an order to a browser you cannot name).
+menu_views = sa.Table(
+    "menu_views",
+    metadata,
+    sa.Column("view_id", sa.Text, primary_key=True),
+    sa.Column("restaurant_id", sa.Text, nullable=False),
+    sa.Column("user_id", sa.Text, nullable=True),
+    sa.Column("viewed_at", sa.TIMESTAMP(timezone=True), nullable=False),
+)
+sa.Index("ix_menu_views_restaurant_time", menu_views.c.restaurant_id, menu_views.c.viewed_at)

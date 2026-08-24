@@ -20,7 +20,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import order_facts
+from ..db import menu_views, order_facts
 
 # Which columns each event type contributes beyond the always-updated base.
 _EVENT_COLUMNS: dict[str, str] = {
@@ -84,6 +84,21 @@ class AnalyticsRepo:
             .on_conflict_do_update(index_elements=["order_id"], set_=update_cols)
         )
 
+    async def apply_view(self, payload: dict[str, Any], event_id: str) -> None:
+        """Fold one MenuViewed. INSERT .. DO NOTHING on the deterministic
+        view_id: redelivery lands on the PK and vanishes."""
+        insert = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
+        await self._s.execute(
+            insert(menu_views)
+            .values(
+                view_id=event_id,
+                restaurant_id=payload["restaurant_id"],
+                user_id=payload.get("user_id"),
+                viewed_at=datetime.fromisoformat(payload["viewed_at"]),
+            )
+            .on_conflict_do_nothing(index_elements=["view_id"])
+        )
+
     # ── aggregate reads (all bounded by a `since` window) ──────────
 
     async def counts(self, since: datetime) -> dict[str, int]:
@@ -98,6 +113,13 @@ class AnalyticsRepo:
                     sa.func.sum(
                         sa.case((c.cancel_reason.in_(_REJECTION_REASONS), 1), else_=0)
                     ).label("rejected"),
+                    sa.func.count(c.settled_at).label("settled"),
+                    # Revenue = SETTLED only. An authorized hold is not income;
+                    # counting CONFIRMED totals would book money that a cancel
+                    # can still void.
+                    sa.func.sum(sa.case((c.settled_at.is_not(None), c.total_cents), else_=0)).label(
+                        "revenue_cents"
+                    ),
                 ).where(c.placed_at >= since)
             )
         ).one()
@@ -107,6 +129,8 @@ class AnalyticsRepo:
             "delivered": row.delivered or 0,
             "cancelled": row.cancelled or 0,
             "rejected": int(row.rejected or 0),
+            "settled": row.settled or 0,
+            "revenue_cents": int(row.revenue_cents or 0),
         }
 
     async def orders_per_restaurant(self, since: datetime, limit: int) -> list[dict[str, Any]]:
@@ -185,6 +209,89 @@ class AnalyticsRepo:
             for r in rows
         ]
 
+    async def restaurant_lifetime(self, restaurant_id: str) -> dict[str, int]:
+        """All-time totals — deliberately a SEPARATE query with no window:
+        folding lifetime numbers into the windowed one would make the
+        window picker lie about one or the other."""
+        c = order_facts.c
+        row = (
+            await self._s.execute(
+                sa.select(
+                    sa.func.count().label("orders"),
+                    sa.func.count(c.settled_at).label("settled"),
+                    sa.func.count(c.cancelled_at).label("cancelled"),
+                    sa.func.sum(sa.case((c.settled_at.is_not(None), c.total_cents), else_=0)).label(
+                        "revenue_cents"
+                    ),
+                    sa.func.count(sa.distinct(c.user_id)).label("customers"),
+                ).where(c.restaurant_id == restaurant_id)
+            )
+        ).one()
+        repeat = (
+            await self._s.execute(
+                sa.select(sa.func.count()).select_from(
+                    sa.select(c.user_id)
+                    .where(c.restaurant_id == restaurant_id)
+                    .group_by(c.user_id)
+                    .having(sa.func.count() >= 2)
+                    .subquery()
+                )
+            )
+        ).scalar_one()
+        return {
+            "orders": row.orders or 0,
+            "settled": row.settled or 0,
+            "cancelled": row.cancelled or 0,
+            "revenue_cents": int(row.revenue_cents or 0),
+            "customers": row.customers or 0,
+            "repeat_customers": int(repeat or 0),
+        }
+
+    async def funnel(self, restaurant_id: str, since: datetime) -> dict[str, int]:
+        """Browse → order conversion, computed at read time. A viewer
+        CONVERTED if they placed an order at this restaurant within 24h of
+        a view. Conversion is measured over SIGNED-IN viewers only —
+        anonymous views count toward volume, nothing else."""
+        mv, f = menu_views.c, order_facts.c
+        totals = (
+            await self._s.execute(
+                sa.select(
+                    sa.func.count().label("views"),
+                    sa.func.count(sa.distinct(mv.user_id)).label("viewers"),
+                ).where((mv.restaurant_id == restaurant_id) & (mv.viewed_at >= since))
+            )
+        ).one()
+        if self._s.bind.dialect.name == "postgresql":  # pragma: no cover — PG-only
+            # interval math; the sqlite branch below is the unit-suite twin.
+            window_end = mv.viewed_at + sa.text("interval '24 hours'")
+            in_window = (f.placed_at >= mv.viewed_at) & (f.placed_at < window_end)
+        else:
+            day = 1.0
+            in_window = (
+                (sa.func.julianday(f.placed_at) - sa.func.julianday(mv.viewed_at)) >= 0
+            ) & ((sa.func.julianday(f.placed_at) - sa.func.julianday(mv.viewed_at)) < day)
+        converted = (
+            await self._s.execute(
+                sa.select(sa.func.count(sa.distinct(mv.user_id))).where(
+                    (mv.restaurant_id == restaurant_id)
+                    & (mv.viewed_at >= since)
+                    & mv.user_id.is_not(None)
+                    & sa.exists(
+                        sa.select(sa.literal(1)).where(
+                            (f.user_id == mv.user_id)
+                            & (f.restaurant_id == mv.restaurant_id)
+                            & in_window
+                        )
+                    )
+                )
+            )
+        ).scalar_one()
+        return {
+            "views": totals.views or 0,
+            "viewers": totals.viewers or 0,
+            "converted_viewers": int(converted or 0),
+        }
+
     async def restaurant_counts(self, restaurant_id: str, since: datetime) -> dict[str, int]:
         c = order_facts.c
         row = (
@@ -196,6 +303,7 @@ class AnalyticsRepo:
                     sa.func.sum(
                         sa.case((c.cancel_reason.in_(_REJECTION_REASONS), 1), else_=0)
                     ).label("rejected"),
+                    sa.func.count(c.settled_at).label("settled"),
                 ).where((c.restaurant_id == restaurant_id) & (c.placed_at >= since))
             )
         ).one()
@@ -204,4 +312,5 @@ class AnalyticsRepo:
             "confirmed": row.confirmed or 0,
             "cancelled": row.cancelled or 0,
             "rejected": int(row.rejected or 0),
+            "settled": row.settled or 0,
         }

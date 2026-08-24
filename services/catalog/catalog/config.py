@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     # decision instead of a constant buried in a migration.
     default_timezone: str = "America/Chicago"
 
+    # Browse telemetry (S8): MenuViewed straight to Kafka — no outbox, see
+    # adapters/browse.py for why telemetry earns different rules. Off by
+    # default (unit suites, kafka-less installs); the sample rate is the
+    # honesty knob at real traffic — conversion is a rate, rates survive
+    # sampling.
+    browse_events: Literal["on", "off"] = "off"
+    browse_sample_rate: float = 1.0
+
     # Internal grant call on self-serve onboarding (service-ownership.md: Catalog → Identity).
     identity_base_url: str = "http://localhost:8001"
 

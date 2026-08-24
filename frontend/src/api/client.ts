@@ -27,7 +27,7 @@ import type {
   SearchResult,
   StockRow,
   TokenPair,
-} from "./types";
+ RestaurantAnalytics } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -294,6 +294,9 @@ export const markReady = (orderId: string) =>
     "POST", `/v1/restaurant/orders/${orderId}/ready`);
 
 // ── inventory: stock + capacity (strict stock, S1) ─────────────────
+
+export const getRestaurantAnalytics = (days: number) =>
+  request<RestaurantAnalytics>("GET", `/v1/restaurant/analytics?days=${days}`);
 
 export const getStock = (rid: string) =>
   request<{ items: StockRow[] }>("GET", `/v1/inventory/restaurants/${rid}/stock`);

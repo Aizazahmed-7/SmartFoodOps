@@ -20,6 +20,7 @@ from smartfood_outbox import OutboxPoller
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from .adapters.browse import BrowseEvents
 from .adapters.cache import RedisCache
 from .adapters.identity_grants import IdentityGrantsClient
 from .adapters.search import PostgresSearch
@@ -50,6 +51,7 @@ def create_app(
     cache: CachePort | None = None,
     search: SearchPort | None = None,
     poller: OutboxPoller | None = None,
+    browse: BrowseEvents | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("catalog")
@@ -77,6 +79,21 @@ def create_app(
 
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     changes_topic = topic(settings.cell_id, Topic.CATALOG_CHANGES)
+    own_browse_producer: EventProducer | None = None
+    browse_events: BrowseEvents | None = browse
+    if browse_events is None and settings.browse_events == "on":  # pragma: no cover — live
+        # A SEPARATE producer from the poller's: browse telemetry must work
+        # under debezium mode too, and its lifecycle is its own.
+        own_browse_producer = EventProducer(
+            settings.kafka_bootstrap, AvroSerde(SchemaRegistry(settings.schema_registry_url))
+        )
+        browse_events = BrowseEvents(
+            own_browse_producer,
+            topic=topic(settings.cell_id, Topic.BROWSE_EVENTS),
+            cell_id=settings.cell_id,
+            sample_rate=settings.browse_sample_rate,
+        )
+
     own_producer: EventProducer | None = None
     if poller is None and settings.outbox_mode == "poller":  # pragma: no cover
         # Real Kafka wiring — exercised by the live smoke, not the unit suite.
@@ -101,6 +118,8 @@ def create_app(
                 await ensure_compacted_topic(settings.kafka_bootstrap, changes_topic)
                 await own_producer.start()
             drain_task = asyncio.create_task(poller.run())
+        if own_browse_producer is not None:  # pragma: no cover — live path
+            await own_browse_producer.start()
         yield
         if drain_task is not None:
             drain_task.cancel()  # cancellation IS the poller's shutdown signal
@@ -113,6 +132,8 @@ def create_app(
             await own_http.aclose()
         if own_redis is not None:
             await own_redis.aclose()
+        if own_browse_producer is not None:  # pragma: no cover — live path
+            await own_browse_producer.stop()
 
     app = FastAPI(title="catalog", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
@@ -123,6 +144,7 @@ def create_app(
     # sees app.state.service; the domain only sees the sessionmaker.
     if search is None:
         search = PostgresSearch(sessions)  # PG-only SQL — fine: prod IS Postgres
+    app.state.browse = browse_events
     app.state.service = CatalogService(
         sessions, grants, cache, search, default_timezone=settings.default_timezone
     )

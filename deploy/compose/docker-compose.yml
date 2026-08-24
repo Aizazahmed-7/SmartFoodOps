@@ -220,6 +220,9 @@ services:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/catalog
       DATABASE_URL: postgresql+asyncpg://catalog_svc:catalog_svc@postgres:5432/catalog_db
+      # S8: MenuViewed telemetry straight to Kafka (no outbox — see
+      # catalog/adapters/browse.py).
+      BROWSE_EVENTS: "on"
     command:
       [
         "uv",

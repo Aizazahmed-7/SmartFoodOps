@@ -268,3 +268,37 @@ export interface NotificationList {
   next_cursor: string | null;
   unread: number;
 }
+
+/** S7 — the owner's analytics read (claim-scoped; no id travels). */
+export interface DayMetrics {
+  day: string;
+  orders: number;
+  cancelled: number;
+  delivered: number;
+  revenue_cents: number;
+}
+
+export interface RestaurantAnalytics {
+  restaurant_id: string;
+  window_days: number;
+  days: DayMetrics[];
+  window: { orders: number; settled: number; cancelled: number };
+  cancellation_rate: number | null;
+  acceptance_rate: number | null;
+  totals: {
+    orders: number;
+    settled: number;
+    cancelled: number;
+    revenue_cents: number;
+    customers: number;
+    repeat_customers: number;
+    aov_cents: number | null;
+    repeat_rate: number | null;
+  };
+  funnel: {
+    views: number;
+    viewers: number;
+    converted_viewers: number;
+    conversion_rate: number | null;
+  };
+}

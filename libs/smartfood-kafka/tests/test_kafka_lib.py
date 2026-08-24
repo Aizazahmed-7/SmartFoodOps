@@ -122,6 +122,10 @@ class StubKafka:
     async def send_and_wait(self, topic, value, *, key, headers):
         self.sent.append((topic, value, key, headers))
 
+    async def send(self, topic, value, *, key, headers):
+        # aiokafka's fire-and-forget: buffer-append, ack future discarded.
+        self.sent.append((topic, value, key, headers))
+
 
 async def test_producer_sends_wire_format_with_key_and_headers():
     registry, _ = make_registry(schema_id=9)
@@ -142,6 +146,27 @@ async def test_producer_sends_wire_format_with_key_and_headers():
     assert (topic, key) == ("c1.catalog.changes", b"rst_1")
     assert value[0] == 0 and struct.unpack(">I", value[1:5])[0] == 9
     assert headers == [("traceparent", b"00-abc-def-01")]
+
+
+async def test_send_nowait_appends_without_awaiting_an_ack():
+    """The telemetry path: same wire format, same registry framing — the
+    only difference is WHICH client call carries it (buffered send, not
+    send_and_wait), so a slow broker can never stall the observed request."""
+    registry, _ = make_registry(schema_id=9)
+    stub = StubKafka()
+    producer = EventProducer("kafka:9092", AvroSerde(registry), client=stub)
+    await producer.start()
+    await producer.send_nowait(
+        "c1.browse.events",
+        subject=DOMAIN_EVENT_SUBJECT,
+        schema=DOMAIN_EVENT_SCHEMA,
+        key="rst_1",
+        record=EVENT,
+    )
+    await producer.stop()
+    topic, value, key, headers = stub.sent[0]
+    assert (topic, key, headers) == ("c1.browse.events", b"rst_1", [])
+    assert value[0] == 0 and struct.unpack(">I", value[1:5])[0] == 9
 
 
 class StubAdmin:

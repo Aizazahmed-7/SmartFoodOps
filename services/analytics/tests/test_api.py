@@ -118,3 +118,83 @@ def test_restaurant_view_requires_the_role_and_the_claim(client):
 def test_days_bounds(client):
     assert client.get("/v1/internal/analytics/metrics?days=0", headers=SYSTEM).status_code == 422
     assert client.get("/v1/internal/analytics/metrics?days=91", headers=SYSTEM).status_code == 422
+
+
+def test_restaurant_totals_aov_and_repeat_rate(client, app):
+    """The lifetime block: revenue counts SETTLED only, AOV is integer-cents
+    floor division, repeat rate = customers with >=2 orders / customers.
+    Seed: usr_1 owns all four rst_1 orders (one settled at 2000) — one
+    customer, repeat; add a second one-off customer for the denominator."""
+    events = _seed_world()
+    events.append(_event("OrderPlaced", "ord_e", at=_iso(5)))
+    events[-1]["payload"]["user_id"] = "usr_2"  # this file's fixture uses dict payloads
+    _fold(app, events)
+    body = client.get("/v1/restaurant/analytics?days=7", headers=OWNER).json()
+    t = body["totals"]
+    assert t["orders"] == 5 and t["settled"] == 1 and t["cancelled"] == 2
+    assert t["revenue_cents"] == 2000
+    assert t["aov_cents"] == 2000  # 2000 // 1
+    assert t["customers"] == 2 and t["repeat_customers"] == 1
+    assert t["repeat_rate"] == 0.5
+    assert body["window"] == {"orders": 5, "settled": 1, "cancelled": 2}
+
+
+def test_restaurant_totals_with_no_sales_answer_none_not_zero(client, app):
+    _fold(app, [_event("OrderPlaced", "ord_q")])
+    t = client.get("/v1/restaurant/analytics?days=7", headers=OWNER).json()["totals"]
+    assert t["settled"] == 0 and t["aov_cents"] is None and t["revenue_cents"] == 0
+
+
+def test_ops_metrics_carry_windowed_revenue(client, app):
+    _fold(app, _seed_world())
+    body = client.get("/v1/internal/analytics/metrics?days=7", headers=SYSTEM).json()
+    assert body["revenue_cents"] == 2000  # the one settled order
+
+
+def _view_event(event_id, user, at):
+    return {
+        "event_type": "MenuViewed",
+        "event_id": event_id,
+        "payload": {"restaurant_id": "rst_1", "user_id": user, "viewed_at": at},
+    }
+
+
+def _fold_views(app, events):
+    import asyncio
+
+    from analytics.consumers import ViewsProjector
+
+    asyncio.run(ViewsProjector(app.state.service._sessions).handle_batch(events))
+
+
+def test_funnel_conversion_window_and_anonymity(client, app):
+    """The three-way split the funnel must get right:
+    usr_1 viewed then ordered 30m later      → converted
+    usr_3 viewed then ordered 2 DAYS later   → viewer, not converted
+    usr_1's second view AFTER the order      → the order cannot convert a
+                                               view that hadn't happened
+    two anonymous views                      → volume only
+    """
+    _fold(app, [_event("OrderPlaced", "ord_a", at=_iso(30))])  # usr_1, 30m ago
+    _fold_views(
+        app,
+        [
+            _view_event("v1", "usr_1", _iso(60)),  # 1h ago → order 30m later ✓
+            _view_event("v2", "usr_3", _iso(60 * 49)),  # 49h ago → order 2 days after view ✗
+            _view_event("v3", "usr_1", _iso(5)),  # AFTER the order ✗ (but usr_1 already ✓)
+            _view_event("v4", None, _iso(10)),
+            _view_event("v5", None, _iso(9)),
+        ],
+    )
+    body = client.get("/v1/restaurant/analytics?days=7", headers=OWNER).json()
+    f = body["funnel"]
+    assert f["views"] == 5
+    assert f["viewers"] == 2  # usr_1, usr_3 — anonymous excluded
+    assert f["converted_viewers"] == 1  # usr_1 only
+    assert f["conversion_rate"] == 0.5
+
+
+def test_funnel_with_no_signed_in_viewers_answers_none(client, app):
+    _fold_views(app, [_view_event("v8", None, _iso(5))])
+    f = client.get("/v1/restaurant/analytics?days=7", headers=OWNER).json()["funnel"]
+    assert f["views"] == 1 and f["viewers"] == 0 and f["conversion_rate"] is None

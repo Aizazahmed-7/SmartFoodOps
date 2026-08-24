@@ -293,3 +293,63 @@ catching a real event within hours of existing.
 above); the envelope cutover decision (two paths in local-dev.md); rider
 utilization (needs dispatch); FE unit tests beyond e2e (Playwright is the
 W3 scope); the load test (explicitly parked by the user).
+
+## S7 — Analytics dashboards (owner Insights tab + admin business board)
+
+**Backend adds:** a `totals` lifetime block on the restaurant read —
+deliberately a SEPARATE unwindowed query, so the window picker never lies —
+with revenue (settled only: a hold is not income), AOV as integer-cents
+floor division, distinct customers, and repeat rate (>=2 orders). The ops
+read gains windowed revenue. `None`-not-zero discipline throughout: "no
+sales yet" and "an average of zero" are different answers.
+
+**Owner UI:** an Insights tab on the Partner dashboard — lifetime cards,
+windowed stats with a 7/14/30d picker, and two dependency-free CSS bar
+charts (revenue/day; kept-vs-cancelled stacked). The FE does layout math
+only — every number arrives computed. One CSS lesson paid: a percentage
+height inside an auto-height flex column collapses to nothing; the columns
+needed h-full for the bars' % to resolve.
+
+**Admin board:** Grafana speaks Postgres natively, so a `grafana_ro` role
+(SELECT-only — proved live: read 868 rows, INSERT denied) plus a provisioned
+datasource gives a "Business" dashboard beside the SLO board: orders/day,
+revenue/day, cancellation trend, top restaurants, lifetime stats. No new
+service; the dashboard is a guest in the database — may look, never touch.
+
+**Verified live:** API self-check (54364¢ / 17 settled = 3197¢ AOV, floor);
+the Insights tab rendering the canary's honest red wall of cancels with
+green kept-slivers; the business board's top-restaurants table catching
+Karim's Kebab House (2 orders) from the Postman onboarding drill.
+696 tests, 100% cov.
+
+## S8 — The browse→order funnel (MenuViewed, no new broker)
+
+**The architecture answer made real:** the funnel needed a new event
+SOURCE, not a new event processor. `MenuViewed` goes from catalog straight
+to Kafka — deliberately NOT through the outbox: a view has no companion
+write to be atomic with, browse volume dwarfs order volume, and telemetry
+earns different rules (fire-and-forget via the lib's new `send_nowait`,
+no-raise, sampled — conversion is a rate and rates survive sampling).
+event_id = uuid5(request_id): deterministic per REQUEST, so redelivery
+collapses on the consumer's PK while real repeat views stay distinct.
+
+**Analytics** grew a second batch loop (separate group — browse backlog
+must never queue ahead of order facts) folding into `menu_views`, and the
+conversion computes at read time: distinct signed-in viewers with an order
+at that restaurant within 24h of a view, via an EXISTS join against
+order_facts. Anonymous views count toward volume only — you cannot join an
+order to a browser you cannot name.
+
+**The gap the live test caught:** the first authed view landed with
+user_id NULL. Root cause: on public_read routes the edge never verified a
+token even when one was PRESENTED — stamping only happened inside the
+needs_auth branch. Fix: opportunistic identity — a token offered on a
+public route is verified and stamped; a bad/expired one degrades to
+anonymous instead of 401 (a stale session must never break public
+browsing). Side benefit: the rate limiter now scopes authed public reads
+by sub instead of NAT.
+
+**Verified live end to end:** authed view → edge stamp → catalog
+fire-and-forget → Kafka → batch fold → order placed by the same user →
+funnel read: views 9, viewers 1, converted 1, conversion_rate 1.0 — and
+the four funnel cards rendering on the Insights tab. 710 tests, 100% cov.

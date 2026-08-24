@@ -50,20 +50,32 @@ def create_app(settings: Settings | None = None, *, runners: list[Runner] | None
     if not live_runners and settings.kafka_consumers == "on":  # pragma: no cover — live
         # Live wiring only: loop, retries, DLQ policy all live (tested) in
         # smartfood-kafka; the batch shape is FR-43's.
-        from .consumers import GROUP_FACTS, FactsProjector
+        from .consumers import GROUP_FACTS, GROUP_VIEWS, FactsProjector, ViewsProjector
 
+        serde = AvroSerde(SchemaRegistry(settings.schema_registry_url))
         projector = FactsProjector(sessions)
-        consumer = EventConsumer(
+        facts_consumer = EventConsumer(
             topic(settings.cell_id, Topic.ORDERS_EVENTS),
             GROUP_FACTS,
-            projector,  # unused by batch mode, but the constructor wants a handler
-            AvroSerde(SchemaRegistry(settings.schema_registry_url)),
+            projector,
+            serde,
+            bootstrap=settings.kafka_bootstrap,
+        )
+        views = ViewsProjector(sessions)
+        views_consumer = EventConsumer(
+            topic(settings.cell_id, Topic.BROWSE_EVENTS),
+            GROUP_VIEWS,
+            views,
+            serde,
             bootstrap=settings.kafka_bootstrap,
         )
         live_runners = [
-            lambda: consumer.run_batches(
+            lambda: facts_consumer.run_batches(
                 projector, max_batch=settings.batch_max, wait_ms=settings.batch_wait_ms
-            )
+            ),
+            lambda: views_consumer.run_batches(
+                views, max_batch=settings.batch_max, wait_ms=settings.batch_wait_ms
+            ),
         ]
 
     @asynccontextmanager
