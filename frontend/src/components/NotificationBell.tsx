@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "react-router-dom";
-import { listNotifications, markAllNotificationsRead, markNotificationRead } from "../api/client";
+import { getNotifyTicket, listNotifications, markAllNotificationsRead, markNotificationRead } from "../api/client";
 import type { NotificationRow } from "../api/types";
 import { useAuth } from "../state/auth";
 
@@ -12,13 +12,64 @@ export default function NotificationBell() {
   const location = useLocation();
   const queryClient = useQueryClient();
 
+  // S9: while the bell stream is up, the 15s poll idles; any stream
+  // failure silently returns to polling — same floor-under-the-stream
+  // deal as order tracking.
+  const [streaming, setStreaming] = useState(false);
+  const esRef = useRef<EventSource | null>(null);
+
   const notifications = useQuery({
     queryKey: ["notifications"],
     queryFn: () => listNotifications(),
-    refetchInterval: 15000,
+    refetchInterval: streaming ? false : 15000,
     refetchIntervalInBackground: true, // the badge keeps counting in a background tab
     enabled: !!claims,
   });
+
+  useEffect(() => {
+    if (!claims) return;
+    let cancelled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+
+    const connect = async () => {
+      try {
+        const { ticket } = await getNotifyTicket();
+        if (cancelled) return;
+        const es = new EventSource(`/sse/notify?ticket=${encodeURIComponent(ticket)}`);
+        esRef.current = es;
+        es.addEventListener("notify", (e) => {
+          // A hint, not a payload: refetch and let the GET be the truth.
+          queryClient.invalidateQueries({ queryKey: ["notifications"] });
+          // A restaurant hint means the kitchen feed changed too — the
+          // owner's queues go near-live for free.
+          if ((e as MessageEvent).data === "restaurant") {
+            queryClient.invalidateQueries({ queryKey: ["feed"] });
+          }
+        });
+        es.addEventListener("reconnect", () => {
+          es.close();
+          if (!cancelled) retry = setTimeout(connect, 250);
+        });
+        es.onopen = () => setStreaming(true);
+        es.onerror = () => {
+          // Single-use tickets: the built-in reconnect would 401 — close,
+          // fall back to the poll, try again with a fresh ticket.
+          es.close();
+          setStreaming(false);
+          if (!cancelled) retry = setTimeout(connect, 5000);
+        };
+      } catch {
+        setStreaming(false); // 503 = push off; the poll carries on
+      }
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (retry) clearTimeout(retry);
+      esRef.current?.close();
+      setStreaming(false);
+    };
+  }, [claims, queryClient]);
 
   const markRead = useMutation({
     mutationFn: (id: string) => markNotificationRead(id),

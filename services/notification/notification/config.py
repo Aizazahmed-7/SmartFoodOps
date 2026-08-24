@@ -26,5 +26,15 @@ class Settings(BaseSettings):
     schema_registry_url: str = "http://localhost:8086"
     cell_id: str = "c1"
 
+    # Bell push (S9): empty = off — the FE keeps its 15s poll. Compose's
+    # app-env REDIS_URL arms it fleet-wide; channels are namespaced
+    # sfo:notify:* beside tracking's sfo:track:*.
+    redis_url: str = ""
+    stream_ticket_ttl_seconds: int = 60
+    stream_heartbeat_seconds: float = 15.0
+    # FR-36's jittered lifetime, same reasoning as order tracking.
+    stream_lifetime_min_seconds: float = 900.0
+    stream_lifetime_max_seconds: float = 1800.0
+
     # Tests use sqlite + create_all; containers run Alembic migrations.
     create_all: bool = False

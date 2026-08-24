@@ -14,8 +14,10 @@ untagged: they are the return leg of the tagged call above them.
 | `[KAFKA]` | Avro event on a topic | A **fact already committed**, announced to whoever cares. Fire-and-forget: the producer never learns who consumed it. At-least-once, deduped by deterministic event id. | Nothing upstream blocks. Events queue in the outbox (visible as `outbox_pending`) and publish when the broker returns. |
 | `[TEMPORAL]` | gRPC to the Temporal service | Workflow orchestration: start-with-update, activity dispatch, signals, child-workflow starts. **Not** a service call and **not** an event — the durable execution layer. | On the checkout path, so an outage is a checkout outage: `SagaUnavailable` → 503 + `Retry-After`, nothing written. The retry re-derives the same order id. |
 | `[LOCAL]` | In-process function call | Same process, no network, no serialization. | Cannot fail independently. |
+| `[REDIS]` | Pub/sub hint on a channel | A **"look again" nudge** to whoever is listening right now — never a payload, never a record. Published post-commit, fire-and-forget. | Nothing blocks, nothing is stored: a lost hint costs seconds of staleness — the FE's poll floor still exists beneath every stream. |
+| `[SSE]` | Server-sent frames on a held connection | The browser's live wire: one long HTTP response streaming `event:`/`data:` frames. Auth is a single-use ticket (FR-38) because EventSource cannot send headers. | Connection death is NORMAL (jittered lifetime ends every stream on purpose); the client re-tickets and reopens, and falls back to polling meanwhile. |
 
-**The rule these tags reveal:** `[HTTP]` and `[TEMPORAL]` are on the critical path — a customer is waiting. `[KAFKA]` never is. `[DB]` only crosses a **process** boundary, never a **service** boundary.
+**The rule these tags reveal:** `[HTTP]` and `[TEMPORAL]` are on the critical path — a customer is waiting. `[KAFKA]` never is. `[DB]` only crosses a **process** boundary, never a **service** boundary. `[REDIS]` and `[SSE]` carry HINTS, never truth — every render still comes from a `[HTTP]`+`[DB]` read, which is what lets both fail freely.
 
 ---
 
@@ -257,6 +259,116 @@ sequenceDiagram
         KF->>I: [KAFKA] grant-convergence consumer — type-AGNOSTIC,<br/>compaction may keep ANY event and every payload<br/>carries owner_user_id → processed_events check →<br/>same idempotent grant → marked processed
         KF->>INV: [KAFKA] stock provisioning — diff full menu vs known rows,<br/>INSERT stock rows at 0 (STRICT) + default capacity,<br/>ON CONFLICT DO NOTHING, replay-safe
     end
+```
+
+---
+
+## 7. Analytics — events fold into facts; dashboards compute at read time
+
+Two consumer loops, one philosophy: the write path SHAPES (absolute values,
+O(1), idempotent), the read path COMPUTES (every aggregate is SQL at the
+moment someone looks). Counters are banned: an increment cannot absorb
+at-least-once redelivery, but an upserted fact row converges.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CAT as catalog
+    participant W as order worker
+    participant KF as Kafka
+    participant AC as analytics consumers
+    participant ADB as analytics_db
+    participant E as edge-bff
+    participant A as analytics API
+    participant G as Grafana
+
+    Note over CAT: GET /v1/menus/{rid} served — a 404 is not a view
+    CAT->>KF: [KAFKA] MenuViewed → c1.browse.events, fire-and-forget<br/>send_nowait: the menu response NEVER waits on Kafka.<br/>No outbox — telemetry has no write to be atomic with.<br/>event_id = uuid5(request_id): redelivery collapses,<br/>repeat views stay distinct. user_id null = anonymous
+    W->>KF: [KAFKA] lifecycle events → c1.orders.events<br/>(the outbox poller's usual work, diagram 5)
+    KF->>AC: [KAFKA] getmany — up to 500 events / 5s (FR-43)
+    Note over AC: TWO loops, separate groups: browse backlog must never<br/>queue ahead of the order facts dashboards bill by
+    AC->>ADB: [DB] ONE transaction per batch:<br/>order_facts upsert per order_id — absolute values only<br/>(status, total_cents, one timestamp per milestone);<br/>menu_views INSERT..DO NOTHING on view_id
+    AC->>KF: [KAFKA] commit offsets — after the batch landed
+    Note over AC,ADB: crash before commit → whole batch redelivers →<br/>same rows, same values. Idempotency is structural.
+
+    Note over E,A: … later, the owner opens Insights (or Grafana refreshes)
+    E->>A: [HTTP] GET /v1/restaurant/analytics — scoped by the CLAIM:<br/>no restaurant id in the path, cross-tenant is unaskable
+    A->>ADB: [DB] the actual math, NOW: daily GROUP BY, lifetime totals,<br/>AOV (integer floor), rates, and the funnel —<br/>viewers with an order within 24h of a view (EXISTS join)
+    A-->>E: window + totals + funnel (rates are null, not 0, on no data)
+    G->>ADB: [DB] business panels — SQL per refresh, via grafana_ro:<br/>SELECT-only by role; a dashboard may look, never touch
+```
+
+**Scale note:** at real volume the read-time GROUP BYs materialize into
+rollup tables — rebuilt by periodic RECOMPUTATION from facts, never by
+increments. The facts stay the source of truth; the rollup is a cache.
+
+---
+
+## 8. Live order tracking — ticket-authed SSE (FR-36/38)
+
+The stream pushes STATUS HINTS. The FE treats each as "refetch now"; the
+database stays the only rendered truth — which is what lets the bus fail
+open and the stream die freely. Publishes fire POST-COMMIT from the three
+choke points every status write already funnels through.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant FE as Frontend
+    participant E as edge-bff
+    participant O as order API
+    participant R as Redis
+    participant W as order worker
+
+    FE->>E: [HTTP] POST /v1/track/ticket {order_id} — JWT verified here
+    E->>O: [HTTP] forward, X-Auth-Sub stamped
+    Note over O: ownership check (not-yours → 404), then a 60s secret
+    O->>R: [REDIS] SET sfo:ticket:{t} = {channel: "sfo:track:ord_42", sub}
+    O-->>FE: 201 {ticket, stream: /sse/track/ord_42}
+
+    FE->>O: [SSE] GET /sse/track/ord_42?ticket=… — via the GATEWAY,<br/>BYPASSING the edge: the ticket IS the auth, so the<br/>stream fleet never touches JWTs (that is FR-38's point)
+    O->>R: [REDIS] GETDEL the ticket — atomic read-and-destroy:<br/>replay is impossible, a mismatched ticket burns too
+    O->>R: [REDIS] SUBSCRIBE sfo:track:ord_42
+    O-->>FE: [SSE] event: status / data: CONFIRMED — the SNAPSHOT first,<br/>read from the DB: no blank screens, no trust in hints
+
+    Note over W: the saga advances — transition() commits ACCEPTED
+    W->>R: [REDIS] PUBLISH sfo:track:ord_42 "ACCEPTED" — POST-commit:<br/>a hint must never describe a write that rolled back,<br/>and its failure must never undo one that landed
+    R-->>O: [REDIS] the subscribed stream wakes
+    O-->>FE: [SSE] event: status / data: ACCEPTED
+    FE->>E: [HTTP] GET /v1/orders/ord_42 — the hint triggers ONE refetch;<br/>the poll idles while the stream lives (its floor remains)
+    Note over O,FE: quiet stretches: ": hb" comments every 15s.<br/>At the jittered 15–30min lifetime: event: reconnect —<br/>the FE re-tickets and reopens; a fleet's reconnects<br/>spread instead of thundering (FR-36)
+```
+
+---
+
+## 9. The live bell — per-recipient hints from the inbox (S9)
+
+Same machinery as diagram 8 — literally: both lanes ride
+`smartfood-realtime` (tickets, bus, stream generator). The one
+generalization made at extraction: a ticket authorizes a CHANNEL, so a
+tracking ticket redeemed at the bell fails structurally, not by rule.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant KF as Kafka orders.events
+    participant N as notification service
+    participant NDB as notification_db
+    participant R as Redis
+    participant FE as owner's browser
+
+    Note over FE: on sign-in the bell buys its stream
+    FE->>N: [HTTP] POST /v1/notifications/ticket (via edge, JWT verified)<br/>identity IS the channel: owners → sfo:notify:restaurant:{rid},<br/>everyone else → sfo:notify:customer:{sub} — same _recipient()<br/>rule the inbox READS by
+    N->>R: [REDIS] SET ticket → {channel, sub}
+    FE->>N: [SSE] GET /sse/notify?ticket=… — via the gateway, edge bypassed.<br/>NO identity in the URL at all: the claim carries the channel,<br/>so another user's bell cannot even be asked for
+    N->>R: [REDIS] GETDEL + SUBSCRIBE the claimed channel
+
+    KF->>N: [KAFKA] OrderConfirmed (diagram 5's pipeline)
+    N->>NDB: [DB] mint notification rows — deterministic ntf_ ids,<br/>ONE transaction (unchanged from diagram 5)
+    N->>R: [REDIS] POST-COMMIT: one hint per DISTINCT recipient —<br/>PUBLISH sfo:notify:customer:usr_1 "customer"<br/>PUBLISH sfo:notify:restaurant:rst_9 "restaurant"
+    R-->>N: [REDIS] the owner's subscribed stream wakes
+    N-->>FE: [SSE] event: notify / data: restaurant
+    FE->>N: [HTTP] GET /v1/notifications — refetch; badge updates.<br/>data=restaurant ALSO invalidates the kitchen feed —<br/>the owner's queues went near-live for free.<br/>The 15s poll idles while streaming; any failure falls back
 ```
 
 ---

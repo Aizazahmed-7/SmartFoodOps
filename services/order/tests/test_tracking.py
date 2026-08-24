@@ -17,31 +17,31 @@ STRANGER = headers_for(AuthContext(sub="usr_2", role="customer"))
 
 
 class FakeTracking:
-    """The TrackingPort, in-memory: dict tickets, one asyncio.Queue bus per
-    order. next_status() mimics the Redis adapter's poll-tick contract
-    (None on a quiet tick)."""
+    """The TrackingPort, in-memory: dict tickets (channel claims), one
+    asyncio.Queue bus per channel. next_message() mimics the Redis
+    adapter's poll-tick contract (None on a quiet tick)."""
 
     def __init__(self):
         self.tickets: dict[str, dict] = {}
         self.buses: dict[str, asyncio.Queue] = {}
         self.published: list[tuple[str, str]] = []
 
-    async def put_ticket(self, ticket, order_id, sub, *, ttl_s):
-        self.tickets[ticket] = {"order_id": order_id, "sub": sub, "ttl": ttl_s}
+    async def put_ticket(self, ticket, channel, sub, *, ttl_s):
+        self.tickets[ticket] = {"channel": channel, "sub": sub, "ttl": ttl_s}
 
     async def consume_ticket(self, ticket):
         return self.tickets.pop(ticket, None)
 
-    async def publish(self, order_id, status):
-        self.published.append((order_id, status))
-        self.buses.setdefault(order_id, asyncio.Queue()).put_nowait(status)
+    async def publish(self, channel, data):
+        self.published.append((channel, data))
+        self.buses.setdefault(channel, asyncio.Queue()).put_nowait(data)
 
     @asynccontextmanager
-    async def subscription(self, order_id):
-        queue = self.buses.setdefault(order_id, asyncio.Queue())
+    async def subscription(self, channel):
+        queue = self.buses.setdefault(channel, asyncio.Queue())
 
         class Sub:
-            async def next_status(self):
+            async def next_message(self):
                 # Block like the real adapter (get_message timeout=1.0):
                 # a quiet bus must let the stream's own heartbeat timeout
                 # fire, not busy-spin past it.
@@ -170,9 +170,9 @@ async def test_stream_snapshot_then_hint_then_terminal_close():
     fake = FakeTracking()
     app = make_app(fake)
     await _seed(app, status="CONFIRMED")
-    await fake.put_ticket("tkt", "ord_t1", "usr_1", ttl_s=60)
-    await fake.publish("ord_t1", "ACCEPTED")  # queued before connect
-    await fake.publish("ord_t1", "SETTLED")  # terminal — must end the stream
+    await fake.put_ticket("tkt", "sfo:track:ord_t1", "usr_1", ttl_s=60)
+    await fake.publish("sfo:track:ord_t1", "ACCEPTED")  # queued before connect
+    await fake.publish("sfo:track:ord_t1", "SETTLED")  # terminal — must end the stream
 
     status, lines = await _stream_lines(app, "/v1/track/ord_t1?ticket=tkt")
     assert status == 200
@@ -185,7 +185,7 @@ async def test_stream_on_an_already_terminal_order_is_one_event():
     fake = FakeTracking()
     app = make_app(fake)
     await _seed(app, status="CANCELLED")
-    await fake.put_ticket("tkt", "ord_t1", "usr_1", ttl_s=60)
+    await fake.put_ticket("tkt", "sfo:track:ord_t1", "usr_1", ttl_s=60)
     status, lines = await _stream_lines(app, "/v1/track/ord_t1?ticket=tkt")
     assert status == 200
     assert [ln for ln in lines if ln.startswith("data: ")] == ["data: CANCELLED"]
@@ -197,7 +197,7 @@ async def test_quiet_stream_heartbeats():
     # early client break, so the test would otherwise drain the default.
     app = make_app(fake, hb=0.02, life=0.3, life_max=0.3)
     await _seed(app, status="CONFIRMED")
-    await fake.put_ticket("tkt", "ord_t1", "usr_1", ttl_s=60)
+    await fake.put_ticket("tkt", "sfo:track:ord_t1", "usr_1", ttl_s=60)
     status, lines = await _stream_lines(app, "/v1/track/ord_t1?ticket=tkt", max_lines=3)
     assert status == 200
     assert ": hb" in lines  # SSE comment — invisible to EventSource handlers
@@ -209,7 +209,7 @@ async def test_lifetime_bound_sends_reconnect_and_closes():
     fake = FakeTracking()
     app = make_app(fake, life=0.03, life_max=0.03, hb=0.5)
     await _seed(app, status="CONFIRMED")
-    await fake.put_ticket("tkt", "ord_t1", "usr_1", ttl_s=60)
+    await fake.put_ticket("tkt", "sfo:track:ord_t1", "usr_1", ttl_s=60)
     status, lines = await _stream_lines(app, "/v1/track/ord_t1?ticket=tkt")
     assert status == 200
     assert "event: reconnect" in lines and "data: lifetime" in lines
@@ -260,7 +260,7 @@ async def test_transition_publishes_after_commit():
             await s.commit()
 
         await transition(sessions, "ord_h1", expected="PLACED", target="VALIDATED")
-        assert fake.published == [("ord_h1", "VALIDATED")]
+        assert fake.published == [("sfo:track:ord_h1", "VALIDATED")]
 
         # idempotent no-op (already VALIDATED) publishes NOTHING — a hint
         # for a write that did not happen would be a small lie
@@ -272,7 +272,7 @@ async def test_transition_publishes_after_commit():
 
 async def test_publish_failure_never_breaks_the_transition():
     class ExplodingPublisher:
-        async def publish(self, order_id, status):
+        async def publish(self, channel, data):
             raise RuntimeError("bus down")
 
     tracking.set_publisher(ExplodingPublisher())
@@ -294,7 +294,7 @@ async def test_quiet_bus_tick_continues_without_heartbeat():
     fake = FakeTracking()
     app = make_app(fake, hb=5.0, life=1.4, life_max=1.4)
     await _seed(app, status="CONFIRMED")
-    await fake.put_ticket("tkt", "ord_t1", "usr_1", ttl_s=60)
+    await fake.put_ticket("tkt", "sfo:track:ord_t1", "usr_1", ttl_s=60)
     status, lines = await _stream_lines(app, "/v1/track/ord_t1?ticket=tkt", deadline=4.0)
     assert status == 200
     # The bus's 1.0s internal tick returned None INSIDE the 5s heartbeat

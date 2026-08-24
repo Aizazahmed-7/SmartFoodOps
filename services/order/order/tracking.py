@@ -25,7 +25,12 @@ log = get_logger("order.tracking")
 
 
 class StatusPublisher(Protocol):
-    async def publish(self, order_id: str, status: str) -> None: ...
+    async def publish(self, channel: str, data: str) -> None: ...
+
+
+def track_channel(order_id: str) -> str:
+    """The one place the tracking channel name is spelled."""
+    return f"sfo:track:{order_id}"
 
 
 _publisher: StatusPublisher | None = None
@@ -45,7 +50,7 @@ async def publish_status(order_id: str, status: str) -> None:
     if _publisher is None:
         return
     try:
-        await _publisher.publish(order_id, status)
+        await _publisher.publish(track_channel(order_id), status)
     except Exception as exc:
         log.warning(
             "status publish failed — stream stays stale until the FE polls",

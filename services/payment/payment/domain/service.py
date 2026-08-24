@@ -28,12 +28,15 @@ from smartfood_idempotency import (
     Reserved,
 )
 from smartfood_kafka import EventType
+from smartfood_otel import get_logger
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import PaymentRepo
 from ..db import PaymentStatus
-from .ports import PaymentGatewayPort, PspStateConflict, PspUnavailable
+from .ports import PaymentGatewayPort, PspStateConflict, PspUnavailable, PspUnknownRef
+
+log = get_logger("payment.service")
 
 MONEY_SCOPE = "money"
 
@@ -232,6 +235,24 @@ class PaymentService:
         except PspUnavailable:
             await self._store.release(MONEY_SCOPE, key)
             raise
+        except PspUnknownRef as exc:
+            if op != "void":
+                # Capture/refund against a ref the PSP forgot = the books
+                # disagree about MONEY — loud, non-retryable, a human looks.
+                await self._store.release(MONEY_SCOPE, key)
+                raise PaymentStateConflict(f"psp has no record of this {op} ref") from None
+            # A void for a hold the PSP does not know CONVERGES: the goal
+            # ("no active hold") is vacuously true — an auth the processor
+            # has no record of cannot capture anything. Real PSPs GC old
+            # auths and answer exactly this; found live when the in-memory
+            # mock PSP restarted and a compensation retried forever. Loud
+            # anyway: this is reconciliation-grade information.
+            log.warning(
+                "psp has no record of the authorization — converging void",
+                order_id=order_id,
+                psp_ref=row.payment_intent_id,
+                error=str(exc),
+            )
         except PspStateConflict:
             # The PSP's book disagrees with our row — surface loudly as a
             # state conflict; ops reconciles (webhooks arrive with real PSPs).

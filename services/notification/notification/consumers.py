@@ -29,6 +29,7 @@ from typing import Any
 from smartfood_otel import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from . import push
 from .adapters.repo import NotificationRepo, notification_id
 from .domain.mapping import (
     NOTIFYING_PAYMENT_EVENTS,
@@ -103,3 +104,10 @@ class InboxHandler:
                     order_id=order_id,
                     recipients=[draft.recipient_type for draft in drafts],
                 )
+        # Post-commit, one hint per DISTINCT recipient (S9): the hint must
+        # never describe a row that rolled back, and its failure must never
+        # undo one that landed — the order-tracking transition rule, applied
+        # to the bell. Duplicate-safe by construction: the FE's reaction is
+        # a refetch, and refetching twice shows the same truth.
+        for recipient_type, recipient_id in {(d.recipient_type, d.recipient_id) for d in drafts}:
+            await push.publish_hint(recipient_type, recipient_id)

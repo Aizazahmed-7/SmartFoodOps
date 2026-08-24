@@ -11,6 +11,13 @@ class GatewayResult:
     psp_ref: str
 
 
+class PspUnknownRef(Exception):
+    """The PSP has no record of the referenced authorization. For a VOID
+    this converges (a hold the PSP does not know cannot capture money —
+    real processors GC old auths and answer exactly this way); for capture
+    and refund it is a books-disagree incident that must stay loud."""
+
+
 class PspUnavailable(Exception):
     """PSP unreachable/ambiguous after retries. The SAME gateway key must be
     used on the next attempt — the PSP's replay is what resolves ambiguity."""

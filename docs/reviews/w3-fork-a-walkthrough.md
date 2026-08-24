@@ -353,3 +353,44 @@ by sub instead of NAT.
 fire-and-forget → Kafka → batch fold → order placed by the same user →
 funnel read: views 9, viewers 1, converted 1, conversion_rate 1.0 — and
 the four funnel cards rendering on the Insights tab. 710 tests, 100% cov.
+
+## S9 — The live bell (and the birth of smartfood-realtime)
+
+**The extraction:** order tracking's ticket/pub-sub/stream machinery got
+its second consumer, with dispatch (the third) already on the roadmap — so
+it graduated into `libs/smartfood-realtime`: the Redis bus + single-use
+tickets, and the stream generator (snapshot → hints → heartbeats →
+jittered-lifetime reconnect) parameterized by event name and an
+`ends_stream` predicate (tracking closes on terminal statuses; the bell
+never closes on an event — only the lifetime ends it).
+
+**The generalization made during the lift:** a ticket authorizes a
+CHANNEL, not an order. Claims store the fully-qualified channel name, and
+each stream endpoint checks the claim against the channel it serves — so a
+tracking ticket redeemed at the bell is burned AND refused, structurally.
+Tested both directions.
+
+**The bell itself:** channels mirror exactly how the read side scopes
+(`_recipient`): customers get sfo:notify:customer:{sub}, owners their
+restaurant channel — ONE stream per signed-in identity. The inbox handler
+publishes one hint per DISTINCT recipient POST-COMMIT (the transition-hook
+rule, third application); the FE bell idles its 15s poll while streaming,
+falls back silently on any failure, and a `restaurant` hint also
+invalidates the kitchen feed — the owner's queues went near-live for free.
+The stream endpoint has NO identity in the URL at all: the claim carries
+the channel, so another user's bell cannot even be asked for.
+
+**Verified live:** a curl stream received `event: notify / data: customer`
+the moment OrderConfirmed minted the row (worker → Kafka → inbox commit →
+hint → Redis → SSE); ticket reuse → 401; in the browser, the owner's tab
+sold a ticket after a token refresh, held /sse/notify open, retired the
+poll, and refetched notifications + all four kitchen queues on each
+confirm — including every canary order ringing the owner's bell, which is
+the feature demonstrating itself once a minute. 723 tests, 100% cov.
+
+**Ops footnote from the session:** Docker Desktop reaped most of the fleet
+(SIGKILL) between sittings, and uvicorn's --reload masked the damage —
+the reloader process keeps a container "Up" while the app inside is dead
+awaiting a file change. Force-recreate fixed it; the durable lesson is
+that dev containers deserve healthchecks on /healthz so "Up" means
+serving, not merely running. Filed for the deploy milestone.

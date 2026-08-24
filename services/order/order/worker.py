@@ -49,11 +49,11 @@ async def main() -> None:  # pragma: no cover — live wiring (compose runs it)
     if settings.redis_url:
         # The worker owns MOST transitions, so it publishes most hints.
         import redis.asyncio as aioredis
+        from smartfood_realtime import RedisRealtime
 
         from . import tracking
-        from .adapters.tracking import RedisTracking
 
-        tracking.set_publisher(RedisTracking(aioredis.from_url(settings.redis_url)))
+        tracking.set_publisher(RedisRealtime(aioredis.from_url(settings.redis_url)))
 
     runtime: Runtime | None = None
     if settings.worker_temporal_metrics_port > 0:

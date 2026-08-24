@@ -19,11 +19,7 @@ Connection lifetime is jittered (FR-36) so a fleet's reconnects spread
 instead of thundering; the client reopens with a fresh ticket.
 """
 
-import asyncio
-import random
 import secrets
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
 from typing import Annotated, Any, Protocol
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -31,8 +27,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import Field
 from smartfood_api import ApiError, ErrorCode, StrictModel
 from smartfood_auth import AuthContext, Role, require_role
+from smartfood_realtime import StreamConfig, stream_events
 
 from ..domain.service import OrderNotFound, OrderService
+from ..tracking import track_channel
 
 router = APIRouter()
 
@@ -42,25 +40,16 @@ TERMINAL = {"SETTLED", "CANCELLED", "REFUNDED"}
 
 
 class TrackingPort(Protocol):
-    async def put_ticket(self, ticket: str, order_id: str, sub: str, *, ttl_s: int) -> None: ...
+    async def put_ticket(self, ticket: str, channel: str, sub: str, *, ttl_s: int) -> None: ...
     async def consume_ticket(self, ticket: str) -> dict[str, Any] | None: ...
-    def subscription(self, order_id: str) -> Any: ...  # async CM yielding .next_status()
-
-
-@dataclass(frozen=True)
-class TrackingConfig:
-    ticket_ttl_s: int = 60
-    heartbeat_s: float = 15.0
-    lifetime_min_s: float = 900.0
-    lifetime_max_s: float = 1800.0
-    rng: Callable[[float, float], float] = random.uniform
+    def subscription(self, channel: str) -> Any: ...  # async CM yielding .next_message()
 
 
 def _tracking(request: Request) -> TrackingPort | None:
     return request.app.state.tracking
 
 
-def _config(request: Request) -> TrackingConfig:
+def _config(request: Request) -> StreamConfig:
     return request.app.state.tracking_config
 
 
@@ -90,47 +79,12 @@ async def issue_ticket(body: TicketIn, ctx: Purchaser, request: Request) -> dict
         raise ApiError(ErrorCode.NOT_FOUND, "no such order", 404) from None
     ticket = secrets.token_urlsafe(24)
     cfg = _config(request)
-    await tracking.put_ticket(ticket, body.order_id, ctx.sub, ttl_s=cfg.ticket_ttl_s)
+    await tracking.put_ticket(ticket, track_channel(body.order_id), ctx.sub, ttl_s=cfg.ticket_ttl_s)
     return {
         "ticket": ticket,
         "expires_in": cfg.ticket_ttl_s,
         "stream": f"/sse/track/{body.order_id}",
     }
-
-
-def _sse(status: str) -> str:
-    return f"event: status\ndata: {status}\n\n"
-
-
-async def _stream(
-    order_id: str,
-    first_status: str,
-    tracking: TrackingPort,
-    cfg: TrackingConfig,
-) -> AsyncIterator[str]:
-    yield _sse(first_status)
-    if first_status in TERMINAL:
-        return  # nothing further will ever happen; let the client settle
-    deadline = asyncio.get_running_loop().time() + cfg.rng(cfg.lifetime_min_s, cfg.lifetime_max_s)
-    async with tracking.subscription(order_id) as sub:
-        while True:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                # Jittered lifetime reached (FR-36): tell the client to come
-                # back with a fresh ticket rather than silently EOFing.
-                yield "event: reconnect\ndata: lifetime\n\n"
-                return
-            try:
-                async with asyncio.timeout(min(cfg.heartbeat_s, remaining)):
-                    status = await sub.next_status()
-            except TimeoutError:
-                yield ": hb\n\n"  # SSE comment — keeps proxies from reaping us
-                continue
-            if status is None:
-                continue  # bus poll tick with nothing to say
-            yield _sse(status)
-            if status in TERMINAL:
-                return
 
 
 @router.get("/v1/track/{order_id}")
@@ -141,13 +95,21 @@ async def stream_order(
     if tracking is None:
         raise ApiError(ErrorCode.DEPENDENCY_UNAVAILABLE, "live tracking unavailable", 503)
     claim = await tracking.consume_ticket(ticket)
-    if claim is None or claim.get("order_id") != order_id:
+    if claim is None or claim.get("channel") != track_channel(order_id):
         # Burned either way: a mismatched ticket is consumed too — a probe
-        # learns nothing and loses its ticket doing so.
+        # learns nothing and loses its ticket doing so. Channel-based claims
+        # also make a BELL ticket useless here, structurally.
         raise ApiError(ErrorCode.AUTH_INVALID_CREDENTIALS, "invalid or spent ticket", 401)
     order = await _svc(request).get_order(str(claim.get("sub", "")), order_id)
     return StreamingResponse(
-        _stream(order_id, str(order["status"]), tracking, _config(request)),
+        stream_events(
+            track_channel(order_id),
+            tracking,
+            _config(request),
+            event_name="status",
+            first=str(order["status"]),
+            ends_stream=TERMINAL.__contains__,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )

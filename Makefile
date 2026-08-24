@@ -73,7 +73,7 @@ test: ## Unit tests (no infra needed)
 cov: ## Unit tests + coverage report
 	uv sync --all-packages -q && uv run --no-sync pytest -q \
 		--cov=smartfood_api --cov=smartfood_auth --cov=smartfood_kafka --cov=smartfood_otel \
-		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency \
+		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency --cov=smartfood_realtime \
 		--cov=identity --cov=edge_bff \
 		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification --cov=analytics \
 		--cov=mock_psp --cov=seed --cov=canary \

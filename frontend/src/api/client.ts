@@ -308,6 +308,14 @@ export const setCapacity = (rid: string, capacity: number) =>
 
 // ── notifications ──────────────────────────────────────────────────
 
+/** S9: a 60s single-use ticket for the bell stream — the caller's own
+ * identity is the channel; there is nothing else to name. 503 = push off;
+ * the 15s poll carries on. */
+export const getNotifyTicket = () =>
+  request<{ ticket: string; expires_in: number; stream: string }>(
+    "POST", "/v1/notifications/ticket",
+  );
+
 export const listNotifications = (cursor?: string) =>
   request<NotificationList>(
     "GET", `/v1/notifications${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);

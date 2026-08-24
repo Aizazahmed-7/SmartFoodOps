@@ -294,3 +294,38 @@ async def test_transition_race_converges_on_winner(monkeypatch, gateway):
     async with sessions() as s:
         count = (await s.execute(sa.select(sa.func.count()).select_from(ledger))).scalar_one()
     assert count == 0  # the loser did NOT double-post the pair
+
+
+# ── the PSP forgot the ref (found live: in-memory mock-psp restart) ──
+
+
+async def test_void_converges_when_psp_has_no_record_of_the_auth(gateway):
+    """A hold the PSP does not know cannot capture money: void's goal is
+    vacuously true, so it converges to VOIDED — row tells the truth after,
+    no ledger movement (a released hold moved nothing, even a vacuous one)."""
+    from payment.domain.ports import PspUnknownRef
+
+    service, sessions = await _service(gateway)
+    await _authorize(service)
+    gateway.fail_lifecycle = PspUnknownRef("unknown psp_ref")
+    outcome = await service.void("ord_1")
+    assert outcome.body["status"] == "VOIDED"
+    async with sessions() as s:
+        row = (await s.execute(sa.select(payments))).one()
+        entries = (await s.execute(sa.select(ledger))).all()
+    assert row.status == "VOIDED" and entries == []
+
+
+async def test_capture_and_refund_stay_loud_when_psp_has_no_record(gateway):
+    """Money movement against a forgotten ref = the books disagree about
+    MONEY: non-retryable conflict, row untouched, a human reconciles."""
+    from payment.domain.ports import PspUnknownRef
+
+    service, sessions = await _service(gateway)
+    await _authorize(service)
+    gateway.fail_lifecycle = PspUnknownRef("unknown psp_ref")
+    with pytest.raises(PaymentStateConflict):
+        await service.capture("ord_1")
+    async with sessions() as s:
+        row = (await s.execute(sa.select(payments))).one()
+    assert row.status == "AUTHORIZED"  # nothing pretended to move money

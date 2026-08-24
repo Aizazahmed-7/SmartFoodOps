@@ -73,8 +73,20 @@ async def test_409_is_state_conflict_no_retry():
     assert calls["n"] == 1
 
 
-async def test_other_4xx_is_loud_once():
+async def test_unknown_ref_is_its_own_exception_loud_once():
+    """404 = the PSP does not know the ref — a DISTINCT failure from an
+    outage, because the domain treats them differently (void converges,
+    money ops page). Never retried: the PSP will not learn the ref."""
+    from payment.domain.ports import PspUnknownRef
+
     client, calls = make([(404, {"error": "unknown psp_ref"})])
+    with pytest.raises(PspUnknownRef):
+        await client.refund(key="k", psp_ref="psp_ghost")
+    assert calls["n"] == 1
+
+
+async def test_other_4xx_is_loud_once():
+    client, calls = make([(422, {"error": "bad shape"})])
     with pytest.raises(PspUnavailable):
         await client.refund(key="k", psp_ref="psp_ghost")
     assert calls["n"] == 1

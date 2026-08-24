@@ -16,6 +16,7 @@ from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, Topic, top
 from smartfood_otel import RequestContextMiddleware, setup_logging, setup_tracing
 from smartfood_outbox import OutboxPoller
 from smartfood_pricing import PricingConfig
+from smartfood_realtime import RedisRealtime, StreamConfig
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -23,10 +24,9 @@ from . import tracking
 from .adapters.catalog_client import CatalogClient
 from .adapters.identity_client import IdentityClient
 from .adapters.temporal_client import TemporalSaga
-from .adapters.tracking import RedisTracking
 from .api.restaurant import router as restaurant_router
 from .api.routes import router
-from .api.track import TrackingConfig, TrackingPort
+from .api.track import TrackingPort
 from .api.track import router as track_router
 from .config import Settings
 from .db import metadata, outbox
@@ -69,11 +69,11 @@ def create_app(
 
     # Live tracking (S4): the ticket store + status bus. Armed only with a
     # redis_url; otherwise the FE's polling loop remains the whole story.
-    own_tracking: RedisTracking | None = None
+    own_tracking: RedisRealtime | None = None
     if tracking_port is None and settings.redis_url:  # pragma: no cover — live wiring
         import redis.asyncio as aioredis
 
-        own_tracking = RedisTracking(aioredis.from_url(settings.redis_url))
+        own_tracking = RedisRealtime(aioredis.from_url(settings.redis_url))
         tracking_port = own_tracking
     if tracking_port is not None:
         tracking.set_publisher(tracking_port)  # type: ignore[arg-type]
@@ -158,7 +158,7 @@ def create_app(
     )
     app.state.kitchen = KitchenService(sessions, saga=saga)
     app.state.tracking = tracking_port
-    app.state.tracking_config = TrackingConfig(
+    app.state.tracking_config = StreamConfig(
         ticket_ttl_s=settings.track_ticket_ttl_seconds,
         heartbeat_s=settings.track_heartbeat_seconds,
         lifetime_min_s=settings.track_lifetime_min_seconds,

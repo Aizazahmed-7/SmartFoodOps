@@ -9,9 +9,11 @@ from fastapi import FastAPI
 from smartfood_api import install_error_handlers, mount_observability
 from smartfood_kafka import AvroSerde, EventConsumer, SchemaRegistry, Topic, topic
 from smartfood_otel import RequestContextMiddleware, setup_logging, setup_tracing
+from smartfood_realtime import RedisRealtime, StreamConfig
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from . import push
 from .api.routes import router
 from .config import Settings
 from .db import metadata
@@ -32,7 +34,10 @@ def _run_migrations(database_url: str) -> None:  # pragma: no cover — Postgres
 
 
 def create_app(
-    settings: Settings | None = None, *, consumers: Sequence[EventConsumer] | None = None
+    settings: Settings | None = None,
+    *,
+    consumers: Sequence[EventConsumer] | None = None,
+    realtime: "RedisRealtime | None" = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("notification")
@@ -43,6 +48,17 @@ def create_app(
         engine_kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
     engine = create_async_engine(settings.database_url, **engine_kwargs)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    # Bell push (S9): armed only with a redis_url — otherwise the FE's
+    # 15s poll remains the whole story, by design.
+    own_realtime: RedisRealtime | None = None
+    if realtime is None and settings.redis_url:  # pragma: no cover — live wiring
+        import redis.asyncio as aioredis
+
+        own_realtime = RedisRealtime(aioredis.from_url(settings.redis_url))
+        realtime = own_realtime
+    if realtime is not None:
+        push.set_publisher(realtime)  # type: ignore[arg-type]
 
     live_consumers = list(consumers) if consumers is not None else []
     if not live_consumers and settings.kafka_consumers == "on":  # pragma: no cover — live
@@ -87,11 +103,21 @@ def create_app(
             with suppress(asyncio.CancelledError):
                 await task
         await engine.dispose()
+        push.reset_publisher()
+        if own_realtime is not None:  # pragma: no cover — live wiring
+            await own_realtime.aclose()
 
     app = FastAPI(title="notification", lifespan=lifespan)
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
     mount_observability(app, engine=engine)
+    app.state.realtime = realtime
+    app.state.stream_config = StreamConfig(
+        ticket_ttl_s=settings.stream_ticket_ttl_seconds,
+        heartbeat_s=settings.stream_heartbeat_seconds,
+        lifetime_min_s=settings.stream_lifetime_min_seconds,
+        lifetime_max_s=settings.stream_lifetime_max_seconds,
+    )
     app.state.service = NotificationService(sessions)
     app.include_router(router)
 

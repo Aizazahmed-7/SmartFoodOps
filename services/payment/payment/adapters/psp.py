@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from ..domain.ports import GatewayResult, PspStateConflict, PspUnavailable
+from ..domain.ports import GatewayResult, PspStateConflict, PspUnavailable, PspUnknownRef
 
 
 class MockPspClient:
@@ -61,8 +61,16 @@ class MockPspClient:
                 return resp.json()
             if resp.status_code == 409:
                 raise PspStateConflict(resp.json().get("error", "state conflict"))
+            if resp.status_code == 404:
+                # The PSP does not know this ref. NOT retryable (it will
+                # never learn it) and not a plain outage: the DOMAIN decides
+                # per-operation what an unknown auth means (void converges,
+                # capture/refund stay loud). Found live: an in-memory
+                # mock-psp restart wiped its refs and a compensating void
+                # retried 29 times against a hold that no longer existed.
+                raise PspUnknownRef(resp.json().get("error", "unknown psp_ref"))
             if resp.status_code < 500:
-                # 404 unknown ref / validation — a contract bug, loud once.
+                # other 4xx: validation — a contract bug, loud once.
                 raise PspUnavailable(f"psp refused ({resp.status_code})")
             # 5xx (incl. tok_unknown's ambiguous outcome) — retry, same key.
         raise PspUnavailable("psp unreachable — outcome unknown, key retained")
