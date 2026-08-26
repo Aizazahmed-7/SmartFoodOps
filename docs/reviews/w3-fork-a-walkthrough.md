@@ -394,3 +394,240 @@ the reloader process keeps a container "Up" while the app inside is dead
 awaiting a file change. Force-recreate fixed it; the durable lesson is
 that dev containers deserve healthchecks on /healthz so "Up" means
 serving, not merely running. Filed for the deploy milestone.
+
+---
+
+## S10 — Receipts + senders (FR-41): the task-queue slice
+
+> Design locked before code (this block is the overnight contract; the full
+> narrative + pros/cons follows it once the slice is built and verified).
+
+**The one-sentence design:** when an order SETTLES, the Kafka consumer files a
+claim-check row and nudges a Celery chain over RabbitMQ — `render_receipt`
+(CPU: PDF → S3 by reference) then `send_receipt` (I/O: mock-mailer, guarded by
+a `delivery_log` so at-least-once retries can never re-email) — with a beat
+sweeper re-enqueuing anything the nudge lost.
+
+**Decisions (each gets a pros/cons entry below):**
+1. Trigger = `OrderSettled` — the first moment the receipt is a *fact* (money
+   captured, stock consumed). The bell's silence on OrderSettled stands: this
+   mints a document, not an inbox row.
+2. Claim check: the consumer persists the full-state payload's receipt fields
+   into `receipts` (order_id PK, ON CONFLICT DO NOTHING) — the broker carries
+   only `order_id`; tasks never call another service.
+3. Delivery idempotency: `delivery_log (order_id, channel) PK` — existence =
+   sent; check → send → record (at-least-once; a rare duplicate email beats a
+   silently missing receipt). Poison (mailer 4xx) parks via `receipts.failed_at`
+   — visible, replayable, never auto-retried.
+4. Reliability: post-commit best-effort enqueue (no-raise, like bell hints) +
+   a beat sweeper (LEFT JOIN delivery_log, grace window) as the reconciler —
+   the DB row is the intent record, so no broker transaction is needed.
+5. Two queues (`receipts.render` CPU / `receipts.send` I/O) = the scaling seam;
+   two worker containers in compose so the handoff is visible in logs.
+6. Celery is sync — tasks get a SYNC engine (psycopg) + sync httpx + boto3,
+   built lazily per prefork child (fork safety), injectable for tests.
+7. mock-mailer mirrors mock-psp: env knobs + deterministic levers
+   (`/admin/fail_next`, magic `@bounce.invalid` recipient) + `/mailer/outbox`.
+
+### How it landed
+
+**The write path** (all of it new tonight): `transitions.py` already stages
+`OrderSettled` with full state → the notification consumer, on that one
+event type, files `receipts` (the claim check) inside the SAME transaction
+as its inbox writes, then — post-commit, best-effort — enqueues
+`chain(receipts.render, receipts.send)` with nothing but the order_id.
+The renderer worker reads the row, lays the document out as plain text
+(`receipt_lines` — testable strings), wraps it in a Courier PDF (fpdf2),
+PUTs it to S3 at `receipts/{order_id}.pdf`, records the key, and RETURNS
+it — Celery hands that return value to `send`, which checks
+`delivery_log`, mails by reference through the `Sender` port, and records
+the send. A beat task sweeps `receipts ⟕ delivery_log` every 5 minutes
+for anything owed past a 2-minute grace — the reconciler that lets the
+enqueue fail freely.
+
+**New moving parts:** RabbitMQ un-parked into core; LocalStack learned
+`s3`; `mock-mailer` (port 9081) with FAIL_RATE, `/admin/fail_next` (watch
+retries live) and a magic `@bounce.invalid` recipient (watch poison park);
+two worker containers — `receipt-renderer` (-Q receipts.render, -B beat)
+and `receipt-sender` (-Q receipts.send) — with metrics ports 9109/9110
+scraped by Prometheus. ADR-0025 records the decision rule: **side effects
+ride a task queue; projections ride the log.**
+
+**Numbers:** 764 tests (41 new), 100.00% coverage, ruff + strict pyright
+clean. Ten mermaid diagrams now validate on mermaid@11 — which also
+surfaced that semicolons inside message text became parse errors in
+current mermaid; fixed across four older diagrams while adding #10.
+
+### The pros/cons ledger — every fork in the road, argued
+
+**1. Broker: RabbitMQ+Celery vs Redis-as-broker vs Kafka vs SQS**
+
+| Option | For | Against | Verdict |
+| --- | --- | --- | --- |
+| RabbitMQ (chosen) | Real per-message acks (a consumer crash redelivers THAT message); per-queue routing; mature Celery transport; management UI shows queue depth at a glance | One more stateful service to run and learn | The job semantics are native, not emulated |
+| Redis as Celery broker | Zero new infra (Redis already runs) | Visibility-timeout redelivery (a slow task can be double-run by design), weaker delivery guarantees under restart, and our Redis already owns two jobs (cache, realtime) — a queue outage would now also be a cache outage | Fine for dev toys; wrong blast radius here |
+| Kafka as task queue | Already deployed; infinite retention | Per-partition offsets mean NO per-message ack: one poison "send" blocks its partition or forces manual offset surgery; no per-message retry/backoff; replay — the feature we prize for projections — is precisely the bug for emails | The mismatch that motivated ADR-0025 |
+| SQS + Lambda | No broker to operate; the ADR-0008 end-state | Not runnable locally without more LocalStack surface; couples the exercise to AWS | The `Sender`/queue seams keep this a config swap later |
+
+**2. Two chained tasks vs one fat task vs two independent tasks**
+
+- *One fat task* (render+send together): simplest, but a mailer outage
+  re-renders the PDF on every retry (CPU burned for an I/O failure), and
+  the two halves can't scale or route separately.
+- *Two independent enqueues*: no coupling, but send must poll "is the PDF
+  ready?" — you've rebuilt the chain, badly, with a race.
+- *Chain* (chosen): render's return value IS send's input; a send retry
+  re-runs only send; each queue scales on its own axis. Cost: chain args
+  ride the broker, so they must stay references — which the claim-check
+  rule already demands.
+
+**3. Idempotency ordering: record-after-send (chosen) vs claim-before-send vs status machine**
+
+- *Record after* (chosen): crash between provider-accept and record ⇒ ONE
+  possible duplicate email. Receipt always eventually arrives.
+- *Claim before*: crash between claim and send ⇒ the log says sent, the
+  sweeper skips it, the customer NEVER gets the receipt — silent loss on a
+  money document. At-most-once is the wrong direction here.
+- *Status machine* (PENDING→SENT + stale-PENDING re-drive): closes the
+  window almost fully at the cost of a third state, a second sweeper
+  query, and "almost" — the provider-accept-then-crash duplicate still
+  exists. Not worth the machinery at this volume; noted as the upgrade
+  path if duplicates ever matter.
+
+**4. Payload: claim-check row (chosen) vs data-in-message vs task-calls-services**
+
+Bytes-in-broker bloats RabbitMQ and makes every retry re-serialize the
+world; task-calls-order-service adds a runtime dependency + auth surface
+to the worker fleet. The claim check costs one row write we were already
+positioned to make transactional — and it is why a task needs nothing but
+an id to do its whole job.
+
+**5. Trigger: OrderSettled (chosen) vs OrderDelivered vs PaymentCaptured**
+
+A receipt claims "paid in full" — DELIVERED precedes capture, so a receipt
+then could precede its own payment (and a capture failure would make it a
+lie). PaymentCaptured is keyed by order with no items for the document.
+OrderSettled is the first event where the money AND the goods are both
+final, and it carries full state.
+
+**6. Enqueue reliability: best-effort + sweeper (chosen) vs outbox-to-broker**
+
+A second outbox (rows → AMQP publisher loop) would give exactly-once-ish
+enqueue at the cost of a second publisher daemon. But the receipts row
+already IS the durable intent — the sweeper turns it into the retry loop
+for free, and the delivery_log makes double-enqueue harmless. Same
+reasoning that keeps bell hints transaction-free.
+
+**7. Worker pools: threads (dev, chosen) vs prefork vs gevent**
+
+The self-review caught the trap that decided this: prometheus counters
+incremented in PREFORK CHILDREN never reach the parent's /metrics server
+(per-process registries) — the scrape wiring would have exported zeros
+forever while emails flowed. Dev runs `--pool threads` so tasks execute
+in the serving process and the numbers are TRUE; `_get_runtime` gained a
+lock because two threads can race the first lazy build. The ledger:
+prefork is the prod answer for CPU-bound render (real parallelism, needs
+`PROMETHEUS_MULTIPROC_DIR` for metrics); threads are honest for dev and
+fine for I/O; gevent is the send-side upgrade when volume demands
+hundreds of concurrent HTTP sends, at the cost of monkey-patching next to
+psycopg and boto3. The queue split makes any of these a one-container
+change.
+
+**8½. Recipient email: resolve-at-send vs copy-at-consume vs identity projection** *(added in the morning session — the synthesized `{user_id}@customers.smartfood.dev` stub was replaced with the real thing)*
+
+- *Resolve at SEND time* (chosen): the send task asks Identity's new
+  `GET /v1/internal/users/{id}` (system-authed, narrow ContactOut
+  contract) through a `Contacts` port with the mailer's two-exception
+  error shape — `ContactsUnavailable` (5xx/network) joins `autoretry_for`,
+  `UnknownRecipient` (404) parks via `failed_at` (`no_recipient` outcome,
+  ReceiptParked alert widened). Pros: always the CURRENT address (email
+  changed after ordering → receipt goes where they read mail now); no PII
+  copies; the task queue absorbs the new dependency natively (retries
+  with backoff are its whole job). Cons: identity outage delays sends —
+  by design, into the retry schedule. The dup-check runs FIRST so an
+  already-sent receipt never costs an identity round trip.
+- *Copy the email into the claim check at consume time*: no send-time
+  dependency, but the lookup moves into the Kafka consumer path — where a
+  dependency stall poisons batch progress toward the DLQ — and it freezes
+  a stale address into a PII copy in a second database.
+- *Project an identity event stream locally* (an order_recipients for
+  emails): no runtime dependency at all, but identity publishes no user
+  events today, and the stream would either carry PII in immortal events
+  (the thing we refuse) or be a change-ping that still ends in a lookup.
+  The projection is the right shape at much higher send volume; noted as
+  the scale path.
+
+**9. Scheduling the sweep: beat (chosen) vs cron vs Temporal schedule**
+
+Beat rides the renderer worker (`-B`, exactly one in the fleet — two
+beats would double every sweep). Cron would need a container with repo
+context anyway; a Temporal schedule would put a reconciliation loop on
+the orchestrator that owns customer-facing sagas — wrong neighborhood for
+a janitor. If workers ever scale horizontally, beat moves to its own
+container: the known constraint, documented in compose.
+
+
+### Verified live — four drills against the running stack
+
+1. **Happy path** — `ord_39215ec0…` driven place→SETTLED: consumer minted
+   the claim check and nudged — renderer logged `receipt rendered` (0.72s)
+   and RETURNED the key — sender received that key as its first argument
+   IN A DIFFERENT CONTAINER (the chain handoff, live), mailed, recorded
+   `msg_202ae659…`. The PDF pulled back out of S3 is a real 1-page,
+   1254-byte document: aligned money column, totals block, em-dash intact
+   (the cp1252 fix). The mailer outbox held exactly that one email, with
+   `attachment_key` as a reference.
+2. **Duplicate protection** — re-enqueued `receipts.send` for the same
+   order via the celery CLI: `receipt already sent — skipping`, the
+   ORIGINAL message id returned, outbox count unchanged. delivery_log
+   doing its one job.
+3. **Provider outage** — `/admin/fail_next 3` then a fresh order: three
+   `MailerUnavailable` retries, then success on attempt four. First run
+   exposed celery's full-jitter rolling `Retry in 0s` three times —
+   switched to deterministic backoff and re-drilled: `Retry in 2s`,
+   `Retry in 4s` at exact spacing, then `receipt sent`. One email.
+4. **Lost enqueue** — planted a receipts row 10 minutes old with no
+   delivery_log entry (exactly the residue of a dead-broker moment). The
+   01:36 sweep returned 0 (quiet baseline); the 01:41 sweep found it,
+   WARNed `re-enqueued unsent receipts count=1`, and 127ms later the
+   receipt was rendered, stored, and mailed. No human.
+
+5. **Real recipient (morning session)** — after replacing the
+   synthesized address with send-time Identity resolution: a fresh
+   settle produced `to: customer@demo.smartfood.dev` in the outbox, and
+   identity's log shows the worker's system-authed
+   `GET /v1/internal/users/usr_9837…` → 200 in 7.8ms.
+
+Worker /metrics confirmed truthful under the threads pool: renderer
+`receipts_rendered_total 2`, sender `receipts_sent_total{sent} 2` +
+`receipts_swept_total 1` — the exact drill history. `promtool` validates
+14 alert rules (ReceiptsSweeperBusy + ReceiptParked joined, each with a
+runbook section). `receipt_enqueue_failures_total` on the service: 0.
+
+**Suggested commit** (you commit, as always):
+
+```
+feat(notification): receipts pipeline — Celery/RabbitMQ senders (S10, FR-41, ADR-0025)
+
+OrderSettled now owes the customer a PDF receipt, delivered by the
+first task-queue flow in the fleet: the Kafka consumer files a
+claim-check row in the event's own transaction and nudges a Celery
+chain over RabbitMQ — render (PDF → S3 by deterministic key) hands
+its s3 key to send (delivery_log-guarded mail through the Sender
+port). Enqueue is post-commit best-effort; a beat sweeper re-enqueues
+anything owed past a grace window, so a lost nudge costs minutes,
+never the receipt. Mailer 5xx retries with deterministic backoff;
+4xx parks via failed_at (clearing it is the replay lever).
+
+Recipients resolve at SEND time against Identity's new internal
+contact read (system-authed, narrow contract) — events stay PII-free
+and the customer gets the receipt at the address they use NOW; 404
+parks as no_recipient, 5xx rides the same retry schedule.
+
+New: mock-mailer tool (fail_next/fail_rate/bounce levers), receipts +
+delivery_log tables (migration 0002), receipt-renderer/receipt-sender
+workers (threads pool — prefork children hide their counters from
+/metrics), rabbitmq un-parked to core, LocalStack +s3, two alert
+rules + runbooks, flows.md diagram 10 with [AMQP]/[S3] legend rows,
+ADR-0025. 770 tests, 100% coverage.
+```

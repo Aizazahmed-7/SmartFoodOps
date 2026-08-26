@@ -51,3 +51,41 @@ order_recipients = sa.Table(
     sa.Column("user_id", sa.Text, nullable=False),
     sa.Column("restaurant_id", sa.Text, nullable=False),
 )
+
+# ── receipts (S10, FR-41) ──────────────────────────────────────────
+# The CLAIM CHECK: the OrderSettled consumer copies everything the PDF
+# needs out of the full-state payload into this row, and the Celery chain
+# is handed only the order_id — the broker carries a reference, tasks read
+# the row, and no task ever calls another service for data. One receipt
+# per order forever (PK = order_id, conflict-ignored), so event replays
+# are absorbed structurally, the same way notification ids absorb them.
+receipts = sa.Table(
+    "receipts",
+    metadata,
+    sa.Column("order_id", sa.Text, primary_key=True),
+    sa.Column("user_id", sa.Text, nullable=False),
+    sa.Column("restaurant_name", sa.Text, nullable=False),
+    sa.Column("items", sa.JSON, nullable=False),  # [{name, qty, unit/line cents}]
+    sa.Column("totals", sa.JSON, nullable=False),  # the pricing snapshot, verbatim
+    sa.Column("settled_at", sa.TIMESTAMP(timezone=True), nullable=False),  # event occurred_at
+    sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),  # sweeper grace anchor
+    sa.Column("s3_key", sa.Text, nullable=True),  # set by render_receipt
+    sa.Column("rendered_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    # Poison marker: the mailer REJECTED this receipt (4xx — retrying can
+    # never help). A non-null failed_at parks the row out of the sweeper;
+    # clearing it after a fix is the replay lever, mirroring the DLQ story.
+    sa.Column("failed_at", sa.TIMESTAMP(timezone=True), nullable=True),
+)
+
+# Existence = sent, per channel. send_receipt checks before sending and
+# records after — so a Celery retry (at-least-once by design: acks_late)
+# re-sends only if the crash landed exactly between the send and the
+# record, and a sweeper re-enqueue of an already-sent receipt is a no-op.
+delivery_log = sa.Table(
+    "delivery_log",
+    metadata,
+    sa.Column("order_id", sa.Text, primary_key=True),
+    sa.Column("channel", sa.Text, primary_key=True),  # 'email' today; SMS later
+    sa.Column("sent_at", sa.TIMESTAMP(timezone=True), nullable=False),
+    sa.Column("provider_message_id", sa.Text, nullable=False),
+)

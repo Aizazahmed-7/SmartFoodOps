@@ -221,3 +221,27 @@ async def internal_get_address(
     except AddressNotFound:
         raise _not_found() from None
     return AddressOut.model_validate(address, from_attributes=True)
+
+
+class ContactOut(BaseModel):
+    """Deliberately NARROWER than ProfileOut: notification needs an
+    address to send to, not a profile — the smaller the internal
+    contract, the freer this service stays to change everything else."""
+
+    id: str
+    email: str
+    full_name: str | None
+
+
+@router.get("/v1/internal/users/{user_id}")
+async def internal_get_user(user_id: str, ctx: SystemOnly, request: Request) -> ContactOut:
+    """Notification resolves receipt recipients at SEND time: events carry
+    no PII (they are forever, replayed, and readable by every consumer),
+    so user_id goes in and the CURRENT email comes out — a customer who
+    changed their address after ordering gets the receipt where they read
+    mail now."""
+    try:
+        profile = await _svc(request).get_profile(user_id)
+    except UnknownUser:
+        raise _not_found() from None
+    return ContactOut(id=profile.id, email=profile.email, full_name=profile.full_name)

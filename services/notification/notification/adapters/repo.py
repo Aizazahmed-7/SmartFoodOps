@@ -19,7 +19,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import notifications, order_recipients
+from ..db import notifications, order_recipients, receipts
 
 # Fixed namespace for notification ids. NEVER change it: ids are the dedupe
 # key, and a new namespace would re-deliver every replayed event's inbox row.
@@ -49,7 +49,7 @@ def decode_cursor(cursor: str) -> tuple[datetime, str]:
         raise ValueError("malformed cursor") from exc
 
 
-def _insert_ignoring_conflict(
+def insert_ignoring_conflict(
     table: sa.Table, values: dict[str, Any], conflict_cols: list[str], dialect: str
 ) -> Any:
     insert = pg_insert if dialect == "postgresql" else sqlite_insert
@@ -67,7 +67,7 @@ class NotificationRepo:
     async def upsert_recipients(self, order_id: str, user_id: str, restaurant_id: str) -> None:
         """First order event wins; the pair never changes for an order."""
         await self._s.execute(
-            _insert_ignoring_conflict(
+            insert_ignoring_conflict(
                 order_recipients,
                 {"order_id": order_id, "user_id": user_id, "restaurant_id": restaurant_id},
                 ["order_id"],
@@ -94,7 +94,7 @@ class NotificationRepo:
         created_at: datetime,
     ) -> None:
         await self._s.execute(
-            _insert_ignoring_conflict(
+            insert_ignoring_conflict(
                 notifications,
                 {
                     "id": id,
@@ -110,6 +110,39 @@ class NotificationRepo:
                 self._dialect,
             )
         )
+
+    async def insert_receipt(
+        self,
+        *,
+        order_id: str,
+        user_id: str,
+        restaurant_name: str,
+        items: list[dict[str, Any]],
+        totals: dict[str, Any],
+        settled_at: datetime,
+        created_at: datetime,
+    ) -> bool:
+        """File the claim check (S10). True = fresh insert (the caller owes
+        an enqueue); False = a replay collided on the PK and there is
+        nothing to do — the first delivery of this event already enqueued,
+        and the sweeper covers it even if that enqueue was lost."""
+        result = await self._s.execute(
+            insert_ignoring_conflict(
+                receipts,
+                {
+                    "order_id": order_id,
+                    "user_id": user_id,
+                    "restaurant_name": restaurant_name,
+                    "items": items,
+                    "totals": totals,
+                    "settled_at": settled_at,
+                    "created_at": created_at,
+                },
+                ["order_id"],
+                self._dialect,
+            )
+        )
+        return cast(CursorResult[Any], result).rowcount > 0
 
     async def inbox_page(
         self,

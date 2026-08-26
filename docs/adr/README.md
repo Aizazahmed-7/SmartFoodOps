@@ -28,5 +28,6 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0022](0022-roles-as-seeded-lookup-table.md) | Roles as a seeded lookup table, pinned to the enum | Accepted |
 | [0023](0023-placement-runs-inside-the-order-workflow.md) | Placement runs inside the order workflow (update-with-start), sweeper retired | Accepted |
 | [0024](0024-orders-row-is-placements-idempotency-record.md) | The orders row is placement's idempotency record; the key table retired | Accepted |
+| [0025](0025-side-effects-ride-a-task-queue.md) | Side effects ride a task queue; projections ride the log | Accepted |
 
 **Conventions**: files are `NNNN-kebab-title.md`; numbers are never reused. Superseding an ADR = new ADR + status change here, never editing the old decision.

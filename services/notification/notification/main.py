@@ -13,7 +13,7 @@ from smartfood_realtime import RedisRealtime, StreamConfig
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from . import push
+from . import push, receipt_queue
 from .api.routes import router
 from .config import Settings
 from .db import metadata
@@ -60,6 +60,14 @@ def create_app(
     if realtime is not None:
         push.set_publisher(realtime)  # type: ignore[arg-type]
 
+    # Receipts (S10): a configured broker arms the post-commit nudge. The
+    # import is deferred so test apps (and any deployment that never sets
+    # a broker) don't pay for celery/boto3 at startup.
+    if settings.celery_broker_url:  # pragma: no cover — live wiring
+        from .tasks import enqueue_receipt_chain
+
+        receipt_queue.set_queue(enqueue_receipt_chain)
+
     live_consumers = list(consumers) if consumers is not None else []
     if not live_consumers and settings.kafka_consumers == "on":  # pragma: no cover — live
         # Live wiring only: the loop, its aiokafka config, and the
@@ -104,6 +112,7 @@ def create_app(
                 await task
         await engine.dispose()
         push.reset_publisher()
+        receipt_queue.reset_queue()
         if own_realtime is not None:  # pragma: no cover — live wiring
             await own_realtime.aclose()
 

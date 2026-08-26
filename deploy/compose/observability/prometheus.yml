@@ -34,6 +34,12 @@ scrape_configs:
     static_configs: [{ targets: ["notification:8008"] }]
   - job_name: analytics
     static_configs: [{ targets: ["analytics:8009"] }]
+  # Celery workers (S10): no HTTP app, so each serves a bare exposition
+  # port — dns_sd for the same scale-out reason as order-worker.
+  - job_name: receipt-renderer
+    dns_sd_configs: [{ names: ["receipt-renderer"], type: A, port: 9109 }]
+  - job_name: receipt-sender
+    dns_sd_configs: [{ names: ["receipt-sender"], type: A, port: 9110 }]
   - job_name: edge-bff
     static_configs: [{ targets: ["edge-bff:8000"] }]
   - job_name: cadvisor            # container CPU/memory — the U in USE

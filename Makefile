@@ -24,8 +24,8 @@ up-m2: ## Inventory+Orders milestone working set (~6-7 GB): W1 set + temporal, m
 	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal mock-psp gateway identity catalog edge-bff inventory order order-worker payment
 	@echo "✔ m2 stack up — gateway :8080 · temporal-ui :8233 · mock-psp :9080"
 
-up-m3: ## Notifications milestone working set: the m2 set + notification
-	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal mock-psp gateway identity catalog edge-bff inventory order order-worker payment notification analytics
+up-m3: ## Notifications milestone working set: the m2 set + notification (+ receipts pipeline)
+	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal localstack mock-psp mock-mailer rabbitmq gateway identity catalog edge-bff inventory order order-worker payment notification receipt-renderer receipt-sender analytics
 	@# initdb scripts only run on FRESH volumes; converge existing ones so a
 	@# newly added service's database appears without `make nuke`. The script
 	@# is idempotent; a crash-looping service recovers on its next restart.
@@ -36,7 +36,7 @@ dlq-replay: ## Replay parked DLQ events after a fix: make dlq-replay TOPIC=c1.or
 	uv run --package smartfood-kafka python -m smartfood_kafka.replay $(TOPIC)
 
 up-obs: ## m3 set + Prometheus (:9090), Grafana (:3000), Jaeger (:16686), Alertmanager (:9093)
-	OTLP_ENDPOINT=http://jaeger:4318 $(COMPOSE) --profile core --profile apps --profile obs up -d --wait postgres redis kafka schema-registry temporal mock-psp gateway identity catalog edge-bff inventory order order-worker payment notification analytics prometheus grafana jaeger alertmanager cadvisor kafka-exporter loki promtail canary
+	OTLP_ENDPOINT=http://jaeger:4318 $(COMPOSE) --profile core --profile apps --profile obs up -d --wait postgres redis kafka schema-registry temporal localstack mock-psp mock-mailer rabbitmq gateway identity catalog edge-bff inventory order order-worker payment notification receipt-renderer receipt-sender analytics prometheus grafana jaeger alertmanager cadvisor kafka-exporter loki promtail canary
 	@# Same initdb convergence as up-m3: a newly added service's database
 	@# must appear without `make nuke`, whichever target brought the stack up.
 	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
@@ -76,7 +76,7 @@ cov: ## Unit tests + coverage report
 		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency --cov=smartfood_realtime \
 		--cov=identity --cov=edge_bff \
 		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification --cov=analytics \
-		--cov=mock_psp --cov=seed --cov=canary \
+		--cov=mock_psp --cov=mock_mailer --cov=seed --cov=canary \
 		--cov-fail-under=100 \
 		--cov-report=term-missing
 

@@ -26,10 +26,11 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from smartfood_kafka import EventType
 from smartfood_otel import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from . import push
+from . import push, receipt_queue
 from .adapters.repo import NotificationRepo, notification_id
 from .domain.mapping import (
     NOTIFYING_PAYMENT_EVENTS,
@@ -65,6 +66,7 @@ class InboxHandler:
             return  # silent payment fact — must not even touch the projection
         payload = json.loads(event["payload"])
         occurred_at = _aware(event["occurred_at"])
+        receipt_minted = False
         async with self._sessions() as session:
             repo = NotificationRepo(session)
             drafts: list[Draft]
@@ -74,6 +76,21 @@ class InboxHandler:
                 # event arrives first arms the payment join.
                 await repo.upsert_recipients(order_id, payload["user_id"], payload["restaurant_id"])
                 drafts = order_drafts(event_type, payload)
+                if event_type == EventType.ORDER_SETTLED:
+                    # The bell stays silent on settlement (mapping.py) — but
+                    # a receipt is owed the moment the money is captured, so
+                    # the claim check joins THIS transaction: row and inbox
+                    # commit together or not at all. Replays collide on the
+                    # PK (minted=False) and owe nothing.
+                    receipt_minted = await repo.insert_receipt(
+                        order_id=order_id,
+                        user_id=str(payload["user_id"]),
+                        restaurant_name=str(payload["restaurant_name"]),
+                        items=payload["items"],
+                        totals=payload["totals"],
+                        settled_at=occurred_at,
+                        created_at=datetime.now(UTC),
+                    )
             elif event.get("aggregate_type") == "payment":
                 order_id = str(event["aggregate_id"])
                 recipients = await repo.get_recipients(order_id)
@@ -111,3 +128,8 @@ class InboxHandler:
         # a refetch, and refetching twice shows the same truth.
         for recipient_type, recipient_id in {(d.recipient_type, d.recipient_id) for d in drafts}:
             await push.publish_hint(recipient_type, recipient_id)
+        # Same post-commit rule for the receipt nudge (S10): fresh row →
+        # one best-effort enqueue; failure is COUNTED and left to the beat
+        # sweeper, never allowed to fail the batch that carried the event.
+        if receipt_minted:
+            await receipt_queue.enqueue_receipt(order_id)

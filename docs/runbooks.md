@@ -161,3 +161,35 @@ check is failing OPEN — the limiter is off while it climbs.
 the edge; legitimate bursts (a launch, a demo) → raise the class budget in
 edge-bff config (`rate_limit_*_per_window`) — a restart-only change. Verify:
 the class's refusal rate returns to zero without the success rate dropping.
+
+## ReceiptsSweeperBusy
+
+**Signal**: `receipts_swept_total` moved — the beat sweeper found receipts past
+the grace window with no `delivery_log` row and re-enqueued their chains.
+
+**Meaning**: the DIRECT path failed for those orders: either the post-commit
+enqueue was dropped (check `receipt_enqueue_failures_total` on notification —
+nonzero means RabbitMQ was unreachable at settle time) or sends are stalling
+longer than the grace window (check receipt-sender logs for `Retry in …` and
+mock-mailer/provider health). The sweeper is the designed repair, so customers
+still get receipts — this alert is about WHY the repair keeps being needed.
+
+**Actions**: `docker logs smartfoodops-receipt-sender-1 | grep Retry` for the
+failure; RabbitMQ UI (:15672) for queue depth; if the broker was down, confirm
+it is back and the counter stops moving. Duplicate emails are possible during
+overlap windows and are the accepted trade (ADR-0025).
+
+## ReceiptParked
+
+**Signal**: `receipts_sent_total{outcome=~"rejected|no_recipient"}` moved —
+either the provider answered 4xx (`rejected`) or Identity has no such user
+for a settled order (`no_recipient`, a data bug worth investigating on its
+own). Both set `failed_at` on the receipt, pulling it out of the sweeper.
+Nothing automatic will retry it, on purpose: retrying a rejected request or
+a nonexistent user cannot change the answer.
+
+**Actions**: find it (`SELECT order_id, failed_at FROM receipts WHERE
+failed_at IS NOT NULL`), fix the cause (bad recipient mapping, oversized
+body), then clear the park — `UPDATE receipts SET failed_at = NULL WHERE
+order_id = …` — and the next sweep re-enqueues it. That UPDATE is the replay
+lever, the same shape as a DLQ replay.

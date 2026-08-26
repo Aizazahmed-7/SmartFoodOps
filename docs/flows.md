@@ -16,8 +16,10 @@ untagged: they are the return leg of the tagged call above them.
 | `[LOCAL]` | In-process function call | Same process, no network, no serialization. | Cannot fail independently. |
 | `[REDIS]` | Pub/sub hint on a channel | A **"look again" nudge** to whoever is listening right now — never a payload, never a record. Published post-commit, fire-and-forget. | Nothing blocks, nothing is stored: a lost hint costs seconds of staleness — the FE's poll floor still exists beneath every stream. |
 | `[SSE]` | Server-sent frames on a held connection | The browser's live wire: one long HTTP response streaming `event:`/`data:` frames. Auth is a single-use ticket (FR-38) because EventSource cannot send headers. | Connection death is NORMAL (jittered lifetime ends every stream on purpose); the client re-tickets and reopens, and falls back to polling meanwhile. |
+| `[AMQP]` | Celery task message over RabbitMQ | A **job**: "do this side effect, retry it on YOUR schedule until it sticks". Carries a task name and references (an order id, an S3 key) — never data, never bytes. Acked only after the task finishes (at-least-once), so every task body is idempotent. | The enqueue is a post-commit best-effort nudge; a dead broker is counted and swallowed, and the beat sweeper re-enqueues anything owed. Jobs already queued wait in RabbitMQ until a worker returns. |
+| `[S3]` | Object PUT/GET by key | Bytes at rest, addressed by a deterministic key (`receipts/{order_id}.pdf`). Everything else passes the KEY around — the claim-check rule: references ride brokers, bytes ride storage. | The task retries with backoff (S3 errors are in `autoretry_for`); a re-run overwrites the same key with the same bytes, so replays are free. |
 
-**The rule these tags reveal:** `[HTTP]` and `[TEMPORAL]` are on the critical path — a customer is waiting. `[KAFKA]` never is. `[DB]` only crosses a **process** boundary, never a **service** boundary. `[REDIS]` and `[SSE]` carry HINTS, never truth — every render still comes from a `[HTTP]`+`[DB]` read, which is what lets both fail freely.
+**The rule these tags reveal:** `[HTTP]` and `[TEMPORAL]` are on the critical path — a customer is waiting. `[KAFKA]` never is. `[DB]` only crosses a **process** boundary, never a **service** boundary. `[REDIS]` and `[SSE]` carry HINTS, never truth — every render still comes from a `[HTTP]`+`[DB]` read, which is what lets both fail freely. `[AMQP]` carries JOBS — the one transport whose consumer is *supposed* to act on the world, which is exactly why it is the only one with per-message retry schedules and why its facts (`delivery_log`) live in the DB, not the broker.
 
 ---
 
@@ -112,7 +114,7 @@ sequenceDiagram
         W->>DB: [DB] transition VALIDATED→PAYMENT_CLEARED, v1→2, no event.<br/>NOT a second round trip from the workflow — it is the tail of<br/>this activity: the instant money is held, a void is owed, so<br/>that fact is written before the activity is allowed to finish
     end
     W->>DB: [DB] confirm_order — a SEPARATE activity:<br/>PAYMENT_CLEARED→CONFIRMED, v2→3, plus event<br/>OrderConfirmed id = uuid5 of "order:ord_42:3:OrderConfirmed"
-    Note over W,DB: Why two, not one VALIDATED→CONFIRMED write:<br/>(1) PAYMENT_CLEARED is the only state meaning "money held, order not yet<br/>confirmed" — what the unwind reads to decide void AND release;<br/>(2) expected= makes each write a compare-and-swap, so a cancel landing<br/>between them fails confirm_order instead of overwriting the cancel;<br/>(3) retrying the confirmation must never re-call the PSP
+    Note over W,DB: Why two, not one VALIDATED→CONFIRMED write:<br/>(1) PAYMENT_CLEARED is the only state meaning "money held, order not yet<br/>confirmed" — what the unwind reads to decide void AND release —<br/>(2) expected= makes each write a compare-and-swap, so a cancel landing<br/>between them fails confirm_order instead of overwriting the cancel —<br/>(3) retrying the confirmation must never re-call the PSP
     Note over W: wait_condition — restaurant_decision signal<br/>OR cancel_requested OR 180s timer
     K->>W: [TEMPORAL] signal restaurant_decision accept
     W->>D: [TEMPORAL] start child dlv::ord_42, REQUEST_CANCEL policy —<br/>BEFORE mark_accepted, so ACCEPTED in DB implies child exists
@@ -287,7 +289,7 @@ sequenceDiagram
     W->>KF: [KAFKA] lifecycle events → c1.orders.events<br/>(the outbox poller's usual work, diagram 5)
     KF->>AC: [KAFKA] getmany — up to 500 events / 5s (FR-43)
     Note over AC: TWO loops, separate groups: browse backlog must never<br/>queue ahead of the order facts dashboards bill by
-    AC->>ADB: [DB] ONE transaction per batch:<br/>order_facts upsert per order_id — absolute values only<br/>(status, total_cents, one timestamp per milestone);<br/>menu_views INSERT..DO NOTHING on view_id
+    AC->>ADB: [DB] ONE transaction per batch:<br/>order_facts upsert per order_id — absolute values only<br/>(status, total_cents, one timestamp per milestone) —<br/>menu_views INSERT..DO NOTHING on view_id
     AC->>KF: [KAFKA] commit offsets — after the batch landed
     Note over AC,ADB: crash before commit → whole batch redelivers →<br/>same rows, same values. Idempotency is structural.
 
@@ -295,7 +297,7 @@ sequenceDiagram
     E->>A: [HTTP] GET /v1/restaurant/analytics — scoped by the CLAIM:<br/>no restaurant id in the path, cross-tenant is unaskable
     A->>ADB: [DB] the actual math, NOW: daily GROUP BY, lifetime totals,<br/>AOV (integer floor), rates, and the funnel —<br/>viewers with an order within 24h of a view (EXISTS join)
     A-->>E: window + totals + funnel (rates are null, not 0, on no data)
-    G->>ADB: [DB] business panels — SQL per refresh, via grafana_ro:<br/>SELECT-only by role; a dashboard may look, never touch
+    G->>ADB: [DB] business panels — SQL per refresh, via grafana_ro:<br/>SELECT-only by role — a dashboard may look, never touch
 ```
 
 **Scale note:** at real volume the read-time GROUP BYs materialize into
@@ -335,8 +337,8 @@ sequenceDiagram
     W->>R: [REDIS] PUBLISH sfo:track:ord_42 "ACCEPTED" — POST-commit:<br/>a hint must never describe a write that rolled back,<br/>and its failure must never undo one that landed
     R-->>O: [REDIS] the subscribed stream wakes
     O-->>FE: [SSE] event: status / data: ACCEPTED
-    FE->>E: [HTTP] GET /v1/orders/ord_42 — the hint triggers ONE refetch;<br/>the poll idles while the stream lives (its floor remains)
-    Note over O,FE: quiet stretches: ": hb" comments every 15s.<br/>At the jittered 15–30min lifetime: event: reconnect —<br/>the FE re-tickets and reopens; a fleet's reconnects<br/>spread instead of thundering (FR-36)
+    FE->>E: [HTTP] GET /v1/orders/ord_42 — the hint triggers ONE refetch —<br/>the poll idles while the stream lives (its floor remains)
+    Note over O,FE: quiet stretches: ": hb" comments every 15s.<br/>At the jittered 15–30min lifetime: event: reconnect —<br/>the FE re-tickets and reopens — a fleet's reconnects<br/>spread instead of thundering (FR-36)
 ```
 
 ---
@@ -368,10 +370,64 @@ sequenceDiagram
     N->>R: [REDIS] POST-COMMIT: one hint per DISTINCT recipient —<br/>PUBLISH sfo:notify:customer:usr_1 "customer"<br/>PUBLISH sfo:notify:restaurant:rst_9 "restaurant"
     R-->>N: [REDIS] the owner's subscribed stream wakes
     N-->>FE: [SSE] event: notify / data: restaurant
-    FE->>N: [HTTP] GET /v1/notifications — refetch; badge updates.<br/>data=restaurant ALSO invalidates the kitchen feed —<br/>the owner's queues went near-live for free.<br/>The 15s poll idles while streaming; any failure falls back
+    FE->>N: [HTTP] GET /v1/notifications — refetch — badge updates.<br/>data=restaurant ALSO invalidates the kitchen feed —<br/>the owner's queues went near-live for free.<br/>The 15s poll idles while streaming — any failure falls back
 ```
 
 ---
+
+## 10. Receipts — settle → render → send (S10, FR-41)
+
+The first TASK-QUEUE flow (ADR-0025): a settled order owes the customer a
+receipt — a rendered PDF, emailed. Kafka announces the fact; the claim
+check records the intent; RabbitMQ carries the JOB through two queues
+whose workers scale on different axes (CPU vs I/O); the delivery log makes
+at-least-once execution safe to embrace.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant W as order-worker
+    participant K as Kafka
+    participant N as notification (consumer)
+    participant DB as notification_db
+    participant Q as RabbitMQ
+    participant REN as receipt-renderer<br/>(queue receipts.render)
+    participant S3 as S3 (LocalStack)
+    participant SND as receipt-sender<br/>(queue receipts.send)
+    participant I as identity
+    participant M as mock-mailer
+
+    W->>K: [KAFKA] OrderSettled — full state:<br/>items, totals, names (outbox, as ever)
+    K-->>N: batch delivery (at-least-once)
+    N->>DB: [DB] INSERT receipts row — the CLAIM CHECK:<br/>everything the PDF needs, copied from the payload —<br/>ON CONFLICT DO NOTHING (replays mint nothing) —<br/>SAME transaction as the inbox writes, then COMMIT
+    N->>Q: [AMQP] POST-COMMIT nudge, best-effort:<br/>chain(render(ord_42), send(ord_42)) —<br/>only the order_id rides — failure is counted,<br/>never raised (the sweeper repairs it)
+    Q-->>REN: [AMQP] receipts.render (prefetch 1, ack AFTER the task)
+    REN->>DB: [DB] read the claim check
+    REN->>S3: [S3] PUT receipts/ord_42.pdf —<br/>deterministic key: a replay overwrites<br/>the same object with the same bytes
+    REN->>DB: [DB] record s3_key + rendered_at
+    REN-->>Q: [AMQP] ack — the chain hands the KEY<br/>(render's return value) to receipts.send
+    Q-->>SND: [AMQP] receipts.send
+    SND->>DB: [DB] delivery_log (ord_42, email) exists?<br/>YES → skip, done (the at-least-once absorber)
+    SND->>I: [HTTP] GET /v1/internal/users/usr_1 — resolve the<br/>CURRENT email at SEND time (events carry no PII) —<br/>system-authed, 404 → park (no_recipient), 5xx → retry
+    I-->>SND: {email} — never logged, never stored
+    SND->>M: [HTTP] POST /mailer/send {to, subject, body,<br/>attachment_key} — the reference, never the bytes
+    M-->>SND: 202 {message_id}<br/>(5xx → autoretry with backoff+jitter —<br/>4xx → PARK: failed_at set, no retries — poison)
+    SND->>DB: [DB] INSERT delivery_log — existence = sent
+    Note over Q,DB: BEAT (every 5m): sweep_unsent_receipts —<br/>receipts LEFT JOIN delivery_log, older than the<br/>grace window, not parked → re-enqueue the chain.<br/>A lost nudge costs one sweep interval, never the receipt.
+```
+
+Where the money-document guarantees live:
+
+| Failure | What absorbs it |
+| --- | --- |
+| OrderSettled redelivered | receipts PK conflict-ignored → `minted=False` → no second nudge |
+| Enqueue lost (broker down) | counted (`receipt_enqueue_failures_total`) + beat sweeper re-enqueues |
+| Worker killed mid-task | acks_late → RabbitMQ redelivers; render overwrites, send checks the log |
+| Mailer 5xx / unreachable | `MailerUnavailable` → autoretry, deterministic exponential backoff, max 8 |
+| Identity 5xx / unreachable | `ContactsUnavailable` → same autoretry — the lookup happens inside the retryable task on purpose |
+| Mailer 4xx (bad recipient) | `MailerRejected` → `failed_at` parks it OUT of the sweeper; clearing it is the replay lever |
+| Identity 404 (no such user) | `UnknownRecipient` → parked the same way (`no_recipient`) — a data bug a human must see |
+| Crash between send and record | the one residual: ONE duplicate email — chosen over claim-first, which turns the same crash into a receipt that never arrives |
 
 ## Reading these diagrams in a presentation
 

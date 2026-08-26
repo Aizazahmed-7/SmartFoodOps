@@ -115,18 +115,20 @@ Runs the order service natively on your host with hot reload against the compose
 
 ## 3. Compose profiles & port map
 
-Profiles: **core** (infra), **apps** (services), **ui** (consoles), **chores** (rabbitmq — parked until Celery lands), plus the planned **cdc** *(W3 — Debezium, deliberately split out at 1–1.5 GB)* and **obs** *(W3)*.
+Profiles: **core** (infra — rabbitmq joined in S10), **apps** (services), **ui** (consoles), plus **cdc** *(Debezium, deliberately split out at 1–1.5 GB)* and **obs**.
 
 | Profile | Component | Host port | Notes |
 |---|---|---|---|
 | core | postgres:15 | 5432 | One database per service, created by `initdb/` scripts |
 | core | redis:7 | 6380 | Host port (6379 squatted locally); in-network `redis:6379`. Single node; identical keys/TTLs/Lua as prod |
-| chores | rabbitmq:3-management | 5672 / 15672 | Future Celery broker — nothing speaks AMQP yet, so it sits outside `core` |
+| core | rabbitmq:3-management | 5672 / **15672** | Celery broker (S10 receipts). Management UI at :15672 (guest/guest) — watch the `receipts.render` / `receipts.send` queues live |
 | core | Kafka (KRaft, single broker) | **19092** | Dual listeners: `kafka:9092` in-network, `localhost:19092` from host — see §12 |
 | core | Confluent Schema Registry | **8086** (host) → 8081 (in-network) | host-remapped: another local project intermittently serves 8081 on this machine; services use `http://schema-registry:8081` unchanged |
 | core | Temporal dev server + UI | 7233 / 8233 | SQLite-persisted history (survives restarts) |
 | core | LocalStack (DynamoDB + Streams) | 4566 | |
 | core | mock-psp | 9080 | Failure-injection knobs, §9 |
+| core | mock-mailer | 9081 | Receipt emails land here: `GET /mailer/outbox`. Knobs: `FAIL_RATE`, `POST /admin/fail_next`, magic `*@bounce.invalid` |
+| apps | receipt-renderer / receipt-sender | 9109 / 9110 (in-network) | Celery workers (S10) — bare /metrics ports, scraped by Prometheus |
 | core | nginx gateway (emulates ALB path rules) | **8080** | The single client entrypoint |
 | cdc *(W3)* | Kafka Connect + Debezium | 8083 | Only needed for `OUTBOX_MODE=debezium` (§5) |
 | obs *(W3)* | otel-collector | 4317 | OTLP gRPC |
@@ -162,7 +164,7 @@ The full stack is ≈ 8–9 GB, so **slim mode is the default**, not the excepti
 | `make dev SVC=order` | Run one service **natively on the host**, `uvicorn --reload`, wired to compose infra | +~150 MB |
 | `make up-apps ONLY="payment inventory"` | Add just the containerized neighbors your flow needs | ~4 GB typical |
 | `make up-m2` | The W2 order-lifecycle set: core + temporal, mock-psp, identity, catalog, edge-bff, inventory, order, order-worker, payment (~6–7 GB) |
-| `make up-m3` | The `up-m2` set + notification |
+| `make up-m3` | The `up-m2` set + notification, analytics, and the receipts pipeline (rabbitmq, localstack S3, mock-mailer, receipt-renderer, receipt-sender) |
 | `make up-cdc` *(W3)* | Add the `cdc` profile (Kafka Connect + Debezium) — needed for `OUTBOX_MODE=debezium` (§5) | +1–1.5 GB |
 | `make up-obs` *(W3)* | Add the `obs` profile (otel-collector, Jaeger, Prometheus, Grafana) | — |
 | `make up-ui` | Add the `ui` profile (Redpanda Console) | — |

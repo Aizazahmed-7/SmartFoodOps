@@ -31,7 +31,7 @@ class Draft:
 NOTIFYING_PAYMENT_EVENTS = frozenset({EventType.REFUND_PROCESSED})
 
 
-def _money(cents: int, currency: str) -> str:
+def money(cents: int, currency: str) -> str:
     amount = f"{cents // 100}.{cents % 100:02d}"
     return f"${amount}" if currency == "USD" else f"{amount} {currency}"
 
@@ -65,7 +65,7 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
     if event_type == EventType.ORDER_CONFIRMED:
         count = len(payload["items"])
         items = f"{count} item" if count == 1 else f"{count} items"
-        total = _money(payload["totals"]["total_cents"], payload["totals"]["currency"])
+        total = money(payload["totals"]["total_cents"], payload["totals"]["currency"])
         return [
             Draft(
                 "restaurant",
@@ -118,7 +118,7 @@ def payment_drafts(event_type: str, payload: dict[str, Any], *, user_id: str) ->
     """Payment payloads have no user_id (keyed by order) — the caller joins
     it in via the order_recipients projection."""
     if event_type == EventType.REFUND_PROCESSED:
-        total = _money(payload["amount_cents"], payload["currency"])
+        total = money(payload["amount_cents"], payload["currency"])
         return [
             Draft(
                 "customer",

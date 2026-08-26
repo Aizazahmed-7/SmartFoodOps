@@ -36,5 +36,26 @@ class Settings(BaseSettings):
     stream_lifetime_min_seconds: float = 900.0
     stream_lifetime_max_seconds: float = 1800.0
 
+    # Receipts (S10): empty broker = the whole pipeline is disarmed — no
+    # Celery enqueue, no receipt rows minted. Compose arms it with
+    # amqp://guest:guest@rabbitmq:5672// (dev-fixture creds, the image's
+    # defaults). Same idiom as redis_url/otlp_endpoint above.
+    celery_broker_url: str = ""
+    mailer_base_url: str = "http://localhost:9081"
+    mailer_timeout_seconds: float = 5.0
+    # Recipient resolution at send time (adapters/contacts.py): events
+    # carry no PII, so the worker asks Identity for the CURRENT email.
+    identity_base_url: str = "http://localhost:8001"
+    contacts_timeout_seconds: float = 5.0
+    receipts_bucket: str = "sfo-receipts"
+    # Compose injects AWS_ENDPOINT_URL=http://localstack:4566 fleet-wide;
+    # empty means real AWS (boto3's default resolution).
+    aws_endpoint_url: str = ""
+    # The sweeper: how often beat re-enqueues owed-but-unsent receipts, and
+    # how old a row must be before it is "owed" (grace covers the window
+    # where the post-commit enqueue's chain is still legitimately in flight).
+    receipt_sweep_seconds: float = 300.0
+    receipt_sweep_grace_seconds: float = 120.0
+
     # Tests use sqlite + create_all; containers run Alembic migrations.
     create_all: bool = False

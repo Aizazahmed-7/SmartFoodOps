@@ -146,3 +146,32 @@ groups:
           summary: "{{ $labels.route_class }} traffic throttled at {{ $value | printf \"%.0f\" }}/min for 10m"
           runbook: docs/runbooks.md#ratelimitspike
           dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: ReceiptsSweeperBusy
+        # The sweeper only ever finds work when the normal path failed:
+        # a post-commit enqueue was lost (broker down at the wrong moment)
+        # or sends are stalling past the grace window. Self-healing either
+        # way — that is the sweeper's job — but repeated debt means the
+        # pipeline is limping and someone should ask why.
+        expr: increase(receipts_swept_total[15m]) > 0
+        for: 1m
+        labels: { severity: warn }
+        annotations:
+          summary: "the receipt sweeper re-enqueued {{ $value | printf \"%.0f\" }} owed receipt(s) in 15m — the direct path is losing work"
+          runbook: docs/runbooks.md#receiptssweeperbusy
+          dashboard: http://localhost:3000/d/smartfoodops-slo
+
+      - alert: ReceiptParked
+        # A permanent send failure parks the receipt (failed_at) OUT of
+        # every retry loop, sweeper included — by design, poison must not
+        # spin. Two flavors: the mailer refused (rejected) or identity has
+        # no such user (no_recipient). Either way a customer is owed a
+        # money document nothing automatic will deliver: a human clears
+        # failed_at after the fix, or the receipt never sends.
+        expr: increase(receipts_sent_total{outcome=~"rejected|no_recipient"}[1h]) > 0
+        for: 1m
+        labels: { severity: warn }
+        annotations:
+          summary: "a receipt was rejected by the mail provider and parked — it will NOT retry on its own"
+          runbook: docs/runbooks.md#receiptparked
+          dashboard: http://localhost:3000/d/smartfoodops-slo

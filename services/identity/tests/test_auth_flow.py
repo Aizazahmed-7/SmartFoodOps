@@ -336,3 +336,21 @@ def test_internal_address_read_for_placement(client):
         client.get(f"/v1/internal/users/{user_id}/addresses/{addr_id}", headers=headers).status_code
         == 403
     )
+
+
+def test_internal_contact_read_for_receipts(client):
+    """Notification resolves receipt recipients at send time: system-only,
+    narrow contract (id/email/full_name — never role or phone), unknown
+    user → 404, non-system caller → 403."""
+    from smartfood_auth import AuthContext
+
+    headers = _login_headers(client)
+    user_id = client.get("/v1/auth/me", headers=headers).json()["id"]
+
+    system = headers_for(AuthContext(sub="svc:notification-worker", role="system"))
+    r = client.get(f"/v1/internal/users/{user_id}", headers=system)
+    assert r.status_code == 200
+    assert r.json() == {"id": user_id, "email": REG["email"], "full_name": None}
+
+    assert client.get("/v1/internal/users/usr_ghost", headers=system).status_code == 404
+    assert client.get(f"/v1/internal/users/{user_id}", headers=headers).status_code == 403

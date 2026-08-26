@@ -1,7 +1,7 @@
 name: smartfoodops
 
-# Profiles: core (infra), apps (services), ui (consoles), chores (rabbitmq — parked until
-# Celery lands), obs (later), cdc (later — OUTBOX_MODE=poller is the dev default)
+# Profiles: core (infra — incl. rabbitmq since S10), apps (services), ui
+# (consoles), obs (later), cdc (later — OUTBOX_MODE=poller is the dev default)
 # Chaos/log knobs interpolate from the environment (defaults in .env.example) so
 # `make chaos` can raise them without editing this file.
 # Ports follow docs/local-dev.md exactly. Clients always enter via nginx on :8080.
@@ -37,6 +37,10 @@ x-app-base: &app-base
     PAYMENT_BASE_URL: http://payment:8007
     NOTIFICATION_BASE_URL: http://notification:8008
     MOCK_PSP_BASE_URL: http://mock-psp:9080
+    MAILER_BASE_URL: http://mock-mailer:9081
+    # Arms the receipts pipeline (S10) — only notification and its workers
+    # read this. guest/guest is the rabbitmq image's dev default.
+    CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
     IDENTITY_JWKS_URL: http://identity:8001/.well-known/jwks.json
   depends_on:
     postgres: { condition: service_healthy }
@@ -87,10 +91,10 @@ services:
     ports: ["6380:6379"]
     command: ["redis-server", "--maxmemory-policy", "volatile-ttl"]
 
-  # Parked in `chores` until Celery/notification lands — nothing speaks AMQP
-  # today, so it has no business costing RAM in every `make up`.
+  # Un-parked by S10: the receipts pipeline speaks AMQP (Celery broker).
+  # Management UI on :15672 (guest/guest — the image's dev defaults).
   rabbitmq:
-    profiles: [chores]
+    profiles: [core]
     image: rabbitmq:3-management
     ports: ["5672:5672", "15672:15672"]
 
@@ -147,7 +151,7 @@ services:
     image: localstack/localstack:3
     ports: ["4566:4566"]
     environment:
-      SERVICES: dynamodb
+      SERVICES: dynamodb,s3  # s3: receipt PDFs (S10) — receipts/{order_id}.pdf
     volumes:
       - localstack-data:/var/lib/localstack
 
@@ -174,6 +178,31 @@ services:
         "0.0.0.0",
         "--port",
         "9080",
+        "--reload",
+        "--no-access-log",
+      ]
+    depends_on: {}
+
+  mock-mailer:
+    <<: *app-base
+    profiles: [core]
+    ports: ["9081:9081"]
+    environment:
+      <<: *app-env
+      UV_PROJECT_ENVIRONMENT: /venvs/mock-mailer
+      FAIL_RATE: ${MAILER_FAIL_RATE:-0.0}
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "mock-mailer",
+        "uvicorn",
+        "mock_mailer.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9081",
         "--reload",
         "--no-access-log",
       ]
@@ -351,6 +380,80 @@ services:
         "8008",
         "--reload",
         "--no-access-log",
+      ]
+
+  # Receipts workers (S10): ONE process per QUEUE, so the CPU half and the
+  # I/O half scale (and log) independently — the queue split is the whole
+  # point. Both retry the broker on boot (broker_connection_retry_on_startup)
+  # rather than depending on rabbitmq cross-profile. Same venv as
+  # notification — the order/order-worker precedent.
+  #
+  # --pool threads, NOT prefork, in dev ON PURPOSE: prometheus counters
+  # incremented in forked children never reach the parent's /metrics
+  # server (per-process registries) — prefork here would export zeros
+  # forever. Threads keep tasks in the serving process, so the scraped
+  # numbers are true. Prod prefork needs PROMETHEUS_MULTIPROC_DIR.
+  receipt-renderer:
+    <<: *app-base
+    profiles: [apps]
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      UV_PROJECT_ENVIRONMENT: /venvs/notification
+      DATABASE_URL: postgresql+asyncpg://notification_svc:notification_svc@postgres:5432/notification_db
+      WORKER_METRICS_PORT: "9109"
+    # -B: exactly ONE beat in the fleet rides here (two beats = every sweep
+    # twice). The schedule file lives in /tmp so the repo mount stays clean.
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "notification",
+        "celery",
+        "-A",
+        "notification.tasks:celery_app",
+        "worker",
+        "-Q",
+        "receipts.render",
+        "--pool",
+        "threads",
+        "--concurrency",
+        "2",
+        "-B",
+        "-s",
+        "/tmp/celerybeat-schedule",
+        "--loglevel",
+        "INFO",
+      ]
+
+  receipt-sender:
+    <<: *app-base
+    profiles: [apps]
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      UV_PROJECT_ENVIRONMENT: /venvs/notification
+      DATABASE_URL: postgresql+asyncpg://notification_svc:notification_svc@postgres:5432/notification_db
+      WORKER_METRICS_PORT: "9110"
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "notification",
+        "celery",
+        "-A",
+        "notification.tasks:celery_app",
+        "worker",
+        "-Q",
+        "receipts.send",
+        "--pool",
+        "threads",
+        "--concurrency",
+        "8",
+        "--loglevel",
+        "INFO",
       ]
 
   analytics:
