@@ -17,6 +17,8 @@ untagged: they are the return leg of the tagged call above them.
 | `[REDIS]` | Pub/sub hint on a channel | A **"look again" nudge** to whoever is listening right now — never a payload, never a record. Published post-commit, fire-and-forget. | Nothing blocks, nothing is stored: a lost hint costs seconds of staleness — the FE's poll floor still exists beneath every stream. |
 | `[SSE]` | Server-sent frames on a held connection | The browser's live wire: one long HTTP response streaming `event:`/`data:` frames. Auth is a single-use ticket (FR-38) because EventSource cannot send headers. | Connection death is NORMAL (jittered lifetime ends every stream on purpose); the client re-tickets and reopens, and falls back to polling meanwhile. |
 | `[AMQP]` | Celery task message over RabbitMQ | A **job**: "do this side effect, retry it on YOUR schedule until it sticks". Carries a task name and references (an order id, an S3 key) — never data, never bytes. Acked only after the task finishes (at-least-once), so every task body is idempotent. | The enqueue is a post-commit best-effort nudge; a dead broker is counted and swallowed, and the beat sweeper re-enqueues anything owed. Jobs already queued wait in RabbitMQ until a worker returns. |
+| `[WS]` | Frames on a rider's WebSocket | The courier's two-way wire (ADR-0006): GPS pings UP (bound to the VERIFIED rider_id — a frame cannot speak for another rider), offers and revokes DOWN. JSON tonight; binary protobuf is the named encoding seam. | An accelerator, never the floor: every pushed fact is also pollable at `/v1/rider/me`, so a dead socket costs latency. GPS liveness is the 90s heartbeat TTL, not the connection. |
+| `[DDB]` | Conditional write on DynamoDB | ADR-0011's lock: "check capacity AND take the offer lock" is ONE atomic guarded UpdateItem — there is no read-then-write to race. A failed condition is an ANSWER (busy, expired, already picked up), never an error. | The lock authority is a single table — a DDB outage stalls NEW assignments (fail closed) while existing deliveries ride on. |
 | `[S3]` | Object PUT/GET by key | Bytes at rest, addressed by a deterministic key (`receipts/{order_id}.pdf`). Everything else passes the KEY around — the claim-check rule: references ride brokers, bytes ride storage. | The task retries with backoff (S3 errors are in `autoretry_for`); a re-run overwrites the same key with the same bytes, so replays are free. |
 
 **The rule these tags reveal:** `[HTTP]` and `[TEMPORAL]` are on the critical path — a customer is waiting. `[KAFKA]` never is. `[DB]` only crosses a **process** boundary, never a **service** boundary. `[REDIS]` and `[SSE]` carry HINTS, never truth — every render still comes from a `[HTTP]`+`[DB]` read, which is what lets both fail freely. `[AMQP]` carries JOBS — the one transport whose consumer is *supposed* to act on the world, which is exactly why it is the only one with per-message retry schedules and why its facts (`delivery_log`) live in the DB, not the broker.
@@ -428,6 +430,55 @@ Where the money-document guarantees live:
 | Mailer 4xx (bad recipient) | `MailerRejected` → `failed_at` parks it OUT of the sweeper; clearing it is the replay lever |
 | Identity 404 (no such user) | `UnknownRecipient` → parked the same way (`no_recipient`) — a data bug a human must see |
 | Crash between send and record | the one residual: ONE duplicate email — chosen over claim-first, which turns the same crash into a receipt that never arrives |
+
+## 11. Dispatch — the offer cascade (FR-27..32, ADR-0011/0026)
+
+The timer-courier is dead: a REAL rider (human on the game map, or
+rider-sim) carries the food. Temporal owns every clock; DynamoDB owns
+every lock; the gateway owns the sockets; and the REST floor under the
+push means nothing correctness-critical rides a connection.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as rider (map/sim)
+    participant G as rider-gateway
+    participant RD as Redis (geo, db2)
+    participant D as dispatch
+    participant DDB as DynamoDB
+    participant W as order-worker<br/>(DeliveryWorkflow dlv::ord_42)
+    participant O as order API
+
+    R->>G: [WS] connect — JWT in Sec-WebSocket-Protocol,<br/>verified at the GATEWAY (edge-class, ADR-0006)
+    R->>G: [WS] ping {lat,lon} at 1 Hz
+    G->>RD: [REDIS] GEOADD + latest-loc (TTL 30s) + heartbeat (TTL 90s) —<br/>attribution from CONNECTION state, never the frame
+    Note over W: kitchen's food_ready arrived — the cascade begins
+    W->>D: [HTTP] find_and_offer(ord_42, attempt 1, exclude []) —<br/>activity loads dropoff from the order row,<br/>pickup pin from catalog
+    D->>RD: [REDIS] GEOSEARCH 3 km — heartbeat-alive candidates,<br/>ranked by distance × acceptance
+    D->>DDB: [DDB] reserve: attribute_not_exists(offer_lock)<br/>AND size(active_deliveries) < cap AND online —<br/>THE double-assignment guard, one write
+    D->>RD: [REDIS] PUBLISH sfo:rider:r1 the offer frame
+    RD-->>G: the subscribed relay wakes
+    G-->>R: [WS] offer {order, restaurant, pickup, dropoff, 15s}
+    Note over R: countdown on screen — accept, or ghost it
+    R->>D: [HTTP] POST /v1/rider/offers/{id}/accept (via edge, rider JWT)
+    D->>DDB: [DDB] lock→assignment: REMOVE offer_lock,<br/>ADD active_deliveries — conditional on THIS offer
+    D->>O: [HTTP] internal courier event "accepted"
+    O->>W: [TEMPORAL] signal offer_accepted(offer_id, rider_id)
+    Note over W: 15s timer + accept RACED? expire's conditional release<br/>FAILS, reads ASSIGNED, answers already_assigned —<br/>the lost-signal self-heal. Miss instead → exclude rider,<br/>next candidate (12s), 3 misses widen 3→6 km — FR-29
+    W->>W: RECORD_RIDER stamps orders.rider_id —<br/>every event now carries the courier
+    R->>D: [HTTP] pickup tap (≤40 m) → [DDB] ASSIGNED→PICKED_UP<br/>guarded by rider — then courier event → signal
+    W->>W: MARK_PICKED_UP (the guarded transition, as ever)
+    Note over W: no pickup by deadline instead? conditional unassign —<br/>a completed pickup WINS (ADR-0011) — else strike,<br/>slot freed, cascade resumes. READY unassigned past<br/>10 min → child answers NO_RIDER → parent cancels<br/>through §7 with no_rider_available — FR-30/32
+    R->>D: [HTTP] deliver tap → [DDB] PICKED_UP→DELIVERED,<br/>slot freed → courier event → signal
+    W->>W: MARK_DELIVERED → parent captures + settles —<br/>and the S10 receipt pipeline fires off OrderSettled
+    D--)G: [KAFKA] dispatch.events (RiderAssigned, completed) —<br/>direct-produced COPIES — DDB stays the truth (ADR-0026)
+```
+
+Meanwhile the CUSTOMER's screen (OrderDetail) polls
+`GET /v1/deliveries/ord_42/courier` every 2 s — ownership in the lookup,
+position from the 30s latest-loc key — and draws the courier dot crossing
+the same toy city the rider is driving. Real coordinates, drawn world:
+GEOSEARCH, the radii and the map all share one geometry.
 
 ## Reading these diagrams in a presentation
 

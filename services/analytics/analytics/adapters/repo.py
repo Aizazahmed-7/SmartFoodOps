@@ -75,6 +75,11 @@ class AnalyticsRepo:
         }
         if event_type == "OrderCancelled":
             values["cancel_reason"] = payload.get("cancel_reason")
+        # Only a KNOWN courier updates the column: pre-assignment events
+        # carry null, and an out-of-order early event must never blank a
+        # later stamp (the delivered_at convergence rule, applied again).
+        if payload.get("rider_id"):
+            values["rider_id"] = payload["rider_id"]
 
         insert = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
         update_cols = {k: v for k, v in values.items() if k != "order_id"}

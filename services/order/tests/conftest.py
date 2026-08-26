@@ -69,6 +69,7 @@ class RecordingSaga:
         self.decisions: list[tuple[str, str]] = []
         self.food_ready: list[str] = []
         self.cancels: list[str] = []
+        self.courier_events: list[tuple[str, str, str, str | None]] = []
         self.fail_with: Exception | None = None
         self.fail_place: Exception | None = None
         self.fail_place_after_create: Exception | None = None
@@ -83,6 +84,7 @@ class RecordingSaga:
             sessions,
             None,  # type: ignore[arg-type] — placement touches no inventory
             None,  # type: ignore[arg-type] — nor payment
+            None,  # type: ignore[arg-type] — nor dispatch
         )
 
     async def place(self, placement):
@@ -116,6 +118,12 @@ class RecordingSaga:
     async def signal_cancel(self, order_id: str) -> None:
         self._maybe_fail()
         self.cancels.append(order_id)
+
+    async def signal_courier(
+        self, order_id: str, *, event: str, rider_id: str, offer_id: str | None
+    ) -> None:
+        self._maybe_fail()
+        self.courier_events.append((order_id, event, rider_id, offer_id))
 
     def _maybe_fail(self) -> None:
         if self.fail_with is not None:

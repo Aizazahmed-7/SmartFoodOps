@@ -142,9 +142,12 @@ Profiles: **core** (infra — rabbitmq joined in S10), **apps** (services), **ui
 | Service | Port | Service | Port | Service | Port |
 |---|---|---|---|---|---|
 | edge-bff | 8000 | inventory | 8005 | notification | 8008 |
-| identity | 8001 | order | 8006 | rider-gateway | 8010 |
-| catalog | 8002 | payment | 8007 | tracking-gateway | 8011 |
-| dispatch | 8009 | analytics | 8012 | | |
+| identity | 8001 | order | 8006 | analytics | 8009 |
+| catalog | 8002 | payment | 8007 | rider-gateway | 8010 |
+| dispatch | 8012 | | | | |
+
+(8011 stays reserved for a dedicated tracking-gateway if SSE ever leaves
+the order service; dispatch took 8012 — analytics claimed 8009 in W3.)
 
 Ports 8003 and 8004 are deliberately unused — the cart is client state (ADR-0017), and pricing is a library (`libs/smartfood-pricing`, ADR-0015) running inside the Order workers and the `/v1/quote` endpoint.
 
@@ -165,6 +168,7 @@ The full stack is ≈ 8–9 GB, so **slim mode is the default**, not the excepti
 | `make up-apps ONLY="payment inventory"` | Add just the containerized neighbors your flow needs | ~4 GB typical |
 | `make up-m2` | The W2 order-lifecycle set: core + temporal, mock-psp, identity, catalog, edge-bff, inventory, order, order-worker, payment (~6–7 GB) |
 | `make up-m3` | The `up-m2` set + notification, analytics, and the receipts pipeline (rabbitmq, localstack S3, mock-mailer, receipt-renderer, receipt-sender) |
+| `make up-m4` | The `up-m3` set + dispatch and rider-gateway (DynamoDB tables self-create on LocalStack); `make riders` starts simulated couriers |
 | `make up-cdc` *(W3)* | Add the `cdc` profile (Kafka Connect + Debezium) — needed for `OUTBOX_MODE=debezium` (§5) | +1–1.5 GB |
 | `make up-obs` *(W3)* | Add the `obs` profile (otel-collector, Jaeger, Prometheus, Grafana) | — |
 | `make up-ui` | Add the `ui` profile (Redpanda Console) | — |

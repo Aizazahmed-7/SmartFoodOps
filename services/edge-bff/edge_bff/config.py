@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     order_base_url: str = "http://localhost:8006"
     notification_base_url: str = "http://localhost:8008"
     analytics_base_url: str = "http://localhost:8009"
+    dispatch_base_url: str = "http://localhost:8012"
 
     identity_jwks_url: str = "http://localhost:8001/.well-known/jwks.json"
     token_issuer: str = "http://identity:8001"

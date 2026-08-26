@@ -68,8 +68,6 @@ def _place_saga(*, answer=None, raises=None):
         "unused:7233",
         task_queue="order-tq",
         accept_timeout_s=180,
-        pickup_delay_s=20,
-        dropoff_delay_s=30,
         await_seconds=2.0,
         client=FakeClient(),  # type: ignore[arg-type]
     )
@@ -183,8 +181,6 @@ def _attach_saga(*, answer=None, raises=None):
         "unused:7233",
         task_queue="order-tq",
         accept_timeout_s=180,
-        pickup_delay_s=20,
-        dropoff_delay_s=30,
         await_seconds=2.0,
         client=FakeClient(),  # type: ignore[arg-type]
     )
@@ -276,8 +272,6 @@ def _signal_saga(fail_with=None):
         "unused:7233",
         task_queue="order-tq",
         accept_timeout_s=180,
-        pickup_delay_s=20,
-        dropoff_delay_s=30,
         client=FakeClient(),  # type: ignore[arg-type]
     )
     return saga, signals
@@ -328,13 +322,7 @@ async def test_saga_signal_connect_failure_is_503_not_500(monkeypatch):
             raise _exc
 
         monkeypatch.setattr(temporal_client.Client, "connect", refuse)
-        saga = TemporalSaga(
-            "down:7233",
-            task_queue="order-tq",
-            accept_timeout_s=180,
-            pickup_delay_s=20,
-            dropoff_delay_s=30,
-        )
+        saga = TemporalSaga("down:7233", task_queue="order-tq", accept_timeout_s=180)
         with pytest.raises(SagaUnavailable):
             await saga.signal_decision("ord_1", "accept")
 
@@ -363,3 +351,17 @@ def test_injected_poller_lives_and_dies_with_the_app():
     with TestClient(app):
         pass
     assert poller.started and poller.cancelled
+
+
+async def test_saga_courier_signals_target_the_delivery_child():
+    """The three courier facts land on dlv::{order_id} under the pinned
+    signal names — with the offer id riding only the accept."""
+    saga, signals = _signal_saga()
+    await saga.signal_courier("ord_1", event="accepted", rider_id="r1", offer_id="off_1")
+    await saga.signal_courier("ord_1", event="picked_up", rider_id="r1", offer_id=None)
+    await saga.signal_courier("ord_1", event="delivered", rider_id="r1", offer_id=None)
+    assert signals == [
+        ("dlv::ord_1", "offer_accepted", ("off_1", "r1")),
+        ("dlv::ord_1", "courier_picked_up", ("r1",)),
+        ("dlv::ord_1", "courier_delivered", ("r1",)),
+    ]

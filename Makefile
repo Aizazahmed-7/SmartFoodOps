@@ -1,6 +1,6 @@
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: up up-apps up-ui up-lean up-m2 up-m3 up-full down nuke logs psql test cov dev seed demo chaos chaos-off fmt lint migrate
+.PHONY: up up-apps up-ui up-lean up-m2 up-m3 up-m4 riders up-full down nuke logs psql test cov dev seed demo chaos chaos-off fmt lint migrate
 
 up: ## Start core infrastructure (postgres, redis, kafka, temporal, localstack, mock-psp, gateway)
 	$(COMPOSE) --profile core up -d --wait
@@ -31,6 +31,11 @@ up-m3: ## Notifications milestone working set: the m2 set + notification (+ rece
 	@# is idempotent; a crash-looping service recovers on its next restart.
 	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
 	@echo "✔ m3 stack up — gateway :8080 · temporal-ui :8233 · notifications :8008 · analytics :8009"
+
+up-m4: ## Dispatch milestone working set: the m3 set + dispatch, rider-gateway
+	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal localstack mock-psp mock-mailer rabbitmq gateway identity catalog edge-bff inventory order order-worker payment notification receipt-renderer receipt-sender analytics dispatch rider-gateway
+	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
+	@echo "✔ m4 stack up — gateway :8080 · dispatch :8012 · rider-gateway :8010 · rabbitmq-ui :15672"
 
 dlq-replay: ## Replay parked DLQ events after a fix: make dlq-replay TOPIC=c1.orders.events.dlq
 	uv run --package smartfood-kafka python -m smartfood_kafka.replay $(TOPIC)
@@ -75,13 +80,16 @@ cov: ## Unit tests + coverage report
 		--cov=smartfood_api --cov=smartfood_auth --cov=smartfood_kafka --cov=smartfood_otel \
 		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency --cov=smartfood_realtime \
 		--cov=identity --cov=edge_bff \
-		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification --cov=analytics \
-		--cov=mock_psp --cov=mock_mailer --cov=seed --cov=canary \
+		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification --cov=analytics --cov=dispatch --cov=rider_gateway \
+		--cov=mock_psp --cov=mock_mailer --cov=seed --cov=canary --cov=rider_sim \
 		--cov-fail-under=100 \
 		--cov-report=term-missing
 
 seed:
 	uv run --package seed python -m seed.main
+
+riders: ## Simulated couriers against the live stack: make riders [RIDERS=2 ACCEPT_RATE=1.0]
+	uv run --package rider-sim python -m rider_sim.main
 
 demo:
 	./tools/demo/place-order.sh

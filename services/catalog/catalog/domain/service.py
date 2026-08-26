@@ -590,6 +590,10 @@ class CatalogService:
                     "cuisines": cuisines_by_restaurant[r.id],
                     "status": r.status,
                     "version": r.version,
+                    # The toy-city pins (dispatch milestone): the rider map
+                    # draws every restaurant from this one browse call.
+                    "lat": r.lat,
+                    "lon": r.lon,
                 }
                 for r in rows
             ],

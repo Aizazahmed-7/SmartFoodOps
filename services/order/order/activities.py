@@ -23,8 +23,13 @@ from temporalio.exceptions import ApplicationError
 from . import tracking
 from .adapters.repo import OrderRepo
 from .db import OrderStatus
-from .domain.ports import InventoryOpsPort, PaymentOpsPort, PaymentStateConflict
-from .domain.transitions import IllegalTransition, begin_cancel_from, transition
+from .domain.ports import DispatchPort, InventoryOpsPort, PaymentOpsPort, PaymentStateConflict
+from .domain.transitions import (
+    IllegalTransition,
+    begin_cancel_from,
+    record_rider,
+    transition,
+)
 from .metrics import SAGA_OUTCOMES
 from .values import (
     ActivityName,
@@ -47,10 +52,12 @@ class OrderActivities:
         sessions: async_sessionmaker[AsyncSession],
         inventory: InventoryOpsPort,
         payment: PaymentOpsPort,
+        dispatch: DispatchPort,
     ):
         self._sessions = sessions
         self._inventory = inventory
         self._payment = payment
+        self._dispatch = dispatch
 
     # ── the forward path ───────────────────────────────────────────
 
@@ -214,6 +221,62 @@ class OrderActivities:
         )
         SAGA_OUTCOMES.labels(outcome="settled", reason="").inc()
 
+    # ── dispatch (the cascade's steps, S-dispatch) ─────────────────
+
+    @activity.defn(name=ActivityName.FIND_AND_OFFER)
+    async def find_and_offer(self, order_id: str, attempt: int, exclude: list[str]) -> dict:
+        """One cascade step. The workflow sends only ids and counters; THIS
+        is where the world's data joins — the order row (dropoff address,
+        names) is read here because the worker owns order_db, and the
+        pickup pin comes from catalog inside the client. Idempotent by
+        dispatch's own guards: a retried offer for a locked rider simply
+        falls through to the next candidate."""
+        async with self._sessions() as session:
+            row = await OrderRepo(session).get_order_any(order_id)
+        assert row is not None  # the workflow that created it is calling
+        address = row.delivery_address_snapshot or {}
+        lat, lon = address.get("lat"), address.get("lon")
+        if lat is None or lon is None:
+            # Pre-toy-city rows (no coords) limp to the city center rather
+            # than wedging the cascade — mirrors the pickup-pin fallback.
+            from .adapters.dispatch_client import FALLBACK_PICKUP
+
+            lat, lon = FALLBACK_PICKUP
+        return await self._dispatch.find_and_offer(
+            order_id,
+            user_id=row.user_id,
+            restaurant_id=row.restaurant_id,
+            restaurant_name=row.restaurant_name_snapshot,
+            dropoff=(float(lat), float(lon)),
+            attempt=attempt,
+            exclude=exclude,
+        )
+
+    @activity.defn(name=ActivityName.EXPIRE_OFFER)
+    async def expire_offer(self, order_id: str, offer_id: str, rider_id: str) -> dict:
+        """The cascade timer fired. Dispatch answers revoked, or
+        already_assigned — the lost-accept-signal self-heal."""
+        return await self._dispatch.expire_offer(order_id, offer_id=offer_id, rider_id=rider_id)
+
+    @activity.defn(name=ActivityName.UNASSIGN_STALLED)
+    async def unassign_stalled(self, order_id: str, rider_id: str) -> dict:
+        """FR-30's pickup deadline. Conditional on the rider still owning
+        an un-picked-up job — a completed pickup wins (ADR-0011)."""
+        return await self._dispatch.unassign_stalled(order_id, rider_id=rider_id)
+
+    @activity.defn(name=ActivityName.CANCEL_DISPATCH)
+    async def cancel_dispatch(self, order_id: str) -> dict:
+        """The order died while dispatch held something — free it. Runs in
+        the child's cancellation cleanup and the no-rider unwind; replays
+        converge (a cancelled delivery answers kept/cancelled alike)."""
+        return await self._dispatch.cancel(order_id)
+
+    @activity.defn(name=ActivityName.RECORD_RIDER)
+    async def record_rider(self, order_id: str, rider_id: str) -> None:
+        """Stamp the courier onto the order row: every full-state event
+        from here on carries rider_id (analytics' per-rider spans)."""
+        await record_rider(self._sessions, order_id, rider_id)
+
     # ── the unwind (§7 compensation table) ─────────────────────────
 
     @activity.defn(name=ActivityName.BEGIN_CANCEL)
@@ -298,4 +361,9 @@ class OrderActivities:
             self.void_authorization,
             self.release_reservation,
             self.finish_cancel,
+            self.find_and_offer,
+            self.expire_offer,
+            self.unassign_stalled,
+            self.cancel_dispatch,
+            self.record_rider,
         ]

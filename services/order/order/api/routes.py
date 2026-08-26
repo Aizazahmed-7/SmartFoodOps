@@ -5,13 +5,13 @@ idempotency outcomes mapped onto the api-standards code catalog. No
 business logic lives here."""
 
 import time
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
 from smartfood_api import ApiError, ErrorCode, StrictModel
-from smartfood_auth import AuthContext, Role, require_role
+from smartfood_auth import AuthContext, Role, require_role, require_system
 from smartfood_idempotency import body_hash  # the canonical sha256 — payment shares it
 from smartfood_pricing import (
     InvalidSelection,
@@ -27,6 +27,7 @@ from ..domain.ports import (
     AddressUnavailable,
     PlacementPending,
     RestaurantNotFound,
+    SagaGone,
     SagaUnavailable,
     SnapshotUnavailable,
 )
@@ -51,6 +52,7 @@ router = APIRouter()
 # gate — found live when a demo owner got 403'd on /v1/quote). Riders stay
 # excluded until rider flows exist.
 Purchaser = Annotated[AuthContext, Depends(require_role(Role.CUSTOMER, Role.RESTAURANT_ADMIN))]
+SystemOnly = Annotated[AuthContext, Depends(require_system())]
 
 
 def _svc(request: Request) -> OrderService:
@@ -294,3 +296,41 @@ async def list_orders(
             422,
             details=[{"field": "cursor", "issue": "not a valid cursor"}],
         ) from None
+
+
+# ── internal (never in the edge allowlist — unreachable from outside) ──
+
+
+class CourierIn(StrictModel):
+    """Dispatch's courier facts, bound for dlv::{order_id}. Dispatch never
+    touches Temporal (the kitchen precedent): its DDB conversion happened
+    FIRST, this call raises the signal — and if it is lost, the workflow's
+    own expire/revoke reads reconcile against DDB's truth."""
+
+    event: Literal["accepted", "picked_up", "delivered"]
+    rider_id: str = Field(max_length=64)
+    offer_id: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/v1/internal/orders/{order_id}/courier", status_code=202)
+async def courier_event(
+    order_id: str, body: CourierIn, ctx: SystemOnly, request: Request
+) -> dict[str, str]:
+    if body.event == "accepted" and body.offer_id is None:
+        raise ApiError(ErrorCode.VALIDATION_FAILED, "accepted requires offer_id", 422)
+    try:
+        await request.app.state.saga.signal_courier(
+            order_id, event=body.event, rider_id=body.rider_id, offer_id=body.offer_id
+        )
+    except SagaGone:
+        # The delivery already reached a terminal state — dispatch logs
+        # and moves on; nothing here to heal.
+        raise ApiError(ErrorCode.NOT_FOUND, "no live delivery for this order", 404) from None
+    except SagaUnavailable:
+        raise ApiError(
+            ErrorCode.DEPENDENCY_UNAVAILABLE,
+            "saga unavailable",
+            503,
+            headers={"Retry-After": "1"},
+        ) from None
+    return {"status": "signalled"}

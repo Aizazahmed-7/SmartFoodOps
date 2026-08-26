@@ -120,6 +120,45 @@ class SagaPort(Protocol):
         Same exceptions; the workflow referees whether it is honored."""
         ...
 
+    async def signal_courier(
+        self, order_id: str, *, event: str, rider_id: str, offer_id: str | None
+    ) -> None:
+        """Dispatch's courier facts → dlv::{order_id}. Raises SagaGone
+        (delivery already terminal) or SagaUnavailable."""
+        ...
+
+
+class DispatchUnavailable(Exception):
+    """Dispatch unreachable after retries. Raised (not valued) on purpose:
+    Temporal's retry policy owns transient trouble, and the cascade's
+    deadline bounds how long it may keep trying."""
+
+
+class DispatchPort(Protocol):
+    """The cascade's world-touching steps (worker activities). Every method
+    returns dispatch's OUTCOME DICT verbatim — the workflow branches on
+    outcome values, never on exceptions."""
+
+    async def find_and_offer(
+        self,
+        order_id: str,
+        *,
+        user_id: str,
+        restaurant_id: str,
+        restaurant_name: str,
+        dropoff: tuple[float, float],
+        attempt: int,
+        exclude: list[str],
+    ) -> dict[str, Any]: ...
+
+    async def expire_offer(
+        self, order_id: str, *, offer_id: str, rider_id: str
+    ) -> dict[str, Any]: ...
+
+    async def unassign_stalled(self, order_id: str, *, rider_id: str) -> dict[str, Any]: ...
+
+    async def cancel(self, order_id: str) -> dict[str, Any]: ...
+
 
 class InventoryOpsPort(Protocol):
     """The saga's stock operations (worker activities). Structural, so

@@ -12,6 +12,7 @@ import type {
   Address,
   BrowseResult,
   CancelResult,
+  CourierView,
   DecisionResult,
   Feed,
   Menu,
@@ -24,6 +25,7 @@ import type {
   Profile,
   Quote,
   RestaurantCard,
+  RiderMe,
   SearchResult,
   StockRow,
   TokenPair,
@@ -311,6 +313,20 @@ export const setCapacity = (rid: string, capacity: number) =>
 /** S9: a 60s single-use ticket for the bell stream — the caller's own
  * identity is the channel; there is nothing else to name. 503 = push off;
  * the 15s poll carries on. */
+// ── dispatch: the rider surface + the courier dot ──────────────────
+
+export const setRiderStatus = (online: boolean, position?: { lat: number; lon: number }) =>
+  request<{ status: string }>("POST", "/v1/rider/status", { online, ...(position ?? {}) });
+export const getRiderMe = () => request<RiderMe>("GET", "/v1/rider/me");
+export const acceptRiderOffer = (offerId: string, orderId: string) =>
+  request<{ status: string }>("POST", `/v1/rider/offers/${offerId}/accept`, {
+    order_id: orderId,
+  });
+export const tapDelivery = (orderId: string, action: "pickup" | "deliver") =>
+  request<{ status: string }>("POST", `/v1/rider/deliveries/${orderId}/${action}`);
+export const getCourier = (orderId: string) =>
+  request<CourierView>("GET", `/v1/deliveries/${orderId}/courier`);
+
 export const getNotifyTicket = () =>
   request<{ ticket: string; expires_in: number; stream: string }>(
     "POST", "/v1/notifications/ticket",

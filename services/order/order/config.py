@@ -30,8 +30,13 @@ class Settings(BaseSettings):
     # reaper releasing stock out from under a still-retrying saga is the
     # interaction this bound exists to prevent. Compensations are unbounded.
     forward_deadline_s: int = 300
-    pickup_delay_s: int = 20  # S6's simulated delivery timers
-    dropoff_delay_s: int = 30
+    # Dispatch (the real courier — the S6 timer knobs died with it).
+    dispatch_base_url: str = "http://localhost:8012"
+    offer_first_timeout_s: float = 15.0  # FR-29's cascade windows
+    offer_next_timeout_s: float = 12.0
+    no_rider_deadline_s: float = 600.0  # FR-32: READY-unassigned → cancel
+    no_candidates_retry_s: float = 10.0
+    pickup_timeout_s: float = 300.0  # FR-30: ASSIGNED w/o pickup → revoke
 
     # Money knobs for smartfood-pricing (integer cents / basis points).
     delivery_fee_cents: int = 199

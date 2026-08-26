@@ -36,6 +36,7 @@ budget, because the workflow no longer reads back what it was told.)
 import asyncio
 from contextlib import suppress
 from datetime import timedelta
+from typing import Any, cast
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -44,6 +45,10 @@ from temporalio.workflow import ParentClosePolicy
 
 with workflow.unsafe.imports_passed_through():
     from order.values import (
+        SIGNAL_COURIER_DELIVERED,
+        SIGNAL_COURIER_PICKED_UP,
+        SIGNAL_FOOD_READY,
+        SIGNAL_OFFER_ACCEPTED,
         UPDATE_AWAIT_PLACEMENT,
         ActivityName,
         CancelReason,
@@ -210,8 +215,11 @@ class OrderWorkflow:
                 DeliveryWorkflow.run,
                 DeliveryInput(
                     order_id=order_id,
-                    pickup_delay_s=input.pickup_delay_s,
-                    dropoff_delay_s=input.dropoff_delay_s,
+                    offer_first_timeout_s=input.offer_first_timeout_s,
+                    offer_next_timeout_s=input.offer_next_timeout_s,
+                    no_rider_deadline_s=input.no_rider_deadline_s,
+                    no_candidates_retry_s=input.no_candidates_retry_s,
+                    pickup_timeout_s=input.pickup_timeout_s,
                 ),
                 id=f"dlv::{order_id}",
                 parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
@@ -272,7 +280,24 @@ class OrderWorkflow:
                     return False
                 # too_late: the courier already holds the food — the cancel
                 # loses and the order rides to delivery like any other.
-            await child  # delivered — or surface the child's real failure
+            outcome = await child  # or surface the child's real failure
+            if outcome == "NO_RIDER":
+                # FR-32: READY, cooked, and nobody came inside the deadline.
+                # Set-guarded like the customer's kitchen-window cancel — the
+                # DB referees the (near-impossible) race where a pickup
+                # landed as the deadline fired; too_late = ride to delivery.
+                verdict = await self._step(
+                    ActivityName.TRY_BEGIN_CANCEL, order_id, CancelReason.NO_RIDER_AVAILABLE
+                )
+                if verdict == "ok":
+                    await self._step(ActivityName.CANCEL_DISPATCH, order_id)
+                    await self._unwind(
+                        order_id,
+                        reason=CancelReason.NO_RIDER_AVAILABLE,
+                        void=True,
+                        release=True,
+                    )
+                    return False
             return True
         finally:
             cancel_wakeup.cancel()
@@ -347,31 +372,140 @@ class OrderWorkflow:
 
 @workflow.defn(name="DeliveryWorkflow")
 class DeliveryWorkflow:
-    """The simulated courier (child of OrderWorkflow, id dlv::{order_id}).
+    """The delivery, driven by a REAL courier (child of OrderWorkflow,
+    id dlv::{order_id}) — the dispatch milestone's replacement for the
+    S6 timer-courier, exactly as that version's docstring promised: the
+    id and the kitchen's food_ready signal are unchanged.
 
-    Waits for the kitchen's food_ready signal — an UNBOUNDED durable wait:
-    kitchens take as long as they take, and a parked workflow costs nothing
-    (a kitchen-SLA timeout is W3 hardening, alongside the reservation-TTL
-    interplay it would close). Then two timers stand in for the drive:
-    pickup → PICKED_UP, dropoff → DELIVERED. Real dispatch replaces the
-    timers next milestone; the id and signal names are the stable contract.
-    """
+    Shape: wait for the kitchen → the OFFER CASCADE (find_and_offer
+    activity reserves a rider via dispatch's DDB lock; a 15s/12s window
+    waits for the accept SIGNAL; a miss revokes and moves on, FR-29) →
+    RECORD_RIDER → the FR-30 pickup deadline (no pickup in time =
+    conditional revoke + back to the cascade) → the courier's pickup and
+    delivery signals drive the marks. The READY-unassigned deadline
+    (FR-32) ends the cascade with "NO_RIDER" and the PARENT cancels
+    through the normal compensation path.
+
+    Signals arrive from dispatch via order's internal courier endpoint
+    (dispatch never touches Temporal). Every signal is a flag or an
+    idempotent map write — duplicates and late arrivals collapse. The
+    post-pickup wait is UNBOUNDED on purpose (FR-32: once the food is
+    with the rider, never auto-cancel; the delivery_at_risk ops queue is
+    the named deferral).
+
+    On cancellation (customer cancel, parent unwind) the cleanup frees
+    whatever dispatch holds — a cancelled order must never strand a
+    locked or assigned rider.
+
+    Action budget: each cascade attempt costs ≤2 activities + 1 timer;
+    the deadline (600s) over the offer windows (12–15s) bounds attempts
+    far below Temporal's per-workflow limits, and the no-candidates
+    breather (10s) bounds the empty-city spin the same way."""
 
     def __init__(self) -> None:
         self._food_ready = False
+        self._accepted: dict[str, str] = {}  # offer_id → rider_id
+        # Rider-SCOPED on purpose: after a pickup-timeout revoke, a ghost
+        # rider's late signals must never advance the NEW courier's
+        # delivery — each wait below checks the current rider's own set.
+        self._picked_up: set[str] = set()
+        self._delivered: set[str] = set()
 
-    @workflow.signal(name="food_ready")
+    @workflow.signal(name=SIGNAL_FOOD_READY)
     def food_ready(self) -> None:
         self._food_ready = True  # duplicates collapse into the same truth
 
+    @workflow.signal(name=SIGNAL_OFFER_ACCEPTED)
+    def offer_accepted(self, offer_id: str, rider_id: str) -> None:
+        self._accepted[offer_id] = rider_id
+
+    @workflow.signal(name=SIGNAL_COURIER_PICKED_UP)
+    def courier_picked_up(self, rider_id: str) -> None:
+        self._picked_up.add(rider_id)
+
+    @workflow.signal(name=SIGNAL_COURIER_DELIVERED)
+    def courier_delivered(self, rider_id: str) -> None:
+        self._delivered.add(rider_id)
+
     @workflow.run
     async def run(self, input: DeliveryInput) -> str:
-        await workflow.wait_condition(lambda: self._food_ready)
-        await workflow.sleep(timedelta(seconds=input.pickup_delay_s))
-        await self._step(ActivityName.MARK_PICKED_UP, input.order_id)
-        await workflow.sleep(timedelta(seconds=input.dropoff_delay_s))
-        await self._step(ActivityName.MARK_DELIVERED, input.order_id)
-        return "DELIVERED"
+        order_id = input.order_id
+        try:
+            await workflow.wait_condition(lambda: self._food_ready)
+            rider = await self._assign(input)
+            if rider is None:
+                return "NO_RIDER"  # the parent cancels through §7
+            await self._step(ActivityName.MARK_PICKED_UP, order_id)
+            await workflow.wait_condition(lambda: rider in self._delivered)
+            await self._step(ActivityName.MARK_DELIVERED, order_id)
+            return "DELIVERED"
+        except asyncio.CancelledError:
+            # Freed BEFORE propagating: the order is dying, and dispatch
+            # may hold a lock or an assignment a rider is staring at.
+            with suppress(Exception):
+                await self._step(ActivityName.CANCEL_DISPATCH, order_id)
+            raise
+
+    async def _assign(self, input: DeliveryInput) -> str | None:
+        """The cascade + the pickup-liveness loop. A rider who accepts but
+        never picks up is revoked and the cascade resumes without them —
+        the SAME deadline governs throughout, so a parade of ghosts still
+        ends in NO_RIDER rather than forever."""
+        deadline = workflow.now() + timedelta(seconds=input.no_rider_deadline_s)
+        exclude: list[str] = []
+        attempt = 0
+        while True:
+            rider: str | None = None
+            while rider is None:
+                if workflow.now() >= deadline:
+                    return None
+                attempt += 1
+                offer = await self._step_dict(
+                    ActivityName.FIND_AND_OFFER, input.order_id, attempt, exclude
+                )
+                if offer["outcome"] != "offered":
+                    await workflow.sleep(timedelta(seconds=input.no_candidates_retry_s))
+                    # A city emptied BY OUR OWN exclusions gets a fresh
+                    # round: a rider who missed one window is not a ghost
+                    # forever (found live: a one-courier town deadlocked
+                    # after a single missed offer). The deadline still
+                    # bounds the whole affair.
+                    exclude.clear()
+                    continue
+                offer_id, candidate = str(offer["offer_id"]), str(offer["rider_id"])
+                window = input.offer_first_timeout_s if attempt == 1 else input.offer_next_timeout_s
+                try:
+                    await workflow.wait_condition(
+                        lambda oid=offer_id: oid in self._accepted,
+                        timeout=timedelta(seconds=window),
+                    )
+                    rider = self._accepted[offer_id]
+                except TimeoutError:
+                    expired = await self._step_dict(
+                        ActivityName.EXPIRE_OFFER, input.order_id, offer_id, candidate
+                    )
+                    if expired["outcome"] == "already_assigned":
+                        # The accept beat the revoke inside DDB but its
+                        # signal lost the race (or the wire) — the revoke's
+                        # read IS the recovery. Nothing is retried, nothing
+                        # is lost.
+                        rider = str(expired["rider_id"])
+                    else:
+                        exclude.append(candidate)
+            await self._step(ActivityName.RECORD_RIDER, input.order_id, rider)
+            try:
+                await workflow.wait_condition(
+                    lambda current=rider: current in self._picked_up,
+                    timeout=timedelta(seconds=input.pickup_timeout_s),
+                )
+                return rider
+            except TimeoutError:
+                revoked = await self._step_dict(
+                    ActivityName.UNASSIGN_STALLED, input.order_id, rider
+                )
+                if revoked["outcome"] == "already_picked_up":
+                    return rider  # the scan beat the deadline — ride on
+                exclude.append(rider)  # strike: back to the cascade
 
     async def _step(self, name: str, *args: object) -> object:
         return await workflow.execute_activity(
@@ -380,3 +514,8 @@ class DeliveryWorkflow:
             start_to_close_timeout=STEP_TIMEOUT,
             retry_policy=RETRY,
         )
+
+    async def _step_dict(self, name: str, *args: object) -> dict[str, Any]:
+        """The dispatch activities answer OUTCOME DICTS (their port's
+        contract) — one typed doorway instead of six casts."""
+        return cast("dict[str, Any]", await self._step(name, *args))

@@ -18,8 +18,31 @@ import os
 from typing import Any, cast
 
 import httpx
+from smartfood_auth import internal_headers
 
 PASSWORD = "demo1234demo"  # every demo login, per docs/local-dev.md
+
+# ── the toy city (dispatch milestone) ──────────────────────────────
+# REAL lat/lon over a DRAWN map: every restaurant and address gets a fixed
+# coordinate inside a small bounding box per city, so Redis GEOSEARCH, the
+# 3 km offer radius and haversine ETAs all run on genuine geography — while
+# the frontend renders the box as its own 2D game map. Fake world, real math.
+CITY_BOXES: dict[str, tuple[float, float, float, float]] = {
+    # (south lat, west lon, north lat, east lon) — ~4.4 km × ~3.4 km
+    "springfield": (39.780, -89.670, 39.820, -89.630),
+    "shelbyville": (39.860, -89.670, 39.900, -89.630),
+}
+
+
+def city_coords(city: str, index: int) -> tuple[float, float]:
+    """Deterministic spread: a 4-wide grid inset from the box edges, so
+    ten restaurants land in distinct, stable, demo-legible spots."""
+    south, west, north, east = CITY_BOXES[city]
+    col, row = index % 4, index // 4
+    lat = south + (north - south) * (0.18 + 0.28 * row)
+    lon = west + (east - west) * (0.14 + 0.24 * col)
+    return round(lat, 6), round(lon, 6)
+
 
 # STRICT stock (Inventory, W2): items are born at 0 and cannot sell until
 # stocked. Seed stocks every item so demo orders can actually validate.
@@ -547,9 +570,12 @@ def _slug(name: str) -> str:
     return name.lower().replace(" ", "-")
 
 
-async def _seed_restaurant(client: httpx.AsyncClient, template: dict[str, Any]) -> bool:
+async def _seed_restaurant(
+    client: httpx.AsyncClient, template: dict[str, Any], position: tuple[float, float]
+) -> bool:
     """Returns True if created, False if it already existed (replay)."""
     city = template["city"]
+    lat, lon = position
     # .local is a special-use TLD the email validator rejects — .dev is real.
     email = f"owner-{city}-{_slug(template['name'])}@demo.smartfood.dev"
     await client.post(
@@ -563,7 +589,13 @@ async def _seed_restaurant(client: httpx.AsyncClient, template: dict[str, Any]) 
 
     onboarded = await client.post(
         "/v1/restaurants",
-        json={"name": template["name"], "city": city, "cuisines": template["cuisines"]},
+        json={
+            "name": template["name"],
+            "city": city,
+            "cuisines": template["cuisines"],
+            "lat": lat,
+            "lon": lon,
+        },
         headers=bearer,
     )
     restaurant = _expect(onboarded, 200, 201)
@@ -575,6 +607,19 @@ async def _seed_restaurant(client: httpx.AsyncClient, template: dict[str, Any]) 
         200,
     )
     admin = {"Authorization": f"Bearer {fresh['access_token']}"}
+
+    if restaurant.get("lat") is None:  # pragma: no cover — legacy-volume upgrade,
+        # exercised by the live seed against a pre-dispatch volume (the test
+        # world is always born WITH coordinates).
+        # Pre-dispatch rows were seeded before the city had coordinates —
+        # backfill exactly once (an admin-moved pin is never overwritten,
+        # because a present lat is left alone).
+        _expect(
+            await client.patch(
+                f"/v1/restaurants/{restaurant_id}", json={"lat": lat, "lon": lon}, headers=admin
+            ),
+            200,
+        )
 
     menu = _expect(await client.get(f"/v1/menus/{restaurant_id}"), 200)
     if menu["categories"]:
@@ -658,7 +703,20 @@ async def _ensure_stock(
 
 
 DEMO_CUSTOMER = "customer@demo.smartfood.dev"
-DEMO_ADDRESS = {"label": "home", "line1": "12 Mango St", "city": "springfield"}
+# Home sits mid-box, a couple of blocks off the restaurant grid — every
+# demo delivery has a real, visible drive.
+DEMO_ADDRESS = {
+    "label": "home",
+    "line1": "12 Mango St",
+    "city": "springfield",
+    "lat": 39.8025,
+    "lon": -89.6478,
+}
+
+# The demo couriers (dispatch milestone). Registered like any customer,
+# then promoted through identity's internal grant — the same two-step a
+# future self-serve rider onboarding would use.
+DEMO_RIDERS = [f"rider{i}@demo.smartfood.dev" for i in (1, 2, 3)]
 
 
 async def _seed_customer(client: httpx.AsyncClient) -> bool:
@@ -677,28 +735,68 @@ async def _seed_customer(client: httpx.AsyncClient) -> bool:
     addresses = cast(
         "list[dict[str, Any]]", _expect(await client.get("/v1/me/addresses", headers=bearer), 200)
     )
-    if any(a["label"] == DEMO_ADDRESS["label"] for a in addresses):
+    home = next((a for a in addresses if a["label"] == DEMO_ADDRESS["label"]), None)
+    if home is not None and home.get("lat") is not None:
         return False
+    if home is not None:  # pragma: no cover — the same legacy-volume upgrade
+        # as the restaurant backfill above, proven by the live seed run.
+        # A coordless pre-dispatch address cannot anchor a delivery on the
+        # map — replace it (delete+create; the id changes, nothing stores it).
+        _expect(await client.delete(f"/v1/me/addresses/{home['id']}", headers=bearer), 204, 200)
     _expect(await client.post("/v1/me/addresses", json=DEMO_ADDRESS, headers=bearer), 201)
     return True
 
 
-async def seed(client: httpx.AsyncClient) -> dict[str, int]:
+async def _seed_riders(client: httpx.AsyncClient, identity_base_url: str) -> int:
+    """Register + promote the demo couriers. The grant is an INTERNAL
+    identity endpoint (system-authed, never edge-routed), so this is the
+    seed's one absolute-URL call — the same trust boundary catalog's
+    onboarding grant crosses. Idempotent: a granted rider replays 200."""
+    granted = 0
+    for email in DEMO_RIDERS:
+        await client.post("/v1/auth/register", json={"email": email, "password": PASSWORD})
+        pair = _expect(
+            await client.post("/v1/auth/login", json={"email": email, "password": PASSWORD}), 200
+        )
+        bearer = {"Authorization": f"Bearer {pair['access_token']}"}
+        me = _expect(await client.get("/v1/auth/me", headers=bearer), 200)
+        if me["role"] == "rider":
+            continue  # replay — already promoted
+        _expect(
+            await client.post(
+                f"{identity_base_url}/v1/internal/grants",
+                json={"user_id": me["id"], "role": "rider"},
+                headers=internal_headers("seed"),
+            ),
+            200,
+        )
+        granted += 1
+    return granted
+
+
+async def seed(
+    client: httpx.AsyncClient, *, identity_base_url: str = "http://localhost:8001"
+) -> dict[str, int]:
     created = replayed = 0
+    position: dict[str, int] = {}  # per-city grid index, template order = stable spots
     for template in TEMPLATES:
-        if await _seed_restaurant(client, template):
+        index = position.setdefault(template["city"], 0)
+        position[template["city"]] = index + 1
+        if await _seed_restaurant(client, template, city_coords(template["city"], index)):
             created += 1
         else:
             replayed += 1
     await _seed_customer(client)
-    return {"created": created, "replayed": replayed}
+    riders = await _seed_riders(client, identity_base_url)
+    return {"created": created, "replayed": replayed, "riders_granted": riders}
 
 
 async def _amain() -> None:  # pragma: no cover — entrypoint wiring; the seed()
     # flow itself is fully covered by the in-process two-service test.
     gateway = os.environ.get("GATEWAY_URL", "http://localhost:8080")
+    identity = os.environ.get("IDENTITY_BASE_URL", "http://localhost:8001")
     async with httpx.AsyncClient(base_url=gateway, timeout=15.0) as client:
-        summary = await seed(client)
+        summary = await seed(client, identity_base_url=identity)
     print(
         f"seeded via {gateway}: {summary['created']} created, {summary['replayed']} already present"
     )

@@ -29,6 +29,9 @@ order_facts = sa.Table(
     sa.Column("placed_at", sa.TIMESTAMP(timezone=True), nullable=True, index=True),
     sa.Column("confirmed_at", sa.TIMESTAMP(timezone=True), nullable=True),
     sa.Column("delivered_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    # The courier (dispatch milestone): stamped by order events once
+    # assigned — the per-rider delivery spans FR-43's utilization needs.
+    sa.Column("rider_id", sa.Text, nullable=True),
     sa.Column("cancelled_at", sa.TIMESTAMP(timezone=True), nullable=True),
     sa.Column("settled_at", sa.TIMESTAMP(timezone=True), nullable=True),
     sa.Column("cancel_reason", sa.Text, nullable=True),

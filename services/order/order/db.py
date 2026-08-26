@@ -57,6 +57,11 @@ orders = sa.Table(
     # {address_id,label,line1,city,lat,lon} — survives address deletion.
     sa.Column("delivery_address_snapshot", sa.JSON, nullable=False),
     sa.Column("cancel_reason", sa.Text, nullable=True),
+    # The courier, stamped when dispatch's accept lands (RECORD_RIDER).
+    # NULL until assigned — and forever, for orders that die earlier.
+    # Full-state events carry it from that point on, which is how
+    # analytics learns per-rider delivery spans without a stream join.
+    sa.Column("rider_id", sa.Text, nullable=True),
     sa.Column("placed_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
     # tuple repr renders as ('PLACED', 'VALIDATED', ...) — valid SQL IN list.

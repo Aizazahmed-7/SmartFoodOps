@@ -135,3 +135,53 @@ async def test_grant_to_non_customer_role_conflicts(tmp_path):
 
     with pytest.raises(GrantConflict):
         await svc.grant_restaurant_admin(user_id=user_id, restaurant_id="rst_1")
+
+
+# ── the rider grant (dispatch milestone) ───────────────────────────
+
+
+def _grant_rider(client, user_id: str, extra: dict | None = None):
+    body = {"user_id": user_id, "role": "rider", **(extra or {})}
+    return client.post("/v1/internal/grants", json=body, headers=SYSTEM)
+
+
+def test_rider_grant_promotes_customer_and_stamps_the_claim(client):
+    user_id = _register(client)
+    assert _grant_rider(client, user_id).status_code == 200
+    claims = _claims(client)  # fresh login carries the new shape
+    assert claims["role"] == "rider"
+    assert claims["rider_id"] == user_id  # rider_id IS the user id, by decision
+    assert "restaurant_id" not in claims
+
+
+def test_rider_grant_replay_is_silent_success(client):
+    user_id = _register(client)
+    assert _grant_rider(client, user_id).status_code == 200
+    assert _grant_rider(client, user_id).status_code == 200
+
+
+def test_owner_cannot_moonlight_as_rider(client):
+    user_id = _register(client)
+    _grant(client, user_id)  # restaurant_admin first
+    r = _grant_rider(client, user_id)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "GRANT_CONFLICT"
+
+
+def test_rider_grant_refuses_a_restaurant_scope(client):
+    user_id = _register(client)
+    assert _grant_rider(client, user_id, {"restaurant_id": "rst_1"}).status_code == 422
+
+
+def test_restaurant_grant_requires_its_scope(client):
+    user_id = _register(client)
+    r = client.post(
+        "/v1/internal/grants",
+        json={"user_id": user_id, "role": "restaurant_admin"},
+        headers=SYSTEM,
+    )
+    assert r.status_code == 422
+
+
+def test_rider_grant_unknown_user_is_404(client):
+    assert _grant_rider(client, "usr_ghost").status_code == 404

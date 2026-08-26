@@ -98,8 +98,14 @@ curl -s -o /dev/null -w '   preparing → %{http_code}\n' -X POST \
 curl -s -o /dev/null -w '   ready     → %{http_code}\n' -X POST \
   "$GATEWAY/v1/restaurant/orders/$ORDER_ID/ready" -H "Authorization: Bearer $OTOK"
 
-say "simulated courier drives, money captures, order settles"
-poll_status "$CTOK" "$ORDER_ID" SETTLED 90
+say "a sim rider takes the job, drives the toy city, delivers"
+# Dispatch replaced the timer-courier: someone must actually carry the
+# food. ONESHOT=1 exits after one completed delivery; killed on script
+# exit either way.
+RIDERS=1 ONESHOT=1 uv run --package rider-sim python -m rider_sim.main &
+RIDER_SIM_PID=$!
+trap 'kill $RIDER_SIM_PID 2>/dev/null || true' EXIT
+poll_status "$CTOK" "$ORDER_ID" SETTLED 180
 
 say "done — inspect the trail"
 echo "   temporal ui : http://localhost:8233  (workflow ord::$ORDER_ID)"

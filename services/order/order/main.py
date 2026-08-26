@@ -95,9 +95,14 @@ def create_app(
             settings.temporal_address,
             task_queue=settings.task_queue,
             accept_timeout_s=settings.accept_timeout_s,
-            pickup_delay_s=settings.pickup_delay_s,
-            dropoff_delay_s=settings.dropoff_delay_s,
             forward_deadline_s=settings.forward_deadline_s,
+            dispatch_knobs={
+                "offer_first_timeout_s": settings.offer_first_timeout_s,
+                "offer_next_timeout_s": settings.offer_next_timeout_s,
+                "no_rider_deadline_s": settings.no_rider_deadline_s,
+                "no_candidates_retry_s": settings.no_candidates_retry_s,
+                "pickup_timeout_s": settings.pickup_timeout_s,
+            },
             await_seconds=settings.placement_await_seconds,
         )
 
@@ -157,6 +162,9 @@ def create_app(
         saga=saga,
     )
     app.state.kitchen = KitchenService(sessions, saga=saga)
+    # The internal courier relay (dispatch → dlv:: signals) speaks to the
+    # saga port directly — a translation, not a domain decision.
+    app.state.saga = saga
     app.state.tracking = tracking_port
     app.state.tracking_config = StreamConfig(
         ticket_ttl_s=settings.track_ticket_ttl_seconds,

@@ -15,6 +15,8 @@ export default defineConfig({
       // SSE tracking stream — http-proxy streams responses by default, so
       // EventSource works through the dev server unmodified.
       "/sse": "http://localhost:8080",
+      // Rider WebSocket — ws:true makes http-proxy tunnel the upgrade.
+      "/ws": { target: "ws://localhost:8080", ws: true },
       "/openapi.json": "http://localhost:8080",
     },
   },

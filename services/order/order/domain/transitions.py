@@ -96,6 +96,20 @@ async def transition(
     return TransitionResult(applied=True, version=version)
 
 
+async def record_rider(
+    sessions: async_sessionmaker[AsyncSession], order_id: str, rider_id: str
+) -> None:
+    """The courier stamp — NOT a status move, but it lives here because
+    this module is the orders-row's single writer (the source-scan test
+    enforces exactly that). Idempotent and last-write-wins: a reassignment
+    re-stamps with the new courier, which is the truth."""
+    async with sessions() as session:
+        await session.execute(
+            orders.update().where(orders.c.order_id == order_id).values(rider_id=rider_id)
+        )
+        await session.commit()
+
+
 async def begin_cancel_from(
     sessions: async_sessionmaker[AsyncSession],
     order_id: str,
@@ -172,5 +186,6 @@ async def _full_state(
         "totals": order.pricing_snapshot,
         "delivery_address": order.delivery_address_snapshot,
         "cancel_reason": cancel_reason,
+        "rider_id": order.rider_id,
         "occurred_at": now.isoformat(),
     }

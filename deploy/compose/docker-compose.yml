@@ -34,6 +34,7 @@ x-app-base: &app-base
     INVENTORY_BASE_URL: http://inventory:8005
     ORDER_BASE_URL: http://order:8006
     ANALYTICS_BASE_URL: http://analytics:8009
+    DISPATCH_BASE_URL: http://dispatch:8012
     PAYMENT_BASE_URL: http://payment:8007
     NOTIFICATION_BASE_URL: http://notification:8008
     MOCK_PSP_BASE_URL: http://mock-psp:9080
@@ -481,6 +482,65 @@ services:
         "--no-access-log",
       ]
 
+  # Dispatch (the offer cascade, ADR-0011/0026): the first PG-less service
+  # — DynamoDB (localstack) is the truth, Redis db 2 the candidate index
+  # (db 0 = catalog cache, db 1 = edge limiter; flushing one never clears
+  # another), Kafka gets direct-produced copies.
+  dispatch:
+    <<: *app-base
+    profiles: [apps]
+    restart: unless-stopped
+    ports: ["8012:8012"]
+    environment:
+      <<: *app-env
+      UV_PROJECT_ENVIRONMENT: /venvs/dispatch
+      REDIS_URL: redis://redis:6379/2
+      DISPATCH_EVENTS: "on"
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "dispatch",
+        "uvicorn",
+        "dispatch.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8012",
+        "--reload",
+        "--no-access-log",
+      ]
+
+  # The riders' connection plane (ADR-0006): WS auth via subprotocol JWT,
+  # GPS → Redis db 2 (dispatch's index — same keys, spelled twice with
+  # cross-references), offers relayed from dispatch's per-rider channels.
+  rider-gateway:
+    <<: *app-base
+    profiles: [apps]
+    restart: unless-stopped
+    ports: ["8010:8010"]
+    environment:
+      <<: *app-env
+      UV_PROJECT_ENVIRONMENT: /venvs/rider-gateway
+      REDIS_URL: redis://redis:6379/2
+      RIDER_LOCATIONS: "on"
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "rider-gateway",
+        "uvicorn",
+        "rider_gateway.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8010",
+        "--reload",
+        "--no-access-log",
+      ]
+
   edge-bff:
     <<: *app-base
     profiles: [apps]
@@ -491,6 +551,10 @@ services:
       # Rate limiting (db 1 — catalog's cache owns db 0; separate keyspaces
       # so flushing one can never clear the other).
       REDIS_URL: redis://redis:6379/1
+      # Dev posture: the seed's auth burst (20 owners + riders × login/
+      # refresh) outgrew the 30/min default when dispatch added riders —
+      # found live when make seed 429'd. Prod keeps the tight default.
+      RATE_LIMIT_AUTH_PER_WINDOW: "240"
     command:
       [
         "uv",

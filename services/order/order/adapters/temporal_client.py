@@ -35,7 +35,10 @@ from temporalio.service import RPCError, RPCStatusCode
 from ..domain.ports import PlacementPending, SagaClosed, SagaGone, SagaUnavailable
 from ..values import (
     SIGNAL_CANCEL_REQUESTED,
+    SIGNAL_COURIER_DELIVERED,
+    SIGNAL_COURIER_PICKED_UP,
     SIGNAL_FOOD_READY,
+    SIGNAL_OFFER_ACCEPTED,
     SIGNAL_RESTAURANT_DECISION,
     UPDATE_AWAIT_PLACEMENT,
     PlacementAck,
@@ -54,17 +57,17 @@ class TemporalSaga:
         *,
         task_queue: str,
         accept_timeout_s: int,
-        pickup_delay_s: int,
-        dropoff_delay_s: int,
         forward_deadline_s: int = 300,
+        dispatch_knobs: dict[str, float] | None = None,
         await_seconds: float = 2.0,
         client: Client | None = None,  # tests inject; production connects lazily
     ):
         self._address = address
         self._task_queue = task_queue
         self._accept_timeout_s = accept_timeout_s
-        self._pickup_delay_s = pickup_delay_s
-        self._dropoff_delay_s = dropoff_delay_s
+        # The cascade schedule the workflow will run with (WorkflowInput
+        # field names) — empty dict = the values.py defaults.
+        self._dispatch_knobs = dispatch_knobs or {}
         self._forward_deadline_s = forward_deadline_s
         self._await_seconds = await_seconds
         self._client = client
@@ -104,9 +107,8 @@ class TemporalSaga:
             WorkflowInput(
                 placement=placement,
                 accept_timeout_s=self._accept_timeout_s,
-                pickup_delay_s=self._pickup_delay_s,
-                dropoff_delay_s=self._dropoff_delay_s,
                 forward_deadline_s=self._forward_deadline_s,
+                **self._dispatch_knobs,
             ),
             id=f"ord::{placement.order_id}",
             task_queue=self._task_queue,
@@ -194,6 +196,21 @@ class TemporalSaga:
     async def signal_cancel(self, order_id: str) -> None:
         await self._signal(f"ord::{order_id}", SIGNAL_CANCEL_REQUESTED)
         log.info("cancel signalled", order_id=order_id)
+
+    async def signal_courier(
+        self, order_id: str, *, event: str, rider_id: str, offer_id: str | None
+    ) -> None:
+        """Dispatch's facts → the DeliveryWorkflow child. Same SagaGone/
+        SagaUnavailable contract as every signal here; the caller
+        (dispatch, through the internal route) treats gone as 404 and
+        lets its own revoke-read reconcile."""
+        if event == "accepted":
+            await self._signal(f"dlv::{order_id}", SIGNAL_OFFER_ACCEPTED, offer_id or "", rider_id)
+        elif event == "picked_up":
+            await self._signal(f"dlv::{order_id}", SIGNAL_COURIER_PICKED_UP, rider_id)
+        else:  # "delivered" — the route validated the vocabulary
+            await self._signal(f"dlv::{order_id}", SIGNAL_COURIER_DELIVERED, rider_id)
+        log.info("courier signalled", order_id=order_id, courier_event=event)
 
     async def _signal(self, workflow_id: str, name: str, *args: object) -> None:
         """RPC → domain translation: NOT_FOUND means the workflow already

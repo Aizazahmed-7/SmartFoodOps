@@ -71,8 +71,16 @@ class PlacementAck:
 class WorkflowInput:
     placement: PlacementInput
     accept_timeout_s: int = 180  # the restaurant_decision window (FR-18)
-    pickup_delay_s: int = 20  # S6's simulated delivery timers
-    dropoff_delay_s: int = 30
+    # Dispatch knobs (the simulated-courier timers died with real dispatch):
+    # cascade windows (FR-29), the READY-unassigned deadline (FR-32 — past
+    # it the order cancels through the normal compensation path), the
+    # empty-city breather between searches, and the FR-30 pickup deadline
+    # (ASSIGNED with no pickup → revoke + re-offer).
+    offer_first_timeout_s: float = 15.0
+    offer_next_timeout_s: float = 12.0
+    no_rider_deadline_s: float = 600.0
+    no_candidates_retry_s: float = 10.0
+    pickup_timeout_s: float = 300.0
     # How long the PRE-CONFIRMED forward steps may spend retrying before the
     # saga gives up and unwinds. Bounded on purpose: those steps hold a stock
     # reservation whose reaper releases it at 1800s, so an unbounded retry
@@ -84,13 +92,16 @@ class WorkflowInput:
 
 @dataclass(frozen=True)
 class DeliveryInput:
-    """DeliveryWorkflow (child) input — the simulated courier's timings.
-    Real dispatch replaces the timers next milestone; the id contract
-    (dlv::{order_id}) and signal names are the part that must not change."""
+    """DeliveryWorkflow (child) input. The id contract (dlv::{order_id})
+    and the kitchen's food_ready signal predate dispatch and are unchanged;
+    the timer knobs became the cascade schedule."""
 
     order_id: str
-    pickup_delay_s: int = 20
-    dropoff_delay_s: int = 30
+    offer_first_timeout_s: float = 15.0
+    offer_next_timeout_s: float = 12.0
+    no_rider_deadline_s: float = 600.0
+    no_candidates_retry_s: float = 10.0
+    pickup_timeout_s: float = 300.0
 
 
 @dataclass(frozen=True)
@@ -134,6 +145,12 @@ Verdict = Literal["accept", "reject"]
 SIGNAL_RESTAURANT_DECISION = "restaurant_decision"
 SIGNAL_FOOD_READY = "food_ready"  # kitchen → DeliveryWorkflow (dlv::{order_id})
 SIGNAL_CANCEL_REQUESTED = "cancel_requested"  # customer → OrderWorkflow (S7)
+# The courier's facts, raised by dispatch through order's internal API
+# (dispatch never touches Temporal — the kitchen precedent). All target
+# the DeliveryWorkflow child.
+SIGNAL_OFFER_ACCEPTED = "offer_accepted"  # (offer_id, rider_id)
+SIGNAL_COURIER_PICKED_UP = "courier_picked_up"  # (rider_id)
+SIGNAL_COURIER_DELIVERED = "courier_delivered"  # (rider_id)
 
 # The placement handshake (ADR-0023). A signal could not do this: signals
 # are fire-and-forget, and the HTTP request needs an ANSWER — the order id
@@ -161,6 +178,12 @@ class ActivityName(StrEnum):
     VOID_AUTHORIZATION = "void_authorization"
     RELEASE_RESERVATION = "release_reservation"
     FINISH_CANCEL = "finish_cancel"
+    # dispatch (the cascade's world-touching steps)
+    FIND_AND_OFFER = "find_and_offer"
+    EXPIRE_OFFER = "expire_offer"
+    UNASSIGN_STALLED = "unassign_stalled"
+    CANCEL_DISPATCH = "cancel_dispatch"
+    RECORD_RIDER = "record_rider"
 
 
 class CancelReason(StrEnum):
@@ -174,3 +197,6 @@ class CancelReason(StrEnum):
     # (inventory or payment unreachable). Never reaches the kitchen, so the
     # kitchen's decision matrix treats it like the other pre-kitchen deaths.
     SYSTEM_TIMEOUT = "system_timeout"
+    # FR-32: the food was READY and the cascade found nobody inside the
+    # deadline. The one cancel reason born AFTER the kitchen cooked.
+    NO_RIDER_AVAILABLE = "no_rider_available"

@@ -15,6 +15,7 @@ import PartnerDashboard from "./pages/PartnerDashboard";
 import PartnerOnboard from "./pages/PartnerOnboard";
 import Register from "./pages/Register";
 import RestaurantPage from "./pages/Restaurant";
+import RiderConsole from "./pages/RiderConsole";
 import Search from "./pages/Search";
 
 function Header() {
@@ -38,6 +39,8 @@ function Header() {
           <NavLink to="/orders" className={tab}>Orders</NavLink>
           {claims?.role === "restaurant_admin" ? (
             <NavLink to="/partner/dashboard" className={tab}>My restaurant</NavLink>
+          ) : claims?.role === "rider" ? (
+            <NavLink to="/rider" className={tab}>Deliver</NavLink>
           ) : (
             <NavLink to="/partner" className={tab}>Become a partner</NavLink>
           )}
@@ -103,6 +106,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
           <Route path="/account" element={<Account />} />
+          <Route path="/rider" element={<RiderConsole />} />
           <Route path="/partner" element={<PartnerOnboard />} />
           <Route path="/partner/dashboard" element={<PartnerDashboard />} />
         </Routes>

@@ -1,4 +1,20 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { expect, Page, test } from "@playwright/test";
+
+// Dispatch replaced the timer-courier: a sim rider must carry the food or
+// the story never reaches SETTLED. ONESHOT exits after one delivery; killed
+// either way when the suite ends.
+let riderSim: ChildProcess | undefined;
+test.beforeAll(() => {
+  riderSim = spawn(
+    "uv",
+    ["run", "--package", "rider-sim", "python", "-m", "rider_sim.main"],
+    { cwd: "..", env: { ...process.env, RIDERS: "1", ONESHOT: "1" }, stdio: "ignore" },
+  );
+});
+test.afterAll(() => {
+  riderSim?.kill();
+});
 
 /** The seeded cast (tools/seed): a customer with a saved address, and the
  * owner of Biryani House. Fixture credentials, checked into the repo. */

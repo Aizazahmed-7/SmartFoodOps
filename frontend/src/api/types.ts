@@ -39,6 +39,8 @@ export interface RestaurantCard {
   cuisines: string[];
   status: "open" | "paused";
   version: number;
+  lat?: number | null;
+  lon?: number | null;
 }
 
 export interface Restaurant extends RestaurantCard {
@@ -301,4 +303,37 @@ export interface RestaurantAnalytics {
     converted_viewers: number;
     conversion_rate: number | null;
   };
+}
+
+// ── dispatch (the rider console + the customer's courier dot) ──────
+
+export interface GeoPoint {
+  lat: number | null;
+  lon: number | null;
+}
+
+export interface RiderOffer {
+  offer_id: string;
+  order_id: string;
+  restaurant_name: string;
+  pickup: GeoPoint;
+  dropoff: GeoPoint;
+}
+
+export interface RiderDelivery extends RiderOffer {
+  state: "ASSIGNED" | "PICKED_UP" | string;
+}
+
+export interface RiderMe {
+  status: "online" | "offline";
+  offer: RiderOffer | null;
+  delivery: RiderDelivery | null;
+}
+
+export interface CourierView {
+  state: string;
+  lat: number | null;
+  lon: number | null;
+  pickup: GeoPoint;
+  dropoff: GeoPoint;
 }

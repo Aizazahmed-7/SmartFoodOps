@@ -96,3 +96,25 @@ def test_deliberate_payment_silences():
     payload = {"order_id": "ord_1", "status": "AUTHORIZED", "amount_cents": 1, "currency": "USD"}
     assert payment_drafts("PaymentAuthorized", payload, user_id="u") == []
     assert payment_drafts("PaymentCaptured", payload, user_id="u") == []
+
+
+def test_no_rider_cancel_tells_both_sides():
+    """FR-32's cancel is the one born AFTER the kitchen cooked — the
+    restaurant hears why, not just that the order vanished."""
+    drafts = order_drafts(
+        "OrderCancelled",
+        {
+            "order_id": "ord_1",
+            "user_id": "usr_1",
+            "restaurant_id": "rst_1",
+            "restaurant_name": "Biryani House",
+            "cancel_reason": "no_rider_available",
+        },
+    )
+    assert [(d.recipient_type, d.kind) for d in drafts] == [
+        ("customer", "order_cancelled"),
+        ("restaurant", "order_cancelled"),
+    ]
+    assert "couldn't find a rider" in drafts[0].body
+    assert "was not charged" in drafts[0].body
+    assert drafts[1].title == "No rider available"

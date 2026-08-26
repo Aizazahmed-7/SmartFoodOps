@@ -119,6 +119,7 @@ def healthy_client(fetches):
             inventory_base_url="http://catalog.svc",
             notification_base_url="http://identity.svc",
             analytics_base_url="http://identity.svc",
+            dispatch_base_url="http://catalog.svc",
             identity_jwks_url="http://identity.svc/.well-known/jwks.json",
             token_issuer="http://identity.svc",
         ),
@@ -169,6 +170,7 @@ def test_partial_doc_flags_missing_and_is_not_cached(client, fetches):
     first = client.get("/openapi.json").json()
     assert first["x-unavailable-upstreams"] == [
         "analytics_base_url",
+        "dispatch_base_url",
         "inventory_base_url",
         "notification_base_url",
         "order_base_url",

@@ -51,6 +51,10 @@ _CANCEL_BODIES = {
     # taken — so "not charged" is a fact here too.
     "system_timeout": "We couldn't reach {name} in time, so your order was cancelled. "
     "Your card was not charged.",
+    # Dispatch: cooked but uncarried (FR-32). The void ran — "not charged"
+    # stays a fact (capture only ever happens after delivery).
+    "no_rider_available": "We couldn't find a rider for your {name} order, so it was "
+    "cancelled. Your card was not charged.",
 }
 _CANCEL_FALLBACK = "Your order at {name} was cancelled."
 
@@ -96,6 +100,19 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
                     "order_cancelled",
                     "Order cancelled by the customer",
                     "Stop preparing it — the slot and stock are released.",
+                )
+            )
+        elif reason == "no_rider_available":
+            # The kitchen COOKED this one — it deserves to know why the
+            # food has no ride, not just that the order vanished.
+            drafts.append(
+                Draft(
+                    "restaurant",
+                    restaurant_id,
+                    "order_cancelled",
+                    "No rider available",
+                    "We couldn't find a courier in time — the order was cancelled "
+                    "and the slot released.",
                 )
             )
         return drafts

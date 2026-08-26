@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { cancelOrder, getOrder, getTrackTicket } from "../api/client";
+import { cancelOrder, getCourier, getOrder, getTrackTicket } from "../api/client";
 import { hasCode } from "../api/errors";
 import {
   CANCEL_FAMILY, CANCELLABLE_STATUSES, TERMINAL_STATUSES,
   type CancelReason, type OrderStatus,
 } from "../api/types";
 import { ErrorNote, Money, Note, Spinner, StatusTag } from "../components/ui";
+import CityMap, { Pin, project } from "../components/CityMap";
 
 /** The happy chain as the customer sees it (internal hops folded away). */
 const JOURNEY: { at: OrderStatus[]; label: string }[] = [
@@ -154,6 +155,8 @@ export default function OrderDetail() {
         <Journey status={o.status} />
       )}
 
+      {!cancelled && <CourierMap orderId={o.order_id} status={o.status} />}
+
       <div className="card space-y-1 text-sm">
         {o.items.map((item, i) => (
           <div key={i} className="flex justify-between">
@@ -204,5 +207,60 @@ export default function OrderDetail() {
         ← All orders
       </Link>
     </div>
+  );
+}
+
+
+/**
+ * The customer's courier dot (dispatch milestone): a 2s authed poll of
+ * /v1/deliveries/{id}/courier while a courier could be moving — the
+ * poll-floor philosophy (positions are 30s-TTL telemetry in Redis; a
+ * poll is exactly as live as the data). 404 = no delivery row yet (the
+ * cascade hasn't started) — render nothing, quietly.
+ */
+const COURIER_PHASES = ["READY", "PICKED_UP"];
+function CourierMap({ orderId, status }: { orderId: string; status: string }) {
+  const courier = useQuery({
+    queryKey: ["courier", orderId],
+    queryFn: () => getCourier(orderId),
+    enabled: COURIER_PHASES.includes(status),
+    refetchInterval: 2000,
+    refetchIntervalInBackground: true,
+    retry: false, // a 404 is an answer (no rider yet), not a flake
+  });
+  const view = courier.data;
+  if (!COURIER_PHASES.includes(status) || !view) return null;
+  const heading =
+    view.state === "PICKED_UP"
+      ? "Your rider is on the way"
+      : view.state === "ASSIGNED"
+        ? "A rider is heading to the restaurant"
+        : "Finding you a rider…";
+  return (
+    <div className="card space-y-2">
+      <div className="flex items-center justify-between text-sm">
+        <b>{heading}</b>
+        <span className="text-xs text-slate-500">live · toy-city coordinates</span>
+      </div>
+      <CityMap className="max-h-80">
+        {view.pickup.lat != null && view.pickup.lon != null && (
+          <Pin lat={view.pickup.lat} lon={view.pickup.lon} glyph="🍛" label="restaurant" />
+        )}
+        {view.dropoff.lat != null && view.dropoff.lon != null && (
+          <Pin lat={view.dropoff.lat} lon={view.dropoff.lon} glyph="🏠" label="you" />
+        )}
+        {view.lat != null && view.lon != null && <CourierDot lat={view.lat} lon={view.lon} />}
+      </CityMap>
+    </div>
+  );
+}
+
+function CourierDot({ lat, lon }: { lat: number; lon: number }) {
+  const p = project(lat, lon);
+  return (
+    <g>
+      <circle cx={p.x} cy={p.y} r={9} fill="#22c55e" stroke="#0f172a" strokeWidth={3} />
+      <text x={p.x} y={p.y - 13} textAnchor="middle" fontSize={15}>🛵</text>
+    </g>
   );
 }

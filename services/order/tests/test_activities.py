@@ -103,7 +103,7 @@ async def _setup():
         )
         await s.commit()
     inventory, payment = FakeInventory(), FakePayment()
-    acts = OrderActivities(sessions, inventory, payment)
+    acts = OrderActivities(sessions, inventory, payment, None)  # type: ignore[arg-type]
     return acts, sessions, inventory, payment
 
 
@@ -445,3 +445,95 @@ async def test_saga_outcome_counters_move_on_settle_and_cancel():
     )
     await acts2.finish_cancel("ord_1", CancelReason.PAYMENT_DECLINED)
     assert count("cancelled", "payment_declined") == declined_before + 1
+
+
+# ── the dispatch activities (the cascade's world-touching steps) ────
+
+
+class FakeDispatch:
+    """Records every port call; scriptable outcomes."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.offer_outcome: dict = {"outcome": "offered", "offer_id": "o1", "rider_id": "r1"}
+
+    async def find_and_offer(self, order_id, **kwargs):
+        self.calls.append(("find_and_offer", order_id, kwargs))
+        return self.offer_outcome
+
+    async def expire_offer(self, order_id, *, offer_id, rider_id):
+        self.calls.append(("expire_offer", order_id, offer_id, rider_id))
+        return {"outcome": "revoked"}
+
+    async def unassign_stalled(self, order_id, *, rider_id):
+        self.calls.append(("unassign_stalled", order_id, rider_id))
+        return {"outcome": "revoked"}
+
+    async def cancel(self, order_id):
+        self.calls.append(("cancel", order_id))
+        return {"outcome": "cancelled"}
+
+
+async def _dispatch_acts(address_snapshot=None):
+    acts, sessions, *_ = await _setup()
+    dispatch = FakeDispatch()
+    acts._dispatch = dispatch  # the port seam, injected post-build
+    if address_snapshot is not None:
+        async with sessions() as s:
+            await s.execute(
+                orders.update()
+                .where(orders.c.order_id == "ord_1")
+                .values(delivery_address_snapshot=address_snapshot)
+            )
+            await s.commit()
+    return acts, sessions, dispatch
+
+
+async def test_find_and_offer_reads_the_row_and_passes_coords():
+    acts, _, dispatch = await _dispatch_acts(
+        {
+            "address_id": "adr_1",
+            "line1": "12 Mango St",
+            "city": "S",
+            "lat": 39.8025,
+            "lon": -89.6478,
+        }
+    )
+    result = await acts.find_and_offer("ord_1", 2, ["r_ghost"])
+    assert result["outcome"] == "offered"
+    (name, order_id, kwargs) = dispatch.calls[0]
+    assert (name, order_id) == ("find_and_offer", "ord_1")
+    assert kwargs["user_id"] == "usr_1"
+    assert kwargs["restaurant_name"] == "Biryani House"
+    assert kwargs["dropoff"] == (39.8025, -89.6478)
+    assert kwargs["attempt"] == 2 and kwargs["exclude"] == ["r_ghost"]
+
+
+async def test_find_and_offer_limps_on_coordless_legacy_rows():
+    """Pre-toy-city snapshot (no lat/lon): the city-center fallback keeps
+    the cascade alive instead of wedging on old data."""
+    from order.adapters.dispatch_client import FALLBACK_PICKUP
+
+    acts, _, dispatch = await _dispatch_acts()  # fixture snapshot has no coords
+    await acts.find_and_offer("ord_1", 1, [])
+    assert dispatch.calls[0][2]["dropoff"] == FALLBACK_PICKUP
+
+
+async def test_dispatch_passthroughs_forward_verbatim():
+    acts, _, dispatch = await _dispatch_acts()
+    assert (await acts.expire_offer("ord_1", "o1", "r1"))["outcome"] == "revoked"
+    assert (await acts.unassign_stalled("ord_1", "r1"))["outcome"] == "revoked"
+    assert (await acts.cancel_dispatch("ord_1"))["outcome"] == "cancelled"
+    assert [c[0] for c in dispatch.calls] == ["expire_offer", "unassign_stalled", "cancel"]
+
+
+async def test_record_rider_stamps_and_restamps():
+    """transitions.record_rider: idempotent, last-writer-wins (a
+    reassignment re-stamps with the NEW courier)."""
+    acts, sessions, _ = await _dispatch_acts()
+    await acts.record_rider("ord_1", "r_1")
+    await acts.record_rider("ord_1", "r_1")  # replay
+    await acts.record_rider("ord_1", "r_2")  # reassignment
+    async with sessions() as s:
+        rider = (await s.execute(sa.select(orders.c.rider_id))).scalar_one()
+    assert rider == "r_2"

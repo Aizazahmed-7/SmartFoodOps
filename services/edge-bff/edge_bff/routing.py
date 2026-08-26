@@ -66,6 +66,10 @@ RULES = [
     # "/" right after the prefix, and "restaurants"[10] is "s", not "/".
     Rule("/v1/restaurant", "order_base_url", "auth"),
     Rule("/v1/notifications", "notification_base_url", "auth"),
+    # Dispatch (rider console + the customer's courier dot). The rider
+    # surface is write-shaped (taps) — the write budget fits.
+    Rule("/v1/rider", "dispatch_base_url", "auth"),
+    Rule("/v1/deliveries", "dispatch_base_url", "auth"),
     # Only the ticket POST — the SSE stream rides /sse/track/* straight
     # from the gateway to order (the ticket IS its auth, FR-38).
     Rule("/v1/track", "order_base_url", "auth"),

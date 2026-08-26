@@ -104,7 +104,10 @@ def edge(tmp_path):
         TestClient(inventory_app),
         TestClient(edge_app),
     ):
-        yield edge_app
+        # The CLIENT-side router: the seed speaks to the gateway host for
+        # everything public, and to identity.test for its one internal
+        # call (the rider grant) — the same two hosts the live seed sees.
+        yield HostRouter({"gw.test": edge_app, "identity.test": identity_app})
 
 
 def test_template_names_are_globally_unique():
@@ -116,12 +119,10 @@ def test_template_names_are_globally_unique():
 
 
 async def test_seed_creates_everything_then_replays_clean(edge):
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=edge), base_url="http://gw.test"
-    ) as client:
-        first = await seed(client)
+    async with httpx.AsyncClient(transport=edge, base_url="http://gw.test") as client:
+        first = await seed(client, identity_base_url="http://identity.test")
         expected = len(TEMPLATES)
-        assert first == {"created": expected, "replayed": 0}
+        assert first == {"created": expected, "replayed": 0, "riders_granted": 3}
 
         # Spot-check the world through the public APIs (via the edge):
         # each city holds exactly its templates, no duplicates.
@@ -182,8 +183,8 @@ async def test_seed_creates_everything_then_replays_clean(edge):
         assert [a["label"] for a in addresses] == ["home"]
 
         # Idempotency: the second run creates NOTHING and changes nothing.
-        second = await seed(client)
-        assert second == {"created": 0, "replayed": expected}
+        second = await seed(client, identity_base_url="http://identity.test")
+        assert second == {"created": 0, "replayed": expected, "riders_granted": 0}
         addresses_after = (await client.get("/v1/me/addresses", headers=customer_bearer)).json()
         assert addresses_after == addresses  # no duplicate address
         menu_after = (await client.get(f"/v1/menus/{biryani['id']}")).json()
@@ -205,7 +206,7 @@ async def test_seed_creates_everything_then_replays_clean(edge):
                 headers=bearer,
             )
         ).json()
-        await seed(client)
+        await seed(client, identity_base_url="http://identity.test")
         rows_final = {
             r["item_id"]: r["available"]
             for r in (await client.get(stock_url, headers=bearer)).json()["items"]

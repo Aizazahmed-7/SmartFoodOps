@@ -51,6 +51,14 @@ class EventType(StrEnum):
     PAYMENT_CAPTURED = "PaymentCaptured"
     REFUND_PROCESSED = "RefundProcessed"
 
+    # dispatch — aggregates "delivery" (keyed by order) and "rider"
+    # (presence sessions). Direct-produced, no outbox (ADR-0026).
+    RIDER_LOCATION = "RiderLocation"  # 0.2 Hz downsample (rider-gateway)
+    RIDER_ONLINE = "RiderOnline"
+    RIDER_OFFLINE = "RiderOffline"
+    RIDER_ASSIGNED = "RiderAssigned"
+    RIDER_DELIVERY_COMPLETED = "RiderDeliveryCompleted"
+
 
 class Topic(StrEnum):
     """Topic suffixes — always composed with a cell via `topic()` (§9:
@@ -63,6 +71,10 @@ class Topic(StrEnum):
     # Telemetry, not business facts: browse events skip the outbox entirely
     # (nothing transactional to be atomic with) and tolerate loss.
     BROWSE_EVENTS = "browse.events"
+    # Dispatch facts: DDB is the truth, Kafka is the copy — direct produce
+    # in dev, DDB Streams in prod (ADR-0026).
+    DISPATCH_EVENTS = "dispatch.events"
+    RIDER_LOCATIONS = "rider.locations"  # GPS telemetry (downsampled)
 
 
 def topic(cell_id: str, suffix: Topic) -> str:

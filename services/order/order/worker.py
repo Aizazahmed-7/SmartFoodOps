@@ -21,6 +21,7 @@ from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import Worker
 
 from .activities import OrderActivities
+from .adapters.dispatch_client import DispatchClient
 from .adapters.inventory_client import InventoryClient
 from .adapters.payment_client import PaymentClient
 from .config import Settings
@@ -101,6 +102,7 @@ async def main() -> None:  # pragma: no cover — live wiring (compose runs it)
             sessions,
             InventoryClient(settings.inventory_base_url, http),
             PaymentClient(settings.payment_base_url, http),
+            DispatchClient(settings.dispatch_base_url, settings.catalog_base_url, http),
         )
         worker = build_worker(client, activities, task_queue=settings.task_queue)
         log.info("order-worker up", task_queue=settings.task_queue)

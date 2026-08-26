@@ -209,3 +209,16 @@ async def test_views_loop_skips_foreign_event_types_and_handles_singles():
     async with sessions() as s:
         count = (await s.execute(sa.select(sa.func.count()).select_from(menu_views))).scalar_one()
     assert count == 1
+
+
+async def test_rider_attribution_folds_and_never_blanks():
+    """Dispatch milestone: delivered/settled events carry rider_id; an
+    out-of-order pre-assignment event (rider null) must not blank it."""
+    sessions = await _sessions()
+    projector = FactsProjector(sessions)
+    await projector.handle_batch([_event("OrderDelivered", status="DELIVERED", rider_id="r_7")])
+    await projector.handle_batch(
+        [_event("OrderConfirmed", status="CONFIRMED", rider_id=None)]  # late arrival
+    )
+    row = await _row(sessions)
+    assert row.rider_id == "r_7"  # survived the null-carrying replay

@@ -80,7 +80,7 @@ async def env():
     await environment.shutdown()
 
 
-def mock_activities(script: dict[str, object] | None = None):
+def mock_activities(script: dict | None = None):
     """The workflow's world, scripted: `script` overrides per-activity
     returns (a list means consecutive calls pop; an Exception raises)."""
     script = dict(script or {})
@@ -157,6 +157,33 @@ def mock_activities(script: dict[str, object] | None = None):
     async def finish_cancel(order_id: str, reason: str) -> None:
         calls.append(("finish_cancel", order_id, reason))
 
+    @activity.defn(name=ActivityName.FIND_AND_OFFER)
+    async def find_and_offer(order_id: str, attempt: int, exclude: list[str]) -> dict:
+        calls.append(("find_and_offer", order_id, attempt, tuple(exclude)))
+        return outcome(  # type: ignore[return-value]
+            "find_and_offer",
+            {"outcome": "offered", "offer_id": "off_test", "rider_id": "r_test", "timeout_s": 15.0},
+        )
+
+    @activity.defn(name=ActivityName.EXPIRE_OFFER)
+    async def expire_offer(order_id: str, offer_id: str, rider_id: str) -> dict:
+        calls.append(("expire_offer", order_id, offer_id, rider_id))
+        return outcome("expire_offer", {"outcome": "revoked"})  # type: ignore[return-value]
+
+    @activity.defn(name=ActivityName.UNASSIGN_STALLED)
+    async def unassign_stalled(order_id: str, rider_id: str) -> dict:
+        calls.append(("unassign_stalled", order_id, rider_id))
+        return outcome("unassign_stalled", {"outcome": "revoked"})  # type: ignore[return-value]
+
+    @activity.defn(name=ActivityName.CANCEL_DISPATCH)
+    async def cancel_dispatch(order_id: str) -> dict:
+        calls.append(("cancel_dispatch", order_id))
+        return outcome("cancel_dispatch", {"outcome": "cancelled"})  # type: ignore[return-value]
+
+    @activity.defn(name=ActivityName.RECORD_RIDER)
+    async def record_rider(order_id: str, rider_id: str) -> None:
+        calls.append(("record_rider", order_id, rider_id))
+
     return [
         create_order,
         validate_and_reserve,
@@ -172,6 +199,11 @@ def mock_activities(script: dict[str, object] | None = None):
         void_authorization,
         release_reservation,
         finish_cancel,
+        find_and_offer,
+        expire_offer,
+        unassign_stalled,
+        cancel_dispatch,
+        record_rider,
     ], calls
 
 
@@ -196,6 +228,25 @@ async def _signal_food_ready(env, order_id, *, times=1):
         try:
             for _ in range(times):
                 await handle.signal("food_ready")
+            return
+        except RPCError:
+            await asyncio.sleep(0.05)
+    raise AssertionError("DeliveryWorkflow never appeared")
+
+
+async def _drive_courier(env, order_id, *, offers=(("off_test", "r_test"),), deliver_as=None):
+    """The rider's half of the happy path, from outside: accept the given
+    offers, then pickup+deliver as the (last) rider. Signals are idempotent
+    map/set writes in the child, so pre-sending them is deterministic —
+    whenever the cascade reaches that offer, the answer is already there."""
+    handle = env.client.get_workflow_handle(f"dlv::{order_id}")
+    rider = deliver_as or offers[-1][1]
+    for _ in range(200):
+        try:
+            for offer_id, rider_id in offers:
+                await handle.signal("offer_accepted", args=[offer_id, rider_id])
+            await handle.signal("courier_picked_up", rider)
+            await handle.signal("courier_delivered", rider)
             return
         except RPCError:
             await asyncio.sleep(0.05)
@@ -238,6 +289,7 @@ async def _run(
     sandboxed=False,
     order_id=None,
     forward_deadline_s=300,
+    knobs: dict | None = None,
 ):
     order_id = order_id or f"ord_{uuid.uuid4().hex[:8]}"
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -257,6 +309,7 @@ async def _run(
                 placement=placement_for(order_id),
                 accept_timeout_s=180,
                 forward_deadline_s=forward_deadline_s,
+                **(knobs or {}),
             ),
             id=f"ord::{order_id}",
             task_queue=task_queue,
@@ -269,6 +322,7 @@ async def _run(
                 await handle.signal("restaurant_decision", verdict)
         if deliver:
             await _signal_food_ready(env, order_id)
+            await _drive_courier(env, order_id)
         result = await handle.result()
     return result, calls, order_id
 
@@ -282,8 +336,10 @@ async def test_happy_path_runs_to_settled(env):
         "authorize_payment",
         "confirm_order",
         "mark_accepted",
-        "mark_picked_up",  # child: pickup timer fired
-        "mark_delivered",  # child: dropoff timer fired
+        "find_and_offer",  # child: the cascade's one step (r_test accepts)
+        "record_rider",  # the courier lands on the order row
+        "mark_picked_up",  # child: the rider's pickup tap
+        "mark_delivered",  # child: the rider's delivery tap
         "capture_payment",  # parent resumes: money becomes real
         "settle_order",  # reservation consumed, order closed
     ]
@@ -381,6 +437,7 @@ async def test_duplicate_food_ready_signals_are_noops(env):
     async with running_order(env) as (handle, calls, order_id, _):
         await handle.signal("restaurant_decision", "accept")
         await _signal_food_ready(env, order_id, times=3)
+        await _drive_courier(env, order_id)
         result = await handle.result()
     assert result == "SETTLED"
     names = [c[0] for c in calls]
@@ -511,8 +568,9 @@ async def test_customer_cancel_mid_kitchen_cancels_the_courier(env):
         result = await handle.result()
     assert result == "CANCELLED"
     names = [c[0] for c in calls]
-    assert names[-4:] == [
+    assert names[-5:] == [
         "try_begin_cancel",  # the DB referees...
+        "cancel_dispatch",  # ...the cancelled child frees dispatch...
         "void_authorization",  # ...then the §7 tail
         "release_reservation",
         "finish_cancel",
@@ -533,6 +591,7 @@ async def test_customer_cancel_too_late_rides_to_settled(env):
         await _wait_for_child(env, order_id)
         await handle.signal("cancel_requested")  # courier "already picked up"
         await _signal_food_ready(env, order_id)  # delivery continues regardless
+        await _drive_courier(env, order_id)
         result = await handle.result()
     assert result == "SETTLED"
     names = [c[0] for c in calls]
@@ -550,7 +609,8 @@ async def test_cancel_completes_even_if_the_child_fails_on_the_guard(env):
     guard = ApplicationError("order is CANCELLING", non_retryable=True, type="IllegalTransition")
     async with running_order(env, {"mark_picked_up": guard}) as (handle, calls, order_id, _):
         await handle.signal("restaurant_decision", "accept")
-        await _signal_food_ready(env, order_id)  # child heads for its timers
+        await _signal_food_ready(env, order_id)  # child heads into its cascade
+        await _drive_courier(env, order_id)  # rider accepts+taps — mark will hit the guard
         await handle.signal("cancel_requested")
         result = await handle.result()
     assert result == "CANCELLED"
@@ -595,6 +655,7 @@ async def test_build_worker_registers_the_full_surface(env):
 
     activities = OrderActivities(
         sessions,
+        NullClient(),  # type: ignore[arg-type]
         NullClient(),  # type: ignore[arg-type]
         NullClient(),  # type: ignore[arg-type]
     )
@@ -684,3 +745,169 @@ async def test_a_non_retryable_forward_failure_still_fails_the_workflow(env):
     guard = ApplicationError("order is not PLACED", non_retryable=True, type="IllegalTransition")
     with pytest.raises(WorkflowFailureError):
         await _run(env, {"validate_and_reserve": guard}, forward_deadline_s=60)
+
+
+# ── the dispatch cascade (the milestone's new machinery) ───────────
+
+
+async def test_cascade_moves_to_the_second_candidate(env):
+    """FR-29: the first rider ignores the 15s window — expire revokes,
+    the cascade excludes them and courts the next, who accepts."""
+    script = {
+        "find_and_offer": [
+            {"outcome": "offered", "offer_id": "off_1", "rider_id": "r_1", "timeout_s": 15.0},
+            {"outcome": "offered", "offer_id": "off_2", "rider_id": "r_2", "timeout_s": 12.0},
+        ]
+    }
+    async with running_order(env, script) as (handle, calls, order_id, _):
+        await handle.signal("restaurant_decision", "accept")
+        await _signal_food_ready(env, order_id)
+        await _drive_courier(env, order_id, offers=(("off_2", "r_2"),))  # r_1 never answers
+        result = await handle.result()
+    assert result == "SETTLED"
+    assert ("expire_offer", order_id, "off_1", "r_1") in calls
+    assert ("record_rider", order_id, "r_2") in calls
+    finds = [c for c in calls if c[0] == "find_and_offer"]
+    assert finds[0][2] == 1 and finds[0][3] == ()
+    assert finds[1][2] == 2 and finds[1][3] == ("r_1",)  # the ghost is excluded
+
+
+async def test_lost_accept_signal_selfheals_via_the_expire_read(env):
+    """The race matrix's crown case: the accept converted DDB but its
+    signal never arrived. The expiry activity reads the truth and the
+    workflow proceeds with the rider it was never told about."""
+    script = {"expire_offer": {"outcome": "already_assigned", "rider_id": "r_test"}}
+    async with running_order(env, script) as (handle, calls, order_id, _):
+        await handle.signal("restaurant_decision", "accept")
+        await _signal_food_ready(env, order_id)
+        # No offer_accepted signal AT ALL — only the rider's later taps.
+        await _drive_courier(env, order_id, offers=(), deliver_as="r_test")
+        result = await handle.result()
+    assert result == "SETTLED"
+    names = [c[0] for c in calls]
+    assert names.count("find_and_offer") == 1  # no second cascade step
+    assert ("record_rider", order_id, "r_test") in calls
+
+
+async def test_empty_city_cancels_after_the_deadline(env):
+    """FR-32: cooked, READY, and nobody to carry it. The child answers
+    NO_RIDER and the PARENT cancels through the normal §7 unwind with the
+    new reason — customer refunded (void), stock released."""
+    script = {"find_and_offer": {"outcome": "no_candidates"}}
+    async with running_order(env, script) as (handle, calls, order_id, _):
+        await handle.signal("restaurant_decision", "accept")
+        await _signal_food_ready(env, order_id)
+        result = await handle.result()
+    assert result == "CANCELLED"
+    names = [c[0] for c in calls]
+    assert names.count("find_and_offer") >= 2  # it kept trying to the deadline
+    assert ("try_begin_cancel", order_id, "no_rider_available") in calls
+    assert "cancel_dispatch" in names
+    assert names[-3:] == ["void_authorization", "release_reservation", "finish_cancel"]
+    assert calls[-1][2] == "no_rider_available"
+
+
+async def test_ghost_rider_is_revoked_and_replaced(env):
+    """FR-30: accepted but never picked up. The pickup deadline revokes
+    (conditional — ADR-0011), the cascade resumes without the ghost, and
+    the ghost's own late signals can never advance the NEW courier."""
+    script = {
+        "find_and_offer": [
+            {"outcome": "offered", "offer_id": "off_1", "rider_id": "r_1", "timeout_s": 15.0},
+            {"outcome": "offered", "offer_id": "off_2", "rider_id": "r_2", "timeout_s": 12.0},
+        ]
+    }
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    activities, calls = mock_activities(script)
+    worker = Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[OrderWorkflow, DeliveryWorkflow],
+        activities=activities,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+    async with worker:
+        handle = await env.client.start_workflow(
+            "OrderWorkflow",
+            WorkflowInput(
+                placement=placement_for(order_id), accept_timeout_s=180, pickup_timeout_s=30.0
+            ),
+            id=f"ord::{order_id}",
+            task_queue=task_queue,
+        )
+        await handle.signal("restaurant_decision", "accept")
+        await _signal_food_ready(env, order_id)
+        # Both riders accept their offers, but ONLY r_2 ever picks up.
+        await _drive_courier(
+            env, order_id, offers=(("off_1", "r_1"), ("off_2", "r_2")), deliver_as="r_2"
+        )
+        result = await handle.result()
+    assert result == "SETTLED"
+    assert ("unassign_stalled", order_id, "r_1") in calls
+    riders = [c[2] for c in calls if c[0] == "record_rider"]
+    assert riders == ["r_1", "r_2"]  # stamped, revoked, restamped — truth in order
+    assert [c[0] for c in calls].count("mark_picked_up") == 1  # the ghost never marked
+
+
+async def test_ghost_pickup_beats_the_revoke_and_rides_on(env):
+    """ADR-0011's revoke rule, workflow-side: the deadline fired, but the
+    conditional unassign found a completed pickup — the 'ghost' was merely
+    slow, and the delivery proceeds with them."""
+    script = {"unassign_stalled": {"outcome": "already_picked_up"}}
+    order_id = f"ord_{uuid.uuid4().hex[:8]}"
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    activities, calls = mock_activities(script)
+    worker = Worker(
+        env.client,
+        task_queue=task_queue,
+        workflows=[OrderWorkflow, DeliveryWorkflow],
+        activities=activities,
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    )
+    async with worker:
+        handle = await env.client.start_workflow(
+            "OrderWorkflow",
+            WorkflowInput(
+                placement=placement_for(order_id), accept_timeout_s=180, pickup_timeout_s=30.0
+            ),
+            id=f"ord::{order_id}",
+            task_queue=task_queue,
+        )
+        await handle.signal("restaurant_decision", "accept")
+        await _signal_food_ready(env, order_id)
+        child = env.client.get_workflow_handle(f"dlv::{order_id}")
+        for _ in range(200):  # accept, but never send the pickup signal
+            try:
+                await child.signal("offer_accepted", args=["off_test", "r_test"])
+                await child.signal("courier_delivered", "r_test")
+                break
+            except RPCError:
+                await asyncio.sleep(0.05)
+        result = await handle.result()
+    assert result == "SETTLED"
+    names = [c[0] for c in calls]
+    assert names.index("unassign_stalled") < names.index("mark_picked_up")
+    assert names.count("find_and_offer") == 1  # no re-cascade — the rider was real
+
+
+async def test_missed_riders_get_a_fresh_round_after_an_empty_search(env):
+    """Found live: in a one-rider town, one missed offer put the only
+    courier on the exclude list forever. An empty search now clears the
+    exclusions after the breather — the same rider is courted again."""
+    script = {
+        "find_and_offer": [
+            {"outcome": "offered", "offer_id": "off_1", "rider_id": "r_1", "timeout_s": 15.0},
+            {"outcome": "no_candidates"},  # everyone excluded — the empty round
+            {"outcome": "offered", "offer_id": "off_2", "rider_id": "r_1", "timeout_s": 12.0},
+        ]
+    }
+    async with running_order(env, script) as (handle, calls, order_id, _):
+        await handle.signal("restaurant_decision", "accept")
+        await _signal_food_ready(env, order_id)
+        await _drive_courier(env, order_id, offers=(("off_2", "r_1"),))  # miss off_1, take off_2
+        result = await handle.result()
+    assert result == "SETTLED"
+    finds = [c for c in calls if c[0] == "find_and_offer"]
+    assert finds[1][3] == ("r_1",)  # excluded after the miss...
+    assert finds[2][3] == ()  # ...and welcomed back after the empty round

@@ -201,6 +201,25 @@ class IdentityService:
             await session.commit()
             log.info("restaurant_admin granted", user=user_id, restaurant=restaurant_id)
 
+    async def grant_rider(self, *, user_id: str) -> None:
+        """Dispatch onboarding (FR-1's rider role). rider_id == user id on
+        purpose: a rider IS a user with a rider claim — a separate rider
+        entity table earns its place only when riders grow rider-only
+        state (vehicle, documents), which is a named deferral. Idempotent
+        for the same reason the restaurant grant is: the seed replays."""
+        async with self._sessions() as session:
+            repo = IdentityRepo(session)
+            user = await repo.get_user_by_id(user_id)
+            if user is None:
+                raise UnknownUser
+            if user.role == "rider":
+                return  # replay of an already-applied grant
+            if user.role != "customer":
+                raise GrantConflict  # owners/admins don't moonlight as couriers
+            await repo.update_user(user_id, {"role": "rider", "rider_id": user_id})
+            await session.commit()
+            log.info("rider granted", user=user_id)
+
     # ── profile ────────────────────────────────────────────────────
 
     async def get_profile(self, user_id: str) -> Profile:

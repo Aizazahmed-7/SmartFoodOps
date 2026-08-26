@@ -189,25 +189,36 @@ SystemOnly = Annotated[AuthContext, Depends(require_system())]
 
 class GrantIn(StrictModel):
     user_id: str = Field(max_length=64)
-    role: Literal["restaurant_admin"]  # the only grantable role today
-    restaurant_id: str = Field(max_length=64)
+    role: Literal["restaurant_admin", "rider"]  # the grantable roles
+    # Required for restaurant_admin (the scope claim), forbidden for rider
+    # (a rider's scope IS their user id) — validated in the handler, where
+    # the 422 can say which role broke which rule.
+    restaurant_id: str | None = Field(default=None, max_length=64)
 
 
 @router.post("/v1/internal/grants")
 async def grant_role(body: GrantIn, ctx: SystemOnly, request: Request) -> dict:
-    """Catalog calls this during self-serve onboarding.
+    """Catalog calls this during self-serve onboarding; the seed (and a
+    future rider-onboarding flow) uses it to mint riders.
     Idempotent — replaying an applied grant succeeds silently."""
     try:
-        await _svc(request).grant_restaurant_admin(
-            user_id=body.user_id, restaurant_id=body.restaurant_id
-        )
+        if body.role == "restaurant_admin":
+            if body.restaurant_id is None:
+                raise ApiError(
+                    ErrorCode.VALIDATION_FAILED, "restaurant_admin needs restaurant_id", 422
+                )
+            await _svc(request).grant_restaurant_admin(
+                user_id=body.user_id, restaurant_id=body.restaurant_id
+            )
+        else:
+            if body.restaurant_id is not None:
+                raise ApiError(ErrorCode.VALIDATION_FAILED, "rider takes no restaurant_id", 422)
+            await _svc(request).grant_rider(user_id=body.user_id)
     except UnknownUser:
         raise _not_found() from None
     except GrantConflict:
-        raise ApiError(
-            ErrorCode.GRANT_CONFLICT, "user cannot be granted this restaurant", 409
-        ) from None
-    return {"status": "granted", "user_id": body.user_id, "restaurant_id": body.restaurant_id}
+        raise ApiError(ErrorCode.GRANT_CONFLICT, "user cannot be granted this role", 409) from None
+    return {"status": "granted", "user_id": body.user_id, "role": body.role}
 
 
 @router.get("/v1/internal/users/{user_id}/addresses/{address_id}")
