@@ -99,7 +99,7 @@ The headline **~15k inserts/s** [plan §13] is the outbox stream — the dominan
 |---|---|---|
 | GPS ingest: `GEOADD` + `HSET loc` + `SET hb` per ping (pipelined) | 3 × 30,000 | 90,000 |
 | Tracking pub/sub publishes (en-route subset, every 2nd ping) | ~20k en-route × 0.5 Hz | ~10,000 |
-| Cache/rate-limit/idempotency (menu ptr+blob misses past in-process LRU, browse, admission buckets) | — | ~10,000 |
+| Cache/rate-limit/idempotency (menu misses past in-process LRU, browse, admission buckets) | — | ~10,000 |
 | **Total** | | **~110,000** (≈90k at ~25k riders — the plan's 90–110k band) |
 
 **Memory**: cache working set ~11 GB (~60% menu blobs) [plan §7]; rider keys (30k × ~350 B for geo+loc+hb) ≈ 10 MB — noise. 11 GB ÷ (3 × 13.07 GiB `cache.r7g.large`) ≈ **28% utilization** [plan §7].

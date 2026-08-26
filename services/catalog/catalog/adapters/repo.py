@@ -19,7 +19,6 @@ from ..db import (
     item_tags,
     menu_categories,
     menu_items,
-    menu_versions,
     modifier_groups,
     modifier_options,
     outbox,
@@ -435,13 +434,6 @@ class CatalogRepo:
             .returning(restaurants.c.version)
         )
         return int(result.scalar_one())
-
-    async def insert_menu_version(self, restaurant_id: str, version: int, now: datetime) -> None:
-        await self._s.execute(
-            menu_versions.insert().values(
-                restaurant_id=restaurant_id, version=version, published_at=now
-            )
-        )
 
     async def stage_event(
         self,

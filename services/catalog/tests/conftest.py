@@ -20,7 +20,7 @@ class FakeGrants:
 
 class FakeCache:
     """In-memory CachePort. Records every op (kind, key) so tests can assert
-    exact cache behavior — e.g. blob-then-pointer write order."""
+    exact cache behavior — e.g. that a hit issues one GET and no SET."""
 
     def __init__(self):
         self.data: dict[str, str] = {}

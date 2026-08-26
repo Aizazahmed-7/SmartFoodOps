@@ -60,7 +60,7 @@ Failure-handling references (right column) point at the functional requirements 
 
 | UC | Name | Trigger | Main flow | Failure handling |
 |---|---|---|---|---|
-| UC-8 | Onboard restaurant & manage menu | Admin edits profile/menu/promos | Catalog PG transaction bumps `menu_versions` in same tx → CDC on `catalog.changes` → new cached blob + pointer swap; CDN never purged (version-addressed URLs) | FR-7–FR-10, FR-12; ownership enforced in the query (0 rows → 404) |
+| UC-8 | Onboard restaurant & manage menu | Admin edits profile/menu/promos | Catalog PG transaction bumps the restaurant `version` in same tx → CDC on `catalog.changes`; rendered-menu cache key deleted on commit, refilled on next read (cache-aside, ADR-0027); CDN never purged (menus near-fresh, 5s) | FR-7–FR-10, FR-12; ownership enforced in the query (0 rows → 404) |
 | UC-9 | Accept / reject incoming order | `OrderConfirmed` notification arrives | Order feed served from PG index `(restaurant_id, status, placed_at)` → accept/reject sends `restaurant_decision` signal to OrderWorkflow within 3-min timer | FR-18; timeout or reject → VoidAuthorization → ReleaseReservation → `CANCELLED` (FR-19) |
 | UC-10 | Progress preparation | Kitchen state changes | Guarded transitions `ACCEPTED → PREPARING → READY`; `READY` triggers dispatch via DeliveryWorkflow | FR-17; illegal transitions are 0-row no-ops, metered (`illegal_transition_total`) |
 | UC-11 | Pause availability / set capacity | Restaurant overloaded or item out | Pause/capacity via Catalog → CDC path; placement re-check rejects `RESTAURANT_CLOSED`; per-item Redis token bucket gates viral items ahead of PG | FR-9, FR-15; browse staleness ≤60s is display-only — placement always re-reads source of truth |
@@ -104,7 +104,7 @@ Priorities: **P0** = required for Part A acceptance; **P1** = required for Part 
 | ID | Requirement | Pri | Acceptance criteria |
 |---|---|---|---|
 | FR-7 | Restaurant onboarding & profile management | P0 | Restaurant admin creates/edits profile; changes visible in browse within 60s |
-| FR-8 | Menu CRUD with **categories** and versioning | P0 | Menus are structured as categories → items → modifiers (`menu_categories` table in `catalog_db`: name, sort order, item membership); category CRUD versions like any menu edit — bump `menu_versions` in the same PG transaction; rendered menu blob and `catalog.changes` payload carry the category structure; menu GET is version-addressed, immutable per version |
+| FR-8 | Menu CRUD with **categories** and versioning | P0 | Menus are structured as categories → items → modifiers (`menu_categories` table in `catalog_db`: name, sort order, item membership); category CRUD versions like any menu edit — bump the restaurant `version` in the same PG transaction; rendered menu and `catalog.changes` payload carry the category structure; menu GET serves the current version (cache-aside, ADR-0027) |
 | FR-9 | Availability control: item out-of-stock, restaurant pause, capacity gating | P0 | Paused restaurant/item is rejected at placement with `RESTAURANT_CLOSED`/validation error even if caches are stale |
 | FR-10 | Pricing rules, discounts, promotions | P1 | Pricing activity computes discounts from Catalog promotion rules; result recorded in immutable pricing snapshot |
 | FR-11 | Browse by location/cuisine + production fuzzy search over restaurant **and item** names, with filters (cuisine, item tags) | P0 | `GET /v1/search`: typo-tolerant matching (`pg_trgm` + `tsvector`, ADR-0019) on restaurant and menu-item names; filters: city, cuisine (`restaurant_cuisines`), item tags (`item_tags` — "vegetarian", "halal", …); ranked + paginated. Browse pages cached ≤60s; Redis-down falls through to PG with local limiter. OpenSearch swap is trigger-gated behind `SearchPort` (ADR-0019) |
@@ -281,7 +281,7 @@ Every FR maps to implementing component(s), workflow(s)/topic(s), and delivering
 | FR-5 | Credential abuse protection | Identity, edge-bff (Redis rate limits) | — | 1 |
 | FR-6 | Address management | Identity | — | 1 |
 | FR-7 | Restaurant onboarding | Catalog | `catalog.changes` | 1 |
-| FR-8 | Versioned menu CRUD | Catalog (+ Redis blob/pointer, CDN) | `catalog.changes` | 1 |
+| FR-8 | Versioned menu CRUD | Catalog (+ Redis cache-aside, CDN) | `catalog.changes` | 1 |
 | FR-9 | Availability/pause/capacity | Catalog, Inventory, Order (placement re-check) | `catalog.changes`, `inventory.events` | 1 |
 | FR-10 | Pricing rules & promos | Catalog (owns rules), `smartfood-pricing` lib | — (PriceOrder activity) | 2 |
 | FR-11 | Browse/search | edge-bff, Catalog, Redis/CDN | — | 2 |

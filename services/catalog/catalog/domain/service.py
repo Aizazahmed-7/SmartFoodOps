@@ -1,8 +1,8 @@
 """Catalog domain — business rules and transaction ownership.
 
 No FastAPI, no SQL. The one pattern everything here follows is the
-four-write mutation (docs/service-ownership.md — Catalog): data rows +
-version bump + menu_versions audit row + outbox event, one transaction.
+three-write mutation (docs/service-ownership.md — Catalog): data rows +
+version bump + outbox event, one transaction.
 The announcement commits WITH the change or not at all (ARCHITECTURE
 invariant 1); _publish() is that rule as code.
 
@@ -41,20 +41,24 @@ BROWSE_PAGE_SIZE = 20
 SEARCH_PAGE_SIZE = 20
 
 # Literal {braces} around the rid are Redis cluster hash tags — load-bearing:
-# they colocate a restaurant's blob, pointer, and lock on one shard
+# they colocate a restaurant's menu and its render lock on one shard
 # (service-ownership.md, placeholder notation).
 
 
-def _blob_key(restaurant_id: str, version: int) -> str:
-    return f"catalog:menu:{{{restaurant_id}}}:{version}"
-
-
-def _ptr_key(restaurant_id: str) -> str:
-    return f"catalog:menu:ptr:{{{restaurant_id}}}"
+def _menu_key(restaurant_id: str) -> str:
+    return f"catalog:menu:{{{restaurant_id}}}"
 
 
 def _lock_key(restaurant_id: str) -> str:
     return f"catalog:lock:menu:{{{restaurant_id}}}"
+
+
+# Cache-aside accepts one race: a reader that loaded PG just before an edit
+# can SET a just-stale menu right after the edit's DELETE. Nothing corrects
+# that entry, so the TTL is the ceiling on how long the lie lives — minutes,
+# not the old blob's 24h. Money is never exposed: checkout prices from the
+# snapshot endpoint, which bypasses every cache by design.
+MENU_TTL_SECONDS = 300
 
 
 class CatalogError(Exception):
@@ -79,11 +83,6 @@ class ItemNotFound(CatalogError):
 
 class NothingToUpdate(CatalogError):
     pass
-
-
-class StaleMenuVersion(CatalogError):
-    """A version-addressed menu request for a version that is no longer
-    cached and no longer current — the client must re-resolve the pointer."""
 
 
 def _now() -> datetime:
@@ -234,14 +233,13 @@ class CatalogService:
         event_type: str,
         extra: dict[str, Any] | None = None,
     ) -> Restaurant:
-        """Version bump + audit row + outbox event with a full-state payload.
+        """Version bump + outbox event with a full-state payload.
         Runs inside the caller's tx, so the snapshot it reads is exactly the
         state being committed. Returns the restaurant at its new version."""
         restaurant = await self._read(repo, restaurant_id)
         menu = await self._menu_snapshot(repo, restaurant_id)
         now = _now()
         version = await repo.bump_version(restaurant_id, now)
-        await repo.insert_menu_version(restaurant_id, version, now)
         await repo.stage_event(
             restaurant_id=restaurant_id,
             version=version,
@@ -334,7 +332,7 @@ class CatalogService:
                 await repo.set_cuisines(restaurant_id, cuisines)
             restaurant = await self._publish(repo, restaurant_id, EventType.RESTAURANT_UPDATED)
             await session.commit()
-        await self._cache.delete(_ptr_key(restaurant_id))  # next read re-renders
+        await self._cache.delete(_menu_key(restaurant_id))  # next read re-renders
         return restaurant
 
     async def set_status(self, restaurant_id: str, status: str) -> Restaurant:
@@ -348,7 +346,7 @@ class CatalogService:
             )
             restaurant = await self._publish(repo, restaurant_id, event)
             await session.commit()
-        await self._cache.delete(_ptr_key(restaurant_id))
+        await self._cache.delete(_menu_key(restaurant_id))
         log.info("restaurant status changed", restaurant=restaurant_id, status=status)
         return restaurant
 
@@ -362,7 +360,7 @@ class CatalogService:
             category_id = await repo.insert_category(restaurant_id, name=name, rank=rank)
             restaurant = await self._publish(repo, restaurant_id, EventType.CATEGORY_ADDED)
             await session.commit()
-        await self._cache.delete(_ptr_key(restaurant_id))
+        await self._cache.delete(_menu_key(restaurant_id))
         return {"id": category_id, "name": name, "rank": rank, "version": restaurant.version}
 
     async def update_category(
@@ -379,7 +377,7 @@ class CatalogService:
             assert row is not None  # just updated it inside this tx
             restaurant = await self._publish(repo, restaurant_id, EventType.CATEGORY_UPDATED)
             await session.commit()
-        await self._cache.delete(_ptr_key(restaurant_id))
+        await self._cache.delete(_menu_key(restaurant_id))
         return {"id": row.id, "name": row.name, "rank": row.rank, "version": restaurant.version}
 
     async def delete_category(self, restaurant_id: str, category_id: str) -> dict[str, Any]:
@@ -392,7 +390,7 @@ class CatalogService:
             await repo.delete_category(restaurant_id, category_id)
             restaurant = await self._publish(repo, restaurant_id, EventType.CATEGORY_DELETED)
             await session.commit()
-        await self._cache.delete(_ptr_key(restaurant_id))
+        await self._cache.delete(_menu_key(restaurant_id))
         return {"status": "deleted", "version": restaurant.version}
 
     # ── menu: items ────────────────────────────────────────────────
@@ -417,7 +415,7 @@ class CatalogService:
             item = await self._read_item(repo, restaurant_id, item_id)
             restaurant = await self._publish(repo, restaurant_id, EventType.ITEM_ADDED)
             await session.commit()
-        await self._cache.delete(_ptr_key(restaurant_id))
+        await self._cache.delete(_menu_key(restaurant_id))
         return {**item, "version": restaurant.version}
 
     async def update_item(
@@ -449,7 +447,7 @@ class CatalogService:
             item = await self._read_item(repo, restaurant_id, item_id)
             restaurant = await self._publish(repo, restaurant_id, EventType.ITEM_UPDATED)
             await session.commit()
-        await self._cache.delete(_ptr_key(restaurant_id))
+        await self._cache.delete(_menu_key(restaurant_id))
         return {**item, "version": restaurant.version}
 
     async def delete_item(self, restaurant_id: str, item_id: str) -> dict[str, Any]:
@@ -464,52 +462,33 @@ class CatalogService:
             await repo.delete_item(item_id)
             restaurant = await self._publish(repo, restaurant_id, EventType.ITEM_DELETED)
             await session.commit()
-        await self._cache.delete(_ptr_key(restaurant_id))
+        await self._cache.delete(_menu_key(restaurant_id))
         return {"status": "deleted", "version": restaurant.version}
 
-    # ── menu: the cached read path (docs §7 rows 3/5/6) ────────────
+    # ── menu: the cached read path (docs §7 rows 3/5) ──────────────
 
-    async def get_menu(self, restaurant_id: str, version: int | None = None) -> dict[str, Any]:
-        """Pointer → blob → render. A blob is immutable per version, so a
-        version-addressed hit never touches PG; only the current version can
-        be rebuilt (old-version miss → StaleMenuVersion, client re-resolves)."""
-        if version is not None:
-            blob = await self._cache.get(_blob_key(restaurant_id, version))
-            if blob is not None:
-                return json.loads(blob)
-            menu = await self._render_and_cache(restaurant_id, reason="version_requested")
-            if menu["version"] != version:
-                raise StaleMenuVersion
-            return menu
+    async def get_menu(self, restaurant_id: str) -> dict[str, Any]:
+        """Cache-aside: get the one mutable key; miss → render and fill.
+        Every menu mutation deletes the key, and MENU_TTL_SECONDS bounds
+        the delete-vs-refill race that cache-aside accepts."""
+        blob = await self._cache.get(_menu_key(restaurant_id))
+        if blob is not None:
+            return json.loads(blob)
+        return await self._render_and_cache(restaurant_id)
 
-        pointer = await self._cache.get(_ptr_key(restaurant_id))
-        if pointer is not None:
-            # ptr TTL (7d) outlives blob TTL (24h): a dangling pointer just
-            # falls through to a render, never an error.
-            blob = await self._cache.get(_blob_key(restaurant_id, int(pointer)))
-            if blob is not None:
-                return json.loads(blob)
-            reason = "blob_expired"
-        else:
-            reason = "pointer_miss"
-        return await self._render_and_cache(restaurant_id, reason=reason)
-
-    async def _render_and_cache(self, restaurant_id: str, *, reason: str) -> dict[str, Any]:
+    async def _render_and_cache(self, restaurant_id: str) -> dict[str, Any]:
         """Singleflight render: one renderer per restaurant per 3s window;
         losers wait a beat and re-check, then render anyway — a lock must
-        never fail a user. Writes blob THEN pointer: a crash between the two
-        leaves an unused blob, never a pointer at nothing."""
+        never fail a user."""
         lock = _lock_key(restaurant_id)
         acquired = await self._cache.acquire_lock(lock, 3000)
         if not acquired:
             # Rare enough to log at INFO; frequent lines here = lock contention.
             log.info("waiting for concurrent menu render", restaurant_id=restaurant_id)
             await asyncio.sleep(0.05)
-            pointer = await self._cache.get(_ptr_key(restaurant_id))
-            if pointer is not None:
-                blob = await self._cache.get(_blob_key(restaurant_id, int(pointer)))
-                if blob is not None:
-                    return json.loads(blob)
+            blob = await self._cache.get(_menu_key(restaurant_id))
+            if blob is not None:
+                return json.loads(blob)
         try:
             started = time.perf_counter()
             async with self._sessions() as session:
@@ -521,16 +500,13 @@ class CatalogService:
                 "version": restaurant.version,
                 **menu,
             }
-            payload = json.dumps(doc)
-            await self._cache.set(_blob_key(restaurant_id, restaurant.version), payload, 86400)
-            await self._cache.set(_ptr_key(restaurant_id), str(restaurant.version), 604800)
+            await self._cache.set(_menu_key(restaurant_id), json.dumps(doc), MENU_TTL_SECONDS)
             # The miss-that-cost-something: one line per menu edit or TTL
             # expiry. Absence of these between requests = cache is serving.
             log.info(
                 "menu rendered",
                 restaurant_id=restaurant_id,
                 version=restaurant.version,
-                reason=reason,
                 duration_ms=round((time.perf_counter() - started) * 1000, 1),
             )
             return doc
@@ -542,10 +518,10 @@ class CatalogService:
         self, repo: CatalogRepo, restaurant_id: str
     ) -> tuple[Restaurant, dict[str, Any]]:
         """Version re-check: under READ COMMITTED our reads can tear (rows
-        from v N+1 under version N). Caching torn content under an immutable
-        version key would poison it forever — re-read the version and retry
-        if it moved. Bounded: after 3 tries serve the last read (staleness
-        is display-only; poisoning is not)."""
+        from v N+1 under version N). A torn doc would advertise a version
+        its rows don't match — re-read the version and retry if it moved.
+        Bounded: after 3 tries serve the last read (staleness is
+        display-only; a mixed-version doc is not)."""
         restaurant = await self._read(repo, restaurant_id)
         menu = await self._menu_snapshot(repo, restaurant_id)
         for _ in range(2):  # bounded retries

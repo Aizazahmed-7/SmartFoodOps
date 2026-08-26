@@ -116,14 +116,5 @@ modifier_options = sa.Table(
     sa.Column("rank", sa.Integer, nullable=False, server_default="0"),
 )
 
-# Audit trail of publishes; the current version lives on restaurants.menu_version.
-menu_versions = sa.Table(
-    "menu_versions",
-    metadata,
-    sa.Column("restaurant_id", sa.Text, sa.ForeignKey("restaurants.id"), primary_key=True),
-    sa.Column("version", sa.Integer, primary_key=True),
-    sa.Column("published_at", sa.TIMESTAMP(timezone=True), nullable=False),
-)
-
 # The 9-column contract lives with its reader (smartfood-outbox).
 outbox = outbox_table(metadata)

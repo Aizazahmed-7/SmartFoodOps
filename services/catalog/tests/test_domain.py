@@ -3,7 +3,7 @@ onboarding race branch — things no HTTP assertion can see."""
 
 import sqlalchemy as sa
 from catalog.adapters.repo import CatalogRepo
-from catalog.db import menu_versions, metadata, outbox
+from catalog.db import metadata, outbox
 from catalog.domain.service import CatalogService
 from smartfood_outbox import event_id
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -38,21 +38,16 @@ async def _create(svc, owner="usr_1", name="Biryani House"):
     return restaurant, created
 
 
-async def test_every_mutation_leaves_the_four_writes(grants, cache):
+async def test_every_mutation_leaves_the_three_writes(grants, cache):
     svc, sessions = await _service(grants, cache)
     r, _ = await _create(svc)
     await svc.update_restaurant(r.id, {"name": "Biryani Palace"}, None)
     await svc.set_status(r.id, "paused")
 
     async with sessions() as s:
-        versions = (
-            (await s.execute(sa.select(menu_versions.c.version).order_by(menu_versions.c.version)))
-            .scalars()
-            .all()
-        )
         events = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
 
-    assert versions == [1, 2, 3]  # audit row per mutation, no gaps
+    assert [e.aggregate_version for e in events] == [1, 2, 3]  # bump per mutation, no gaps
     assert [e.event_type for e in events] == [
         "RestaurantCreated",
         "RestaurantUpdated",
@@ -188,8 +183,8 @@ async def test_delete_item_leaves_no_orphan_rows(grants, cache):
 
 async def test_render_retries_on_torn_read(grants, cache, monkeypatch):
     """READ COMMITTED can tear: version read at N, rows read at N+1. Caching
-    that under version N would poison an immutable key — the renderer must
-    detect the move and re-read."""
+    that would serve a doc whose version lies about its rows — the renderer
+    must detect the move and re-read."""
     from catalog.db import restaurants
 
     svc, sessions = await _service(grants, cache)
@@ -250,22 +245,20 @@ async def test_pricing_read_retries_on_torn_read(grants, cache, monkeypatch):
     assert body["restaurant"]["version"] == item["version"] + 1
 
 
-async def test_singleflight_loser_adopts_winners_blob(grants):
-    """Lock lost → wait a beat → the winner's pointer+blob appeared → serve
-    them, touching neither the DB nor the winner's lock."""
+async def test_singleflight_loser_adopts_winners_menu(grants):
+    """Lock lost → wait a beat → the winner's menu appeared → serve it,
+    touching neither the DB nor the winner's lock."""
     import json
 
     doc = {"restaurant_id": "rst_x", "version": 3, "categories": []}
 
     class WinnerAppears:
         def __init__(self):
-            self.ptr_reads = 0
+            self.reads = 0
 
         async def get(self, key: str) -> str | None:
-            if "ptr" in key:
-                self.ptr_reads += 1
-                return None if self.ptr_reads == 1 else "3"  # appears after the wait
-            return json.dumps(doc)
+            self.reads += 1
+            return None if self.reads == 1 else json.dumps(doc)  # appears after the wait
 
         async def set(self, key, value, ttl_seconds): ...
         async def delete(self, key): ...

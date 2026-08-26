@@ -248,7 +248,7 @@ sequenceDiagram
     rect rgb(0,0,0)
         Note over C,CDB: ONE TRANSACTION
         C->>CDB: [DB] INSERT restaurant rst_9, owner_user_id usr_1 —<br/>UNIQUE owner — race loser rolls back and adopts the winner
-        C->>CDB: [DB] version bump to 1, INSERT menu_versions rst_9 v1
+        C->>CDB: [DB] version bump to 1
         C->>CDB: [DB] INSERT outbox RestaurantCreated<br/>id = uuid5 of "restaurant:rst_9:1:RestaurantCreated"<br/>payload FULL STATE — owner_user_id on EVERY event
         C->>CDB: [DB] COMMIT
     end

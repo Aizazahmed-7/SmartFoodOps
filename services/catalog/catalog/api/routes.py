@@ -24,7 +24,6 @@ from ..domain.service import (
     ItemNotFound,
     NothingToUpdate,
     RestaurantNotFound,
-    StaleMenuVersion,
 )
 
 router = APIRouter()
@@ -458,7 +457,7 @@ async def pricing_read(
         raise _unknown_restaurant() from None
 
 
-# ── public reads: menu (blob/pointer cached) + browse (60s pages) ──
+# ── public reads: menu (cache-aside) + browse (60s pages) ──────────
 
 
 @router.get("/v1/menus/{restaurant_id}")
@@ -466,18 +465,13 @@ async def get_menu(
     restaurant_id: str,
     request: Request,
     response: Response,
-    v: Annotated[int | None, Query(ge=1)] = None,
 ) -> dict:
-    """?v=N is version-addressed and immutable (CDN caches it forever); the
-    unversioned form resolves the pointer and must stay near-fresh."""
+    """Always the current menu (cache-aside behind the service), so the
+    HTTP layer must stay near-fresh — no long client caching."""
     try:
-        menu = await _svc(request).get_menu(restaurant_id, version=v)
+        menu = await _svc(request).get_menu(restaurant_id)
     except RestaurantNotFound:
         raise _unknown_restaurant() from None
-    except StaleMenuVersion:
-        raise ApiError(
-            ErrorCode.NOT_FOUND, "menu version no longer available — refetch the menu", 404
-        ) from None
     # Browse telemetry (S8) — AFTER the read succeeded (a 404 is not a
     # view), fire-and-forget. The viewer may be anonymous: public_read GETs
     # arrive with no stamped identity, and the funnel counts them toward
@@ -491,9 +485,7 @@ async def get_menu(
             user_id=request.headers.get("x-auth-sub"),
             request_id=str(ctxvars.get("request_id", "")) or f"anon-{id(request)}",
         )
-    response.headers["Cache-Control"] = (
-        "public, max-age=604800, immutable" if v is not None else "public, max-age=5"
-    )
+    response.headers["Cache-Control"] = "public, max-age=5"
     return menu
 
 

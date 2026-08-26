@@ -120,7 +120,7 @@ All internal calls are **HTTP/JSON** (§5); Kafka topics are the async interface
 |---|---|---|---|---|
 | edge-bff | Routing, JWT verification, identity-header stamping, rate limiting/admission, per-client response shaping, read aggregation | Redis (rate limits, JWKS cache) | ECS Fargate behind CloudFront + ALB | REST in; HTTP/JSON to services |
 | Identity | Registration, auth, JWTs, roles, addresses | `identity_db` | ECS Fargate | HTTP; JWKS endpoint; `identity.events` |
-| Catalog | Restaurant onboarding, menus, pricing rules, promos, availability | `catalog_db` + `catalog:*` Redis keys + CDN | ECS Fargate; **Lambda** for cache version-bump | HTTP; `catalog.changes` CDC |
+| Catalog | Restaurant onboarding, menus, pricing rules, promos, availability | `catalog_db` + `catalog:*` Redis keys + CDN | ECS Fargate | HTTP; `catalog.changes` CDC |
 | Pricing | Price/discount computation, immutable snapshots. **Not a service — a shared library** (`libs/smartfood-pricing`, ADR-0015) consumed in-process by the `PriceOrder` activity (authoritative snapshot) and by the stateless `/v1/quote` endpoint on Order (display estimate; the cart itself is client state — ADR-0017) | None of its own; reads Catalog promo + tax rules (Redis-cached) | Runs inside Order workers and Cart — no deployment unit | In-process function call |
 | Inventory | Stock counters, reservations | `inventory_db` (conditional decrements) + `inventory:adm:*` buckets | ECS Fargate | HTTP Reserve/Release; `inventory.events` |
 | Order | Order records, state machine, outbox, restaurant order feed, stateless `/v1/quote` estimate endpoint | `order_db` (shard-ready); read models belong to the projectors | ECS Fargate | REST; starts Temporal; `orders.events` |
@@ -409,7 +409,7 @@ Every datastore is named for its owner, so a name answers "whose is this?" witho
 | Deliberately shared Redis key | `shared:…` | `shared:geo:…` — the prefix *is* the warning |
 | Kafka topic in `global-kafka` | `<cell>.<domain>.<stream>` — cell-prefixed from day 1 | `c1.orders.events`, `c1.catalog.changes` |
 
-**Placeholder notation**: `<name>` means "substitute a value here." Literal braces `{name}` mean a **Redis cluster hash tag** and are load-bearing — they force keys onto the same shard. `catalog:menu:{rid}:<ver>` deliberately colocates a restaurant's blob and pointer; `shared:geo:<cell>:<gh4>` deliberately does **not** tag, so geo shards spread across nodes instead of collapsing onto one.
+**Placeholder notation**: `<name>` means "substitute a value here." Literal braces `{name}` mean a **Redis cluster hash tag** and are load-bearing — they force keys onto the same shard. `catalog:menu:{rid}` deliberately colocates a restaurant's menu and its render lock; `shared:geo:<cell>:<gh4>` deliberately does **not** tag, so geo shards spread across nodes instead of collapsing onto one.
 
 **Short names vs deployed names**: prose refers to a table by its entity name (`rider_state`); the deployed resource is `sfo-<owner>-<entity>` (`sfo-dispatch-rider-state`). [service-ownership.md](service-ownership.md) holds the mapping. Redis keys are always written prefix-included — there the prefix *is* the ownership statement.
 
@@ -422,7 +422,7 @@ Every datastore is named for its owner, so a name answers "whose is this?" witho
 | Orders + `pricing_snapshot` + `order_items` + `delivery_address_snapshot` | Order snapshots (below); hour-partitioned outbox; partitions **dropped** only when the publish-confirmed gate passes (§11) — never row-deletes at 20k rows/s |
 | Payment double-entry ledger | Append-only, 7-year retention; idempotency table alongside |
 | Inventory | `UPDATE stock SET available=available-q WHERE available>=q` + reservation ledger with expiry reaper; `restaurant_load` capacity counter (`UPDATE … SET active=active+1 WHERE active<capacity` — kitchen slots as stock), released by the same compensation/settlement paths |
-| Catalog | `menu_categories` → items → modifiers structure; `menu_versions` bumped in the same transaction as menu rows (category edits included) |
+| Catalog | `menu_categories` → items → modifiers structure; `restaurants.version` bumped in the same transaction as menu rows (category edits included) |
 | Analytics aggregates | 5s micro-batch upserts from Kafka consumers |
 | Identity | Users, roles, addresses (**soft-delete** — `deleted_at`, never row-deleted), refresh-token families |
 | Restaurant order feed | PG index `(restaurant_id, status, placed_at)` — deliberately **not** DDB (see key rule below) |
@@ -465,26 +465,25 @@ Loss degrades, never corrupts. Full cache catalog in §10. TTL-only eviction; `e
 |---|---|---|---|---|---|---|
 | 1 | Static assets | CloudFront | `/static/{hash}.js` | 1y immutable | new build = new hash | S3 origin serves |
 | 2 | Restaurant images | CloudFront | `/img/{rid}/{asset}_{size}` | 24h | new asset id per upload | S3 origin serves |
-| 3 | Versioned menu GET | CloudFront | `/v1/menus/<rid>/v/<ver>` — version in the **path**, not the query string (CloudFront's default cache key ignores query strings; a `?v=` version would silently collapse all versions into one cached entry) | 7d (immutable per version) | never purged — new version = new URL | miss → BFF → Redis #5 |
+| 3 | Menu GET | CloudFront | `/v1/menus/<rid>` — always the current version | 5s (`Cache-Control: public, max-age=5`) | TTL-only (near-fresh by design) | miss → BFF → Redis #5 |
 | 4 | Browse/search pages | CloudFront + Redis | `catalog:browse:<gh5>:<cuisine>:<page>` | CDN 30s; Redis 60s | TTL-only (≤60s staleness OK for discovery) | singleflight lock + stale-while-revalidate; Redis down → PG direct w/ local limiter |
-| 5 | Menu blob | Redis | `catalog:menu:{rid}:<ver>` — `{rid}` is a **hash tag**, colocating blob + pointer | 24h | new version written by CDC consumer | singleflight `catalog:lock:menu:{rid}`; down → Catalog PG render |
-| 6 | Menu pointer | Redis | `catalog:menu:ptr:{rid}` | 7d, rewritten on publish | `SET` after blob write (blob-then-pointer — no dangling version) | miss → PG `current_version` |
-| 7 | Hot-menu LRU | in-process (BFF/Catalog pods) | `(rid,ver)` blob, 512 entries/128MB; `ptr` 2s. In BFF this caches **Catalog's API response**, not Catalog's Redis keys | LRU / 2s | version-keyed blobs never invalidate; ptr staleness ≤2s | miss → Redis |
-| 8 | Rate limits / admission | Redis | `edge:rl:<scope>:<subject>`, `edge:adm:place:<cell>`, `inventory:adm:<rid>:<sku>` | window-sized | self-expiring; atomic Lua | down → per-pod local limiter; inventory falls through to PG (the arbiter) |
-| 9 | Idempotency fast-path | Redis | `order:idem:<key>`, `payment:idem:<key>` | 15 min (retry window; PG keeps 7d) | write-through after PG commit | miss → PG check; correctness identical |
-| 10 | Rider GEO index | Redis | `shared:geo:<cell>:<gh4>` — **no hash tag**, so shards spread across nodes | heartbeat-refreshed; 90s reaper | shift-end removes | cold: rebuilds from heartbeats <60s; Dispatch falls back to the `rider_state` GSI |
-| 11 | Rider latest-loc / heartbeat | Redis | `shared:loc:<cell>:<rider_id>` (30s), `shared:hb:<cell>:<rider_id>` (90s) | 30s / 90s, refreshed per ping | overwritten per ping | SSE serves stage-level status from read model |
-| 12 | SSE tickets | Redis | `shared:ticket:<rand>` | 60s single-use | `GETDEL` on connect | reconnect issues new ticket |
+| 5 | Rendered menu (cache-aside, ADR-0027) | Redis | `catalog:menu:{rid}` — `{rid}` is a **hash tag**, colocating menu + render lock | 5 min — the ceiling on the delete-vs-refill race cache-aside accepts | `DEL` after every menu-edit commit; next read re-renders | singleflight `catalog:lock:menu:{rid}`; down → Catalog PG render |
+| 6 | Hot-menu LRU | in-process (BFF/Catalog pods) | rid → **Catalog's API response** (BFF) / rendered doc, 512 entries/128MB | 2s absolute | TTL-only; staleness ≤2s on top of Redis #5 | miss → Redis |
+| 7 | Rate limits / admission | Redis | `edge:rl:<scope>:<subject>`, `edge:adm:place:<cell>`, `inventory:adm:<rid>:<sku>` | window-sized | self-expiring; atomic Lua | down → per-pod local limiter; inventory falls through to PG (the arbiter) |
+| 8 | Idempotency fast-path | Redis | `order:idem:<key>`, `payment:idem:<key>` | 15 min (retry window; PG keeps 7d) | write-through after PG commit | miss → PG check; correctness identical |
+| 9 | Rider GEO index | Redis | `shared:geo:<cell>:<gh4>` — **no hash tag**, so shards spread across nodes | heartbeat-refreshed; 90s reaper | shift-end removes | cold: rebuilds from heartbeats <60s; Dispatch falls back to the `rider_state` GSI |
+| 10 | Rider latest-loc / heartbeat | Redis | `shared:loc:<cell>:<rider_id>` (30s), `shared:hb:<cell>:<rider_id>` (90s) | 30s / 90s, refreshed per ping | overwritten per ping | SSE serves stage-level status from read model |
+| 11 | SSE tickets | Redis | `shared:ticket:<rand>` | 60s single-use | `GETDEL` on connect | reconnect issues new ticket |
 
 ### Invalidation flows
 
-- **Menu edit** → Catalog PG tx (rows + outbox, version v+1) → CDC → consumer renders blob → pointer swap. CDN needs **no purge** (version-addressed URLs). Worst-case: browse staleness ~60s, open menu ~2s.
+- **Menu edit** → Catalog PG tx (rows + outbox, version v+1) → `DEL catalog:menu:{rid}` after commit → next read re-renders and refills (cache-aside, ADR-0027). CDN needs no purge — menus are near-fresh (5s). Worst-case: browse staleness ~60s, open menu ~5s; a reader racing the edit can refill just-stale content, bounded by the 5-min TTL.
 - **Price change during active cart** → the client-held cart shows its last quote; the Pricing activity ignores caches at placement and returns a `PRICE_CHANGED` diff → client re-confirms. Caches are structurally incapable of causing a wrong charge.
 - **Restaurant pause** → same CDC path; placement re-check rejects with `RESTAURANT_CLOSED`.
 
 ### Sizing & parity
 
-At 2,000 orders/s per cell: ElastiCache cluster-mode, 3 shards × (primary+replica), `cache.r7g.large`. Working set ~11 GB (~60% menu blobs, 12% browse pages, rest small) at ~28% utilization — 3× headroom for dinner peak. `volatile-ttl` policy; page on `evicted_keys_total > 0`; warn on menu hit-rate <95% or lock wait p99 >50 ms. Local dev runs the same Redis 7 with identical keys/TTLs/Lua; a CI chaos job stops Redis mid-suite and asserts checkout still succeeds with no 5xx on the money path ([local-dev.md](local-dev.md)).
+At 2,000 orders/s per cell: ElastiCache cluster-mode, 3 shards × (primary+replica), `cache.r7g.large`. Working set ≤11 GB (estimated when menus were 24h-resident; the 5-min menu TTL keeps only hot menus, so this is an upper bound — ~60% menu docs, 12% browse pages, rest small) at ~28% utilization — 3× headroom for dinner peak. `volatile-ttl` policy; page on `evicted_keys_total > 0`; warn on menu hit-rate <95% or lock wait p99 >50 ms. Local dev runs the same Redis 7 with identical keys/TTLs/Lua; a CI chaos job stops Redis mid-suite and asserts checkout still succeeds with no 5xx on the money path ([local-dev.md](local-dev.md)).
 
 ---
 

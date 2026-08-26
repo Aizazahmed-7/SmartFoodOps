@@ -137,11 +137,6 @@ erDiagram
         int price_delta_cents
         int rank
     }
-    menu_versions {
-        text restaurant_id PK "FK"
-        int version PK
-        timestamptz published_at
-    }
     outbox {
         text id PK "UUIDv5 of the fact"
         text aggregate_type
@@ -160,28 +155,19 @@ erDiagram
     menu_items ||--o{ item_tags : ""
     menu_items ||--o{ modifier_groups : ""
     modifier_groups ||--o{ modifier_options : ""
-    restaurants ||--o{ menu_versions : "audit per mutation"
 ```
 
 Search indexes worth knowing (Postgres-only — they live in migration 0001, not `db.py`, so sqlite's `create_all` never sees them): `pg_trgm` GIN indexes on `restaurants.name` and `menu_items.name` (typo-tolerant fuzzy match) plus FTS expression indexes over names + item descriptions — these four indexes ARE the search engine (ADR-0019).
 
 ### Example rows — versions and the outbox, concretely
 
-One restaurant, three mutations. `restaurants.version` is the **current** counter; `menu_versions` is the **history**; the outbox holds one event **per mutation**, each with a computed id:
+One restaurant, three mutations. `restaurants.version` is the **current** counter; the outbox holds one event **per mutation** with a gapless `aggregate_version` (the revision history, as far as anything reads it — the once-planned `menu_versions` audit table was dropped unread in migration 0005):
 
 `restaurants` (current state only):
 
 | id    | owner_user_id | name          | status | version |
 | ----- | ------------- | ------------- | ------ | ------- |
 | rst_9 | usr_1         | Biryani House | open   | **3**   |
-
-`menu_versions` (when each version was born — gapless):
-
-| restaurant_id | version | published_at            |
-| ------------- | ------- | ----------------------- |
-| rst_9         | 1       | 12:00 _(created)_       |
-| rst_9         | 2       | 12:10 _(item added)_    |
-| rst_9         | 3       | 12:15 _(price changed)_ |
 
 `outbox` — read `id` together with the three inputs that computed it. `aggregate_type` + `aggregate_id` say _whose fact_, `aggregate_version` says _which occurrence_, `event_type` says _what kind_:
 

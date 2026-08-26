@@ -69,7 +69,7 @@ A **cluster** is machines; a **database** is an isolated compartment inside one.
 | Database | Owner | What lives there | Why Postgres |
 |---|---|---|---|
 | `identity_db` | Identity | users, roles, addresses, refresh-token families | Refresh-token rotation and reuse detection need transactional integrity |
-| `catalog_db` | Catalog | restaurants, menus, `menu_categories` (categories → items → modifiers), `menu_versions`, promo rules, tax tables | Menu edits — categories included — bump the version **in the same transaction** as the rows — the anchor of the cache-invalidation design |
+| `catalog_db` | Catalog | restaurants, menus, `menu_categories` (categories → items → modifiers), promo rules, tax tables | Menu edits — categories included — bump `restaurants.version` **in the same transaction** as the rows — the anchor of event identity and the placement-time price guard |
 | `inventory_db` | Inventory | stock counters, `restaurant_load` capacity counter, reservation ledger | The atomic conditional decrement (`UPDATE … WHERE available >= q`) is the oversell guard; restaurant capacity uses the identical pattern (`WHERE active < capacity`) — kitchen slots as stock |
 | `order_db` | Order | orders + pricing snapshots, hour-partitioned outbox, restaurant order feed index | The state machine's guarded transitions are SQL `UPDATE … WHERE status='prev'`; the outbox must share the order's transaction |
 | `payment_db` | Payment | append-only double-entry ledger (7y), idempotency table | Money. Nothing else was ever considered |
@@ -101,7 +101,7 @@ Every table has a uniform-cardinality partition key. One hard rule, enforced in 
 
 | Prefix | Owner | Contents |
 |---|---|---|
-| `catalog:*` | Catalog | Versioned menu blobs + current-version pointers (invalidation = pointer swap, zero stampede), browse pages, singleflight locks |
+| `catalog:*` | Catalog | Rendered menus (cache-aside: `DEL` on edit, refill on read, 5-min TTL — ADR-0027), browse pages, singleflight locks |
 | `edge:*` | edge-bff | Rate-limit buckets, per-cell placement admission tokens |
 | `order:*`, `payment:*` | Order, Payment | Idempotency fast-paths (15 min; Postgres keeps 7 days and stays the arbiter) |
 | `inventory:*` | Inventory | Per-item admission buckets shielding the stock row from viral-item stampedes (advisory — Postgres decides) |

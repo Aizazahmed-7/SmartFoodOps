@@ -15,7 +15,7 @@ Every datastore is named for its owner, so the name answers "whose is this?" wit
 | Shared Redis key (three only) | `shared:…` | `shared:geo:…` — the prefix *is* the warning |
 | Kafka topic in `global-kafka` | `<cell>.<domain>.events` (cell-prefixed from day 1, one cell today) | `c1.orders.events` |
 
-**Placeholder notation**: `<name>` means substitute a value. Literal braces `{name}` mean a **Redis cluster hash tag** and are load-bearing — they force keys onto one shard. `catalog:menu:{rid}:<ver>` colocates a restaurant's blob and pointer on purpose; `shared:geo:<cell>:<gh4>` has no tag on purpose, so geo shards spread across nodes rather than collapsing onto one.
+**Placeholder notation**: `<name>` means substitute a value. Literal braces `{name}` mean a **Redis cluster hash tag** and are load-bearing — they force keys onto one shard. `catalog:menu:{rid}` colocates a restaurant's menu and its render lock on purpose; `shared:geo:<cell>:<gh4>` has no tag on purpose, so geo shards spread across nodes rather than collapsing onto one.
 
 **Short names vs deployed names**: prose throughout the docs refers to a table by its entity name (`rider_state`, `order_tracking`); the deployed AWS resource is `sfo-<owner>-<entity>` (`sfo-dispatch-rider-state`, `sfo-order-tracking`). The per-service tables below are the authoritative mapping. Redis keys are always written in full, prefix included — there the prefix *is* the ownership statement and the thing `cache_client` enforces.
 
@@ -36,7 +36,7 @@ Every datastore is named for its owner, so the name answers "whose is this?" wit
 |---|---|
 | **money** | `edge:rl:*`, `edge:adm:place:*`, `order:idem:*`, `payment:idem:*`, `shared:ticket:*` |
 | **realtime** | `shared:geo:*`, `shared:loc:*`, `shared:hb:*`, `shared:trk:*`, `inventory:adm:*` |
-| **catalog** | `catalog:menu:*` (blob + pointer), `catalog:browse:*`, `catalog:lock:*` |
+| **catalog** | `catalog:menu:*` (rendered menu, cache-aside), `catalog:browse:*`, `catalog:lock:*` |
 
 Compute legend: **MS** = ECS Fargate microservice · **GW** = ECS on EC2 connection gateway · **λ** = Lambda · **W** = worker (no inbound API).
 
@@ -70,13 +70,13 @@ Owns what a restaurant sells, and the entire menu cache pipeline.
 
 | | |
 |---|---|
-| Postgres | **`catalog_db`** — `restaurants`, `restaurant_cuisines` (many-to-many tag rows, lowercase slugs), `menu_categories` (name, sort order, item membership), `menu_items` (+ modifier groups/options, `item_tags` filter tags), `menu_versions` (bumped in the same tx as the rows, category edits included), promo rules, tax tables, `outbox`; search via `tsvector` + `pg_trgm` GIN indexes maintained in the same tx (ADR-0019) |
+| Postgres | **`catalog_db`** — `restaurants`, `restaurant_cuisines` (many-to-many tag rows, lowercase slugs), `menu_categories` (name, sort order, item membership), `menu_items` (+ modifier groups/options, `item_tags` filter tags), promo rules, tax tables, `outbox` (`restaurants.version` bumps in the same tx as the rows, category edits included); search via `tsvector` + `pg_trgm` GIN indexes maintained in the same tx (ADR-0019) |
 | Calls | Identity — `POST /v1/internal/grants` on self-serve onboarding (grant `restaurant_admin` + `restaurant_id` to the creating user; idempotent, retried; never edge-routed). Onboarding is idempotent by owner — phase-1 claim model allows **one restaurant per user**, enforced by `UNIQUE(owner_user_id)`; a repeat POST returns the existing restaurant and re-attempts the grant (the repair path) |
-| Redis | `catalog:menu:{rid}:<ver>` — rendered blob, 24h<br>`catalog:menu:ptr:{rid}` — current-version pointer, 7d<br>`catalog:browse:<gh5>:<cuisine>:<page>` — browse pages, 60s<br>`catalog:lock:menu:{rid}` — singleflight on render miss |
+| Redis | `catalog:menu:{rid}` — rendered menu, cache-aside: `DEL` on every menu-edit commit, refilled on read, 5-min TTL bounds the refill race (ADR-0027)<br>`catalog:browse:<gh5>:<cuisine>:<page>` — browse pages, 60s<br>`catalog:lock:menu:{rid}` — singleflight on render miss |
 | Kafka | **produces** `catalog.changes` (compacted, outbox → Debezium) |
 | Internal | `GET /v1/internal/restaurants/{rid}/snapshot?item_ids=…` — authoritative pricing **read** for Order's pricing lib (system-only, never edge-routed, cache-bypassing, torn-read-safe; persists nothing — the durable pricing snapshot lives in `order_db`) |
-| CDN | menus (immutable per version), browse pages (30s), images |
-| λ | menu-cache version bump on publish |
+| CDN | menus (near-fresh, 5s), browse pages (30s), images |
+| λ | — (the menu cache invalidates by `DEL` from the service; no async warmers) |
 
 ## Cart — no backend (client state, ADR-0017)
 
