@@ -596,9 +596,28 @@ services:
     # 8086 belongs to schema-registry (8081 is squatted by another local app)
     ports: ["8087:8081"]
     environment:
-      REDIS_HOSTS: global-redis:redis:6379
+      # label:host:port:db — one sidebar entry per logical database, so the
+      # rider world (db2: sfo:geo/loc/hb, ADR-0026) is browsable, not CLI-only.
+      REDIS_HOSTS: "db0-caches:redis:6379:0,db1-edge-ratelimit:redis:6379:1,db2-riders:redis:6379:2"
     depends_on:
       redis: { condition: service_started }
+
+  dynamodb-admin:
+    profiles: [ui]
+    image: aaronshaf/dynamodb-admin:latest
+    # 8088: next free consoles slot (8085 kafka-console, 8086 schema-registry,
+    # 8087 redis-commander). Browses LocalStack's tables (sfo_rider_state,
+    # sfo_deliveries) — items are editable, which is a feature in dev.
+    ports: ["8088:8001"]
+    environment:
+      DYNAMO_ENDPOINT: http://localstack:4566
+      AWS_REGION: us-east-1
+      # LocalStack ignores credentials but the SDK requires them to exist —
+      # same dev fixtures as the app-env anchor.
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    depends_on:
+      localstack: { condition: service_started }
 
   # ── CDC (profile cdc): make up-cdc — Debezium replaces the poller ──
   kafka-connect:

@@ -136,6 +136,8 @@ Profiles: **core** (infra — rabbitmq joined in S10), **apps** (services), **ui
 | obs *(W3)* | Prometheus | 9090 | |
 | obs *(W3)* | Grafana | 3000 | |
 | ui | Redpanda Console | 8085 | Kafka + Schema Registry browser |
+| ui | Redis Commander | 8087 | Redis browser — sidebar entry per DB: db0 caches/tickets, db1 edge rate-limit, db2 rider world (`sfo:*`) |
+| ui | DynamoDB Admin | 8088 | LocalStack DDB browser — `sfo_rider_state`, `sfo_deliveries`; items editable (dev feature) |
 
 **App services** (profile `apps`) — each service's debugpy port is **app port + 1000**:
 
@@ -181,7 +183,7 @@ The full stack is ≈ 8–9 GB, so **slim mode is the default**, not the excepti
 - If the same service is running containerized, `make dev` stops that container; the nginx gateway falls back to `host.docker.internal:<port>` for that upstream so routed traffic reaches your host process (proposed mechanism).
 - Typical order-path session: `make up && make up-apps ONLY="edge-bff identity catalog inventory payment" && make dev SVC=order`. Pricing needs no container — editing `libs/smartfood-pricing` hot-reloads inside the natively-run Order workers, which makes pricing rules unusually pleasant to iterate on.
 
-Other daily targets: `make logs SVC=payment`, `make psql DB=order_db`, `make test`, `make cov` (adds the enforced 100% coverage gate), `make demo`, `make chaos` / `make chaos-off`. Planned *(W3)*: `make ddb` (DynamoDB shell against LocalStack), `make test-int`, `make bootstrap` (regenerate local JWT keypair).
+Other daily targets: `make logs SVC=payment`, `make psql DB=order_db`, `make test`, `make cov` (adds the enforced 100% coverage gate), `make demo`, `make chaos` / `make chaos-off`. Planned *(W3)*: `make test-int`, `make bootstrap` (regenerate local JWT keypair). (The once-planned `make ddb` shell was superseded by the DynamoDB Admin UI — `make up-ui`, :8088.)
 
 ---
 
@@ -288,7 +290,7 @@ The invariant this machinery exists to prove (and CI asserts): **N injected time
 - **Hot reload**: containerized apps mount `app/` + `libs/` and run `uvicorn --reload`; native (`make dev`) does the same. A lib edit reloads every consumer.
 - **debugpy**: start any service with `DEBUGPY=1` (works for both `make dev` and containers) — it listens on **app port + 1000** (order = 9006). A checked-in `.vscode/launch.json` with an attach configuration per service is planned *(W3)*; until then add your own attach config pointing at the port.
 - **Temporal**: the dev server persists SQLite history, so **workers replay in-flight workflows after restart** — you can kill and restart the order service mid-saga and watch it resume. Use the UI (8233) to inspect activity failures/retries and to send signals manually (e.g. fake a `restaurant_decision`).
-- **Data poking**: `make psql DB=order_db` (also `payment_db`, `catalog_db`, …), Redpanda Console (8085) for topics + schemas, `make logs SVC=x` for container logs. `make ddb` for LocalStack DynamoDB is planned *(W3)*.
+- **Data poking**: `make psql DB=order_db` (also `payment_db`, `catalog_db`, …), Redpanda Console (8085) for topics + schemas, `make logs SVC=x` for container logs. DynamoDB Admin (8088) browses LocalStack's tables and Redis Commander (8087) all three Redis DBs — both start with `make up-ui`.
 - **Tracing locally** *(W3 — needs the `obs` profile / `make up-obs`)*: find any request in Jaeger by `order_id` tag; edge-bff stamps `X-Request-ID` and the root span.
 
 ---
