@@ -86,6 +86,34 @@ def test_branch_views_carry_the_brand_for_insights_scoping():
     assert payload["brand_id"] == body["id"]  # the owner's claim — the OR's first arm
 
 
+def test_owners_own_shop_views_are_not_demand():
+    """Dashboard peeks, demo drives, and the canary all fetch menus with an
+    owner token — none of that is a customer considering food. Self-views
+    are suppressed at the source: the stamped brand claim against the doc's
+    parentage, for both the brand menu and any of its branches. A DIFFERENT
+    restaurant's admin buying lunch still counts."""
+    producer = RecordingProducer()
+    app = _app(_browse(producer))
+    with TestClient(app) as c:
+        body = c.post(
+            "/v1/restaurants",
+            json={"name": "Biryani House", "city": "springfield", "cuisines": ["pakistani"]},
+            headers=CUSTOMER,
+        ).json()
+        brand, branch = body["id"], body["branches"][0]["id"]
+        owner = headers_for(AuthContext(sub="usr_9", role="restaurant_admin", restaurant_id=brand))
+        assert c.get(f"/v1/menus/{brand}", headers=owner).status_code == 200
+        assert c.get(f"/v1/menus/{branch}", headers=owner).status_code == 200
+        assert producer.sent == []  # neither self-view fired
+
+        rival = headers_for(
+            AuthContext(sub="usr_5", role="restaurant_admin", restaurant_id="brd_other")
+        )
+        assert c.get(f"/v1/menus/{branch}", headers=rival).status_code == 200
+    (event,) = producer.sent  # the rival's lunch scouting counts
+    assert json.loads(event["record"]["payload"])["user_id"] == "usr_5"
+
+
 def test_anonymous_views_ride_with_null_identity():
     """public_read menus arrive unstamped — the view still counts (volume),
     with user_id null (excluded from conversion; you cannot join an order

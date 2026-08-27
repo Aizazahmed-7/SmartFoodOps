@@ -609,7 +609,14 @@ async def get_menu(
     # volume only. X-Auth-Sub is trustworthy here because only the edge can
     # set it (the gateway strips client-supplied copies).
     browse = getattr(request.app.state, "browse", None)
-    if browse is not None:
+    # An owner looking at their own shop is not demand: the dashboard, the
+    # demo scripts, and the canary all drive menus with an owner token, and
+    # every one of those "views" would inflate the funnel. The edge-stamped
+    # restaurant claim (their BRAND id) against the doc's parentage is the
+    # whole test — a different restaurant's admin buying lunch still counts.
+    claim = request.headers.get("x-auth-restaurant-id")
+    own_shop = claim is not None and claim in (restaurant_id, menu.get("brand_id"))
+    if browse is not None and not own_shop:
         ctxvars = structlog.contextvars.get_contextvars()
         await browse.menu_viewed(
             restaurant_id,
