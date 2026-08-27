@@ -30,5 +30,9 @@ class Settings(BaseSettings):
 
     default_capacity: int = 10  # concurrent-order slots until the admin sets one
 
+    # Branch→brand ownership checks resolve parentage via catalog's public
+    # read (memoized per process — see adapters/catalog_parent.py).
+    catalog_base_url: str = "http://localhost:8002"
+
     # Tests use sqlite + create_all; containers run Alembic migrations.
     create_all: bool = False

@@ -31,5 +31,6 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0025](0025-side-effects-ride-a-task-queue.md) | Side effects ride a task queue; projections ride the log | Accepted |
 | [0026](0026-dispatch-truth-in-dynamodb-events-as-copies.md) | Dispatch's truth lives in DynamoDB; its events are copies | Accepted |
 | [0027](0027-menu-cache-aside.md) | Menu cache is cache-aside; versioned blob + pointer retired | Accepted |
+| [0028](0028-brands-and-branch-menu-inheritance.md) | Brands as restaurant rows; branch menus inherit by fan-out | Accepted |
 
 **Conventions**: files are `NNNN-kebab-title.md`; numbers are never reused. Superseding an ADR = new ADR + status change here, never editing the old decision.

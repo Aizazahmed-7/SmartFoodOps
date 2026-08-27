@@ -13,14 +13,24 @@ wrong at volume. The database is good at this; let it.
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import menu_views, order_facts
+
+
+def _scoped(columns: Any, restaurant_id: str) -> sa.ColumnElement[bool]:
+    """Owner scoping (ADR-0028): the claim is the BRAND id, rows carry both
+    the branch and (once healed) the brand — either arm owns the row. The
+    restaurant_id arm also keeps pre-repoint rows and old branch-scoped
+    tokens visible through the transition window."""
+    return (columns.restaurant_id == restaurant_id) | (columns.brand_id == restaurant_id)
+
 
 # Which columns each event type contributes beyond the always-updated base.
 _EVENT_COLUMNS: dict[str, str] = {
@@ -80,6 +90,10 @@ class AnalyticsRepo:
         # later stamp (the delivered_at convergence rule, applied again).
         if payload.get("rider_id"):
             values["rider_id"] = payload["rider_id"]
+        # Same convergence rule as rider_id: only a KNOWN brand writes the
+        # column — a legacy event replay must never blank a healed stamp.
+        if payload.get("brand_id"):
+            values["brand_id"] = payload["brand_id"]
 
         insert = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
         update_cols = {k: v for k, v in values.items() if k != "order_id"}
@@ -98,11 +112,25 @@ class AnalyticsRepo:
             .values(
                 view_id=event_id,
                 restaurant_id=payload["restaurant_id"],
+                brand_id=payload.get("brand_id"),
                 user_id=payload.get("user_id"),
                 viewed_at=datetime.fromisoformat(payload["viewed_at"]),
             )
             .on_conflict_do_nothing(index_elements=["view_id"])
         )
+
+    async def repoint_brand(self, restaurant_id: str, brand_id: str) -> int:
+        """Backfill NULL brand_id for one branch's rows (facts and views) —
+        the IS NULL predicate makes replay a no-op. Returns rows healed."""
+        healed = 0
+        for table in (order_facts, menu_views):
+            result = await self._s.execute(
+                table.update()
+                .where((table.c.restaurant_id == restaurant_id) & (table.c.brand_id.is_(None)))
+                .values(brand_id=brand_id)
+            )
+            healed += int(cast("CursorResult[Any]", result).rowcount)
+        return healed
 
     # ── aggregate reads (all bounded by a `since` window) ──────────
 
@@ -198,7 +226,7 @@ class AnalyticsRepo:
                         "revenue_cents"
                     ),
                 )
-                .where((c.restaurant_id == restaurant_id) & (c.placed_at >= since))
+                .where(_scoped(c, restaurant_id) & (c.placed_at >= since))
                 .group_by(day)
                 .order_by(day)
             )
@@ -229,14 +257,14 @@ class AnalyticsRepo:
                         "revenue_cents"
                     ),
                     sa.func.count(sa.distinct(c.user_id)).label("customers"),
-                ).where(c.restaurant_id == restaurant_id)
+                ).where(_scoped(c, restaurant_id))
             )
         ).one()
         repeat = (
             await self._s.execute(
                 sa.select(sa.func.count()).select_from(
                     sa.select(c.user_id)
-                    .where(c.restaurant_id == restaurant_id)
+                    .where(_scoped(c, restaurant_id))
                     .group_by(c.user_id)
                     .having(sa.func.count() >= 2)
                     .subquery()
@@ -263,7 +291,7 @@ class AnalyticsRepo:
                 sa.select(
                     sa.func.count().label("views"),
                     sa.func.count(sa.distinct(mv.user_id)).label("viewers"),
-                ).where((mv.restaurant_id == restaurant_id) & (mv.viewed_at >= since))
+                ).where(_scoped(mv, restaurant_id) & (mv.viewed_at >= since))
             )
         ).one()
         if self._s.bind.dialect.name == "postgresql":  # pragma: no cover — PG-only
@@ -278,7 +306,7 @@ class AnalyticsRepo:
         converted = (
             await self._s.execute(
                 sa.select(sa.func.count(sa.distinct(mv.user_id))).where(
-                    (mv.restaurant_id == restaurant_id)
+                    _scoped(mv, restaurant_id)
                     & (mv.viewed_at >= since)
                     & mv.user_id.is_not(None)
                     & sa.exists(
@@ -309,7 +337,7 @@ class AnalyticsRepo:
                         sa.case((c.cancel_reason.in_(_REJECTION_REASONS), 1), else_=0)
                     ).label("rejected"),
                     sa.func.count(c.settled_at).label("settled"),
-                ).where((c.restaurant_id == restaurant_id) & (c.placed_at >= since))
+                ).where(_scoped(c, restaurant_id) & (c.placed_at >= since))
             )
         ).one()
         return {

@@ -41,6 +41,23 @@ export interface RestaurantCard {
   version: number;
   lat?: number | null;
   lon?: number | null;
+  // Brands (ADR-0028): cards are branches; title by display_name.
+  brand_id?: string | null;
+  branch_label?: string | null;
+  display_name?: string;
+}
+
+export interface Branch {
+  id: string;
+  brand_id: string | null;
+  branch_label: string | null;
+  name: string;
+  display_name: string;
+  city: string;
+  status: "open" | "paused";
+  lat: number | null;
+  lon: number | null;
+  version: number;
 }
 
 export interface Restaurant extends RestaurantCard {
@@ -76,6 +93,9 @@ export interface MenuItem {
   rank: number;
   tags: string[];
   modifier_groups: ModifierGroup[];
+  // "base" = inherited from the brand (86 via the availability endpoint);
+  // "local" = this scope owns the row (ordinary PATCH/DELETE).
+  source?: "base" | "local";
 }
 
 export interface MenuCategory {
@@ -88,6 +108,8 @@ export interface MenuCategory {
 export interface Menu {
   restaurant_id: string;
   name: string;
+  display_name?: string;
+  brand_id?: string | null;
   status: string;
   version: number;
   categories: MenuCategory[];
@@ -228,6 +250,7 @@ export interface CancelResult {
 
 export interface FeedOrder {
   order_id: string;
+  restaurant_id?: string; // which branch this ticket belongs to
   status: OrderStatus;
   placed_at: string;
   total_cents: number;

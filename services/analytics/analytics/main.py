@@ -50,7 +50,14 @@ def create_app(settings: Settings | None = None, *, runners: list[Runner] | None
     if not live_runners and settings.kafka_consumers == "on":  # pragma: no cover — live
         # Live wiring only: loop, retries, DLQ policy all live (tested) in
         # smartfood-kafka; the batch shape is FR-43's.
-        from .consumers import GROUP_FACTS, GROUP_VIEWS, FactsProjector, ViewsProjector
+        from .consumers import (
+            GROUP_FACTS,
+            GROUP_REPOINT,
+            GROUP_VIEWS,
+            BrandRepointHandler,
+            FactsProjector,
+            ViewsProjector,
+        )
 
         serde = AvroSerde(SchemaRegistry(settings.schema_registry_url))
         projector = FactsProjector(sessions)
@@ -69,6 +76,13 @@ def create_app(settings: Settings | None = None, *, runners: list[Runner] | None
             serde,
             bootstrap=settings.kafka_bootstrap,
         )
+        repoint_consumer = EventConsumer(
+            topic(settings.cell_id, Topic.CATALOG_CHANGES),
+            GROUP_REPOINT,
+            BrandRepointHandler(sessions),
+            serde,
+            bootstrap=settings.kafka_bootstrap,
+        )
         live_runners = [
             lambda: facts_consumer.run_batches(
                 projector, max_batch=settings.batch_max, wait_ms=settings.batch_wait_ms
@@ -76,6 +90,7 @@ def create_app(settings: Settings | None = None, *, runners: list[Runner] | None
             lambda: views_consumer.run_batches(
                 views, max_batch=settings.batch_max, wait_ms=settings.batch_wait_ms
             ),
+            repoint_consumer.run,
         ]
 
     @asynccontextmanager

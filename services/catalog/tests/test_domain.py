@@ -45,22 +45,29 @@ async def test_every_mutation_leaves_the_three_writes(grants, cache):
     await svc.set_status(r.id, "paused")
 
     async with sessions() as s:
-        events = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
+        rows = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
 
+    # Every brand mutation fans out (ADR-0028): the brand's aggregate AND its
+    # first branch's aggregate each get a gapless event stream.
+    events = [e for e in rows if e.aggregate_id == r.id]
+    branch_events = [e for e in rows if e.aggregate_id != r.id]
     assert [e.aggregate_version for e in events] == [1, 2, 3]  # bump per mutation, no gaps
     assert [e.event_type for e in events] == [
         "RestaurantCreated",
         "RestaurantUpdated",
         "RestaurantPaused",
     ]
+    assert [e.event_type for e in branch_events] == [e.event_type for e in events]
+    assert all(e.payload["brand_id"] == r.id for e in branch_events)
+    assert branch_events[1].payload["name"] == "Biryani Palace"  # the copy propagated
     # Deterministic identity: anyone can recompute the id of a fact.
     assert events[0].id == event_id("restaurant", r.id, 1, "RestaurantCreated")
-    assert all(e.published_at is None for e in events)  # staged, drained in W3
+    assert all(e.published_at is None for e in rows)  # staged, drained in W3
     # Snapshots stand alone (compacted topic): each carries full state —
     # INCLUDING the owner on EVERY event, not just the birth one. Identity's
     # grant convergence must survive RestaurantCreated being compacted away
     # in favor of any later event on the same key.
-    assert all(e.payload["owner_user_id"] == "usr_1" for e in events)
+    assert all(e.payload["owner_user_id"] == "usr_1" for e in rows)
     assert events[1].payload["name"] == "Biryani Palace"
     assert events[2].payload["status"] == "paused"
     assert events[2].payload["cuisines"] == ["bbq", "pakistani"]
@@ -89,7 +96,7 @@ async def test_concurrent_onboarding_race_adopts_winner(grants, cache, monkeypat
     assert second.id == first.id  # adopted, not duplicated
     async with sessions() as s:
         count = (await s.execute(sa.select(sa.func.count()).select_from(outbox))).scalar_one()
-    assert count == 1  # the losing attempt's writes all rolled back
+    assert count == 2  # brand + first-branch events; the loser's writes all rolled back
 
 
 async def test_every_event_carries_full_state(grants, cache):
@@ -123,8 +130,9 @@ async def test_every_event_carries_full_state(grants, cache):
     await svc.set_status(r.id, "paused")  # a PROFILE event, after menu edits
 
     async with sessions() as s:
-        events = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
+        rows = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
 
+    events = [e for e in rows if e.aggregate_id == r.id]
     assert [e.event_type for e in events] == [
         "RestaurantCreated",
         "CategoryAdded",
@@ -140,6 +148,11 @@ async def test_every_event_carries_full_state(grants, cache):
     # And the snapshot inside each event matches its OWN moment: the create
     # event has an empty menu — state as of that commit, not as of now.
     assert events[0].payload["menu"] == {"categories": []}
+    # The branch twins carry the same base items as their EFFECTIVE menu —
+    # what inventory provisions from, never having heard of inheritance.
+    branch_last = [e for e in rows if e.aggregate_id != r.id][-1].payload
+    branch_item = branch_last["menu"]["categories"][0]["items"][0]
+    assert (branch_item["name"], branch_item["source"]) == ("Biryani", "base")
 
 
 async def test_delete_item_leaves_no_orphan_rows(grants, cache):
@@ -298,5 +311,5 @@ async def test_staged_events_carry_the_traceparent(grants, cache):
     with use_traceparent(tp):
         r, _ = await _create(svc)
         async with sessions() as s:
-            row = (await s.execute(sa.select(outbox))).one()
-        assert row.traceparent == tp
+            rows = (await s.execute(sa.select(outbox))).all()
+        assert rows and all(row.traceparent == tp for row in rows)  # brand + branch alike

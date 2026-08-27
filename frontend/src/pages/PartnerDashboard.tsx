@@ -2,8 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import {
-  addCategory, addItem, deleteCategory, deleteItem, getMenu, patchItem,
-  pauseRestaurant, resumeRestaurant, type ItemPayload,
+  addCategory, addItem, createBranch, deleteCategory, deleteItem, getMenu, listBranches,
+  patchItem, pauseRestaurant, resumeRestaurant, setBaseItemAvailability, type ItemPayload,
 } from "../api/client";
 import type { MenuItem } from "../api/types";
 import { useAuth } from "../state/auth";
@@ -124,53 +124,132 @@ function ItemForm({
   );
 }
 
+function AddBranchForm({
+  brandId, onDone, onClose,
+}: {
+  brandId: string;
+  onDone: (branchId: string) => void;
+  onClose: () => void;
+}) {
+  const [label, setLabel] = useState("");
+  const [city, setCity] = useState("springfield");
+  const [lat, setLat] = useState("");
+  const [lon, setLon] = useState("");
+  const create = useMutation({
+    mutationFn: () =>
+      createBranch(brandId, {
+        branch_label: label,
+        city,
+        ...(lat ? { lat: Number(lat) } : {}),
+        ...(lon ? { lon: Number(lon) } : {}),
+      }),
+    onSuccess: (branch) => onDone(branch.id),
+  });
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
+      <div className="card w-full max-w-sm space-y-3">
+        <h3 className="font-semibold">New branch</h3>
+        <input className="input" placeholder="Label (Downtown, Airport…)"
+          value={label} onChange={(e) => setLabel(e.target.value)} />
+        <input className="input" placeholder="City"
+          value={city} onChange={(e) => setCity(e.target.value)} />
+        <div className="flex gap-2">
+          <input className="input" placeholder="lat (optional)"
+            value={lat} onChange={(e) => setLat(e.target.value)} />
+          <input className="input" placeholder="lon (optional)"
+            value={lon} onChange={(e) => setLon(e.target.value)} />
+        </div>
+        <ErrorNote error={create.error} />
+        <div className="flex justify-end gap-2">
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" disabled={!label || !city || create.isPending}
+            onClick={() => create.mutate()}>
+            Open branch
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function PartnerDashboard() {
   const { claims } = useAuth();
   const location = useLocation();
-  const rid = claims?.restaurant_id;
+  const rid = claims?.restaurant_id; // the BRAND id (ADR-0028)
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>("orders");
   const [newCategory, setNewCategory] = useState("");
   const [itemFormCategory, setItemFormCategory] = useState<string | null>(null);
+  const [scopeId, setScopeId] = useState<string | null>(null);
+  const [addingBranch, setAddingBranch] = useState(false);
 
-  const menu = useQuery({
-    queryKey: ["menu", rid],
-    queryFn: () => getMenu(rid!),
+  const branches = useQuery({
+    queryKey: ["branches", rid],
+    queryFn: () => listBranches(rid!),
     enabled: !!rid,
   });
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ["menu", rid] });
+  const branchList = branches.data?.branches ?? [];
+  // Menu scope: a selected branch (effective menu), or the brand (base menu).
+  // Defaults to the first branch — the single-location owner sees their shop.
+  const scope = scopeId ?? branchList[0]?.id ?? rid;
+  const onBranch = scope !== rid; // base-menu scope has no pause/stock
+
+  const menu = useQuery({
+    queryKey: ["menu", scope],
+    queryFn: () => getMenu(scope!),
+    enabled: !!scope && (branches.isSuccess || branches.isError),
+  });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["menu", scope] });
 
   const createCategory = useMutation({
-    mutationFn: () => addCategory(rid!, newCategory, menu.data?.categories.length ?? 0),
+    mutationFn: () => addCategory(scope!, newCategory, menu.data?.categories.length ?? 0),
     onSuccess: () => { setNewCategory(""); refresh(); },
   });
   const removeCategory = useMutation({
-    mutationFn: (cid: string) => deleteCategory(rid!, cid),
+    mutationFn: (cid: string) => deleteCategory(scope!, cid),
     onSuccess: refresh,
   });
   const createItem = useMutation({
-    mutationFn: (item: ItemPayload) => addItem(rid!, item),
+    mutationFn: (item: ItemPayload) => addItem(scope!, item),
     onSuccess: () => { setItemFormCategory(null); refresh(); },
   });
   const toggle86 = useMutation({
-    mutationFn: (item: MenuItem) => patchItem(rid!, item.id, { available: !item.available }),
+    // A base item viewed from a branch 86s LOCALLY (the override endpoint);
+    // everything else is an ordinary row the scope owns.
+    mutationFn: async (item: MenuItem): Promise<unknown> =>
+      onBranch && item.source === "base"
+        ? setBaseItemAvailability(scope!, item.id, !item.available)
+        : patchItem(scope!, item.id, { available: !item.available }),
     onSuccess: refresh,
   });
   const removeItem = useMutation({
-    mutationFn: (itemId: string) => deleteItem(rid!, itemId),
+    mutationFn: (itemId: string) => deleteItem(scope!, itemId),
     onSuccess: refresh,
   });
   const setStatus = useMutation({
-    mutationFn: (pause: boolean) => (pause ? pauseRestaurant(rid!) : resumeRestaurant(rid!)),
+    mutationFn: (pause: boolean) => (pause ? pauseRestaurant(scope!) : resumeRestaurant(scope!)),
     onSuccess: refresh,
   });
 
   if (!claims) return <Navigate to="/login" replace state={{ from: location }} />;
   if (!rid) return <Navigate to="/partner" replace />;
-  if (menu.isLoading) return <Spinner />;
+  if (menu.isLoading || !menu.data) return <Spinner />;
   if (menu.error) return <ErrorNote error={menu.error} />;
-  const data = menu.data!;
+  const data = menu.data;
   const paused = data.status === "paused";
+  const branchLabels = Object.fromEntries(
+    branchList.map((b) => [b.id, b.branch_label ?? b.id]),
+  );
+
+  const scopeChip = (id: string, label: string) => (
+    <button
+      key={id}
+      className={`rounded-lg px-3 py-1 text-xs ${scope === id ? "bg-orange-600 text-white" : "bg-slate-800 text-slate-300 hover:text-white"}`}
+      onClick={() => { setScopeId(id); if (id === rid && tab === "stock") setTab("menu"); }}
+    >
+      {label}
+    </button>
+  );
 
   const tabButton = (t: Tab, label: string) => (
     <button
@@ -184,25 +263,48 @@ export default function PartnerDashboard() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-bold">{data.name}</h1>
+        <h1 className="text-2xl font-bold">{data.display_name ?? data.name}</h1>
         <span className={`tag ${paused ? "bg-red-950 text-red-300" : "bg-emerald-950 text-emerald-300"}`}>
           {paused ? "paused" : "open"} · menu v{data.version}
         </span>
-        <button className={paused ? "btn-primary" : "btn-danger"}
-          disabled={setStatus.isPending}
-          onClick={() => setStatus.mutate(!paused)}>
-          {paused ? "Resume orders" : "Pause orders"}
-        </button>
+        {onBranch && (
+          <button className={paused ? "btn-primary" : "btn-danger"}
+            disabled={setStatus.isPending}
+            onClick={() => setStatus.mutate(!paused)}>
+            {paused ? "Resume orders" : "Pause orders"}
+          </button>
+        )}
         <nav className="ml-auto flex gap-1 rounded-xl border border-slate-800 p-1">
           {tabButton("orders", "Orders")}
           {tabButton("menu", "Menu")}
-          {tabButton("stock", "Stock")}
+          {onBranch && tabButton("stock", "Stock")}
           {tabButton("insights", "Insights")}
         </nav>
       </div>
 
-      {tab === "orders" && <PartnerOrders />}
-      {tab === "stock" && <PartnerStock rid={rid} />}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Location</span>
+        {branchList.map((b) => scopeChip(b.id, b.branch_label ?? b.id))}
+        {scopeChip(rid, "Base menu")}
+        <button className="btn-ghost px-2 py-1 text-xs" onClick={() => setAddingBranch(true)}>
+          + Add branch
+        </button>
+      </div>
+
+      {addingBranch && (
+        <AddBranchForm
+          brandId={rid}
+          onClose={() => setAddingBranch(false)}
+          onDone={(branchId) => {
+            setAddingBranch(false);
+            setScopeId(branchId);
+            queryClient.invalidateQueries({ queryKey: ["branches", rid] });
+          }}
+        />
+      )}
+
+      {tab === "orders" && <PartnerOrders branchLabels={branchLabels} />}
+      {tab === "stock" && onBranch && <PartnerStock rid={scope!} />}
       {tab === "insights" && <PartnerInsights />}
       {tab !== "menu" ? null : (<>
       <ErrorNote error={removeCategory.error ?? toggle86.error ?? removeItem.error} />
@@ -229,6 +331,12 @@ export default function PartnerDashboard() {
                   <div>
                     <p className="font-medium">{item.name} · <Money cents={item.price_cents} /></p>
                     <div className="mt-1 flex flex-wrap gap-1">
+                      {onBranch && item.source === "base" && (
+                        <span className="tag bg-sky-950 text-sky-300"
+                          title="Inherited from the base menu — 86 it locally; edit it on the Base menu">
+                          base
+                        </span>
+                      )}
                       {item.tags.map((t) => <span key={t} className="tag">{t}</span>)}
                       {item.modifier_groups.length > 0 && (
                         <span className="tag">{item.modifier_groups.length} modifier group(s)</span>
@@ -242,10 +350,12 @@ export default function PartnerDashboard() {
                       onClick={() => toggle86.mutate(item)}>
                       {item.available ? "86 it" : "restock"}
                     </button>
-                    <button className="btn-danger px-2 py-1 text-xs"
-                      onClick={() => removeItem.mutate(item.id)}>
-                      ✕
-                    </button>
+                    {!(onBranch && item.source === "base") && (
+                      <button className="btn-danger px-2 py-1 text-xs"
+                        onClick={() => removeItem.mutate(item.id)}>
+                        ✕
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

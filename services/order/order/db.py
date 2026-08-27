@@ -38,6 +38,12 @@ orders = sa.Table(
     sa.Column("order_id", sa.Text, primary_key=True),
     sa.Column("user_id", sa.Text, nullable=False),
     sa.Column("restaurant_id", sa.Text, nullable=False),
+    # The branch's brand (ADR-0028), stamped from the pricing snapshot at
+    # placement; the kitchen feed scopes on it (a brand claim sees every
+    # branch's orders). Nullable forever: pre-brand rows legitimately
+    # predate the concept until the catalog.changes repoint handler fills
+    # them; the feed's OR arm covers the gap.
+    sa.Column("brand_id", sa.Text, nullable=True),
     sa.Column("restaurant_name_snapshot", sa.Text, nullable=False),
     sa.Column("status", sa.Text, nullable=False, server_default="PLACED"),
     # Bumped by the guarded transition helper (S5) — outbox event identity.
@@ -72,6 +78,8 @@ orders = sa.Table(
 sa.Index("ix_orders_history", orders.c.user_id, orders.c.placed_at.desc(), orders.c.order_id.desc())
 # Restaurant feed (S6): status-filtered kitchen queues.
 sa.Index("ix_orders_feed", orders.c.restaurant_id, orders.c.status, orders.c.placed_at)
+# Brand feed (ADR-0028): the same queue walked by the owner's brand claim.
+sa.Index("ix_orders_feed_brand", orders.c.brand_id, orders.c.status, orders.c.placed_at)
 # (ix_orders_sweeper lived here until ADR-0023. Nothing scans for orphaned
 # PLACED rows any more: the workflow creates the order, so an order cannot
 # exist without one. Migration 0003 drops it.)

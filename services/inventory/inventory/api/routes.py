@@ -16,9 +16,10 @@ from smartfood_auth import AuthContext, Role, require_role, require_system
 from ..domain.models import Reservation, ReservationLine
 from ..domain.service import (
     AtCapacity,
+    CatalogUnavailable,
     InsufficientStock,
     InventoryService,
-    StockScopeMismatch,
+    ParentsPort,
 )
 
 router = APIRouter()
@@ -35,8 +36,27 @@ def _svc(request: Request) -> InventoryService:
     return request.app.state.service
 
 
-def _own(ctx: AuthContext, restaurant_id: str) -> None:
-    if ctx.role not in _SCOPE_EXEMPT and ctx.restaurant_id != restaurant_id:
+def _parents(request: Request) -> ParentsPort:
+    return request.app.state.parents
+
+
+async def _own(ctx: AuthContext, restaurant_id: str, request: Request) -> None:
+    """Equality or parentage (ADR-0028): the claim is the BRAND id, the path
+    is usually a branch — catalog answers whose branch it is (memoized).
+    Mismatch and unknown share the one 404; catalog-down on a NEEDED lookup
+    is a truthful 503, never a lying 404."""
+    if ctx.role in _SCOPE_EXEMPT or ctx.restaurant_id == restaurant_id:
+        return
+    try:
+        brand_id = await _parents(request).brand_of(restaurant_id)
+    except CatalogUnavailable:
+        raise ApiError(
+            ErrorCode.DEPENDENCY_UNAVAILABLE,
+            "cannot verify restaurant ownership right now",
+            503,
+            headers={"Retry-After": "1"},
+        ) from None
+    if brand_id is None or brand_id != ctx.restaurant_id:
         raise ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404)
 
 
@@ -81,7 +101,7 @@ def _reservation_out(reservation: Reservation) -> dict:
 
 @router.get("/v1/inventory/restaurants/{restaurant_id}/stock")
 async def list_stock(restaurant_id: str, ctx: RestaurantAdmin, request: Request) -> dict:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     rows = await _svc(request).list_stock(restaurant_id)
     return {
         "items": [
@@ -94,11 +114,8 @@ async def list_stock(restaurant_id: str, ctx: RestaurantAdmin, request: Request)
 async def set_stock(
     restaurant_id: str, item_id: str, body: StockSet, ctx: RestaurantAdmin, request: Request
 ) -> dict:
-    _own(ctx, restaurant_id)
-    try:
-        row = await _svc(request).set_stock(restaurant_id, item_id, body.available)
-    except StockScopeMismatch:
-        raise ApiError(ErrorCode.NOT_FOUND, "unknown item", 404) from None
+    await _own(ctx, restaurant_id, request)
+    row = await _svc(request).set_stock(restaurant_id, item_id, body.available)
     return {"item_id": row.item_id, "available": row.available, "version": row.version}
 
 
@@ -106,7 +123,7 @@ async def set_stock(
 async def set_capacity(
     restaurant_id: str, body: CapacitySet, ctx: RestaurantAdmin, request: Request
 ) -> dict:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     capacity, active = await _svc(request).set_capacity(restaurant_id, body.capacity)
     return {"restaurant_id": restaurant_id, "capacity": capacity, "active": active}
 

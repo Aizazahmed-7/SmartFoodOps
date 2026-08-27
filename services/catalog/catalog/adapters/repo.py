@@ -12,10 +12,13 @@ from typing import Any, cast
 
 import sqlalchemy as sa
 from smartfood_outbox import stage_event as stage_outbox_event
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import (
+    branch_item_overrides,
     item_tags,
     menu_categories,
     menu_items,
@@ -25,6 +28,16 @@ from ..db import (
     restaurant_cuisines,
     restaurants,
 )
+
+
+def _insert_ignoring_conflict(
+    table: sa.Table, values: dict[str, Any], conflict_cols: list[str], dialect: str
+) -> Any:
+    """ON CONFLICT DO NOTHING on both suite dialects (the inventory idiom):
+    PG aborts the whole tx on a constraint error, sqlite forgives it — the
+    dialect-split insert removes that asymmetry."""
+    insert = pg_insert if dialect == "postgresql" else sqlite_insert
+    return insert(table).values(**values).on_conflict_do_nothing(index_elements=conflict_cols)
 
 
 class CatalogRepo:
@@ -44,8 +57,11 @@ class CatalogRepo:
         hours: dict[str, Any] | None,
         timezone: str,
         now: datetime,
+        kind: str = "branch",
+        brand_id: str | None = None,
+        branch_label: str | None = None,
     ) -> str:
-        restaurant_id = f"rst_{uuid.uuid4().hex}"
+        restaurant_id = f"{'brd' if kind == 'brand' else 'rst'}_{uuid.uuid4().hex}"
         await self._s.execute(
             restaurants.insert().values(
                 id=restaurant_id,
@@ -56,6 +72,9 @@ class CatalogRepo:
                 lon=lon,
                 hours=hours,
                 timezone=timezone,
+                kind=kind,
+                brand_id=brand_id,
+                branch_label=branch_label,
                 created_at=now,
                 updated_at=now,
             )
@@ -63,11 +82,76 @@ class CatalogRepo:
         return restaurant_id
 
     async def get_restaurant_by_owner(self, owner_user_id: str) -> Row[Any] | None:
+        """The owner's BRAND — onboarding's idempotency read (a brand's
+        branches copy the owner, so the kind filter keeps this one row)."""
         return (
             await self._s.execute(
-                sa.select(restaurants).where(restaurants.c.owner_user_id == owner_user_id)
+                sa.select(restaurants).where(
+                    (restaurants.c.owner_user_id == owner_user_id) & (restaurants.c.kind == "brand")
+                )
             )
         ).one_or_none()
+
+    async def get_branches(self, brand_id: str) -> list[Row[Any]]:
+        return list(
+            (
+                await self._s.execute(
+                    sa.select(restaurants)
+                    .where(restaurants.c.brand_id == brand_id)
+                    .order_by(restaurants.c.branch_label, restaurants.c.id)
+                )
+            ).all()
+        )
+
+    async def get_branch_by_label(self, brand_id: str, branch_label: str) -> Row[Any] | None:
+        """The branch-create idempotency read (unique per brand)."""
+        return (
+            await self._s.execute(
+                sa.select(restaurants).where(
+                    (restaurants.c.brand_id == brand_id)
+                    & (restaurants.c.branch_label == branch_label)
+                )
+            )
+        ).one_or_none()
+
+    async def copy_profile_to_branches(self, brand_id: str, changes: dict[str, Any]) -> None:
+        """Brand-owned fields (name) propagate to the branches' denormalized
+        copies in the SAME tx as the brand edit — browse reads branch rows."""
+        await self._s.execute(
+            restaurants.update().where(restaurants.c.brand_id == brand_id).values(**changes)
+        )
+
+    async def upsert_override(self, branch_id: str, item_id: str) -> None:
+        """Presence-only 86 (ADR-0028): replay-safe via conflict-ignore."""
+        await self._s.execute(
+            _insert_ignoring_conflict(
+                branch_item_overrides,
+                {"branch_id": branch_id, "item_id": item_id},
+                ["branch_id", "item_id"],
+                self._s.bind.dialect.name if self._s.bind is not None else "sqlite",
+            )
+        )
+
+    async def delete_override(self, branch_id: str, item_id: str) -> None:
+        await self._s.execute(
+            branch_item_overrides.delete().where(
+                (branch_item_overrides.c.branch_id == branch_id)
+                & (branch_item_overrides.c.item_id == item_id)
+            )
+        )
+
+    async def get_unpublished_brands(self) -> list[Row[Any]]:
+        """Brands that have never staged an event (version 0) — the boot
+        backfill's worklist; a crash mid-storm resumes here."""
+        return list(
+            (
+                await self._s.execute(
+                    sa.select(restaurants).where(
+                        (restaurants.c.kind == "brand") & (restaurants.c.version == 0)
+                    )
+                )
+            ).all()
+        )
 
     async def get_restaurant(self, restaurant_id: str) -> Row[Any] | None:
         return (
@@ -249,7 +333,11 @@ class CatalogRepo:
         limit: int,
         offset: int,
     ) -> list[Row[Any]]:
-        query = sa.select(restaurants).where(restaurants.c.city == city)
+        # Brand rows are menu templates, not places — customers browse
+        # branches only (ADR-0028). Legacy rows default to kind='branch'.
+        query = sa.select(restaurants).where(
+            (restaurants.c.city == city) & (restaurants.c.kind == "branch")
+        )
         if cuisine is not None:
             query = query.where(
                 sa.exists(
@@ -261,15 +349,28 @@ class CatalogRepo:
             )
         if tag is not None:
             # "has at least one AVAILABLE item with this tag" — an 86'd
-            # item shouldn't advertise its restaurant in a tag filter.
+            # item shouldn't advertise its restaurant in a tag filter. An
+            # item counts if the branch owns it OR inherits it from its
+            # brand, and only if this branch hasn't locally 86'd it.
             query = query.where(
                 sa.exists(
                     sa.select(sa.literal(1))
                     .select_from(menu_items.join(item_tags, item_tags.c.item_id == menu_items.c.id))
                     .where(
-                        (menu_items.c.restaurant_id == restaurants.c.id)
+                        (
+                            (menu_items.c.restaurant_id == restaurants.c.id)
+                            | (menu_items.c.restaurant_id == restaurants.c.brand_id)
+                        )
                         & (item_tags.c.tag == tag)
                         & (menu_items.c.available == sa.true())
+                        & sa.not_(
+                            sa.exists(
+                                sa.select(sa.literal(1)).where(
+                                    (branch_item_overrides.c.branch_id == restaurants.c.id)
+                                    & (branch_item_overrides.c.item_id == menu_items.c.id)
+                                )
+                            )
+                        )
                     )
                 )
             )
@@ -302,8 +403,19 @@ class CatalogRepo:
 
     # ── menu: set-based reads (no per-row loops — repo contract) ───
 
+    async def get_override_ids(self, branch_id: str) -> set[str]:
+        """Base item ids this branch has locally 86'd (presence-only rows)."""
+        rows = (
+            await self._s.execute(
+                sa.select(branch_item_overrides.c.item_id).where(
+                    branch_item_overrides.c.branch_id == branch_id
+                )
+            )
+        ).scalars()
+        return set(rows)
+
     async def get_menu_rows(
-        self, restaurant_id: str
+        self, scope_ids: Sequence[str]
     ) -> tuple[
         Sequence[Row[Any]],
         Sequence[Row[Any]],
@@ -311,19 +423,20 @@ class CatalogRepo:
         Sequence[Row[Any]],
         Sequence[Row[Any]],
     ]:
-        """(categories, items, tags, groups, options) for one restaurant —
-        5 queries regardless of menu size."""
+        """(categories, items, tags, groups, options) for a menu scope —
+        one id for brands/legacy rows, [brand_id, branch_id] for a branch's
+        EFFECTIVE menu (ADR-0028). 5 queries regardless of menu size."""
         categories = (
             await self._s.execute(
                 sa.select(menu_categories)
-                .where(menu_categories.c.restaurant_id == restaurant_id)
+                .where(menu_categories.c.restaurant_id.in_(scope_ids))
                 .order_by(menu_categories.c.rank, menu_categories.c.id)
             )
         ).all()
         items = (
             await self._s.execute(
                 sa.select(menu_items)
-                .where(menu_items.c.restaurant_id == restaurant_id)
+                .where(menu_items.c.restaurant_id.in_(scope_ids))
                 .order_by(menu_items.c.rank, menu_items.c.id)
             )
         ).all()
@@ -358,15 +471,16 @@ class CatalogRepo:
         return categories, items, tags, groups, options
 
     async def get_pricing_rows(
-        self, restaurant_id: str, item_ids: list[str]
+        self, scope_ids: Sequence[str], item_ids: list[str]
     ) -> tuple[Sequence[Row[Any]], Sequence[Row[Any]], Sequence[Row[Any]]]:
         """(items, groups, options) for the requested ids only — the money
         path's read: ownership in the WHERE (foreign ids simply don't come
-        back), no tags/categories (pricing doesn't render menus)."""
+        back), scoped to the menu scope (branch + its brand, ADR-0028), no
+        tags/categories (pricing doesn't render menus)."""
         items = (
             await self._s.execute(
                 sa.select(menu_items).where(
-                    menu_items.c.id.in_(item_ids) & (menu_items.c.restaurant_id == restaurant_id)
+                    menu_items.c.id.in_(item_ids) & menu_items.c.restaurant_id.in_(scope_ids)
                 )
             )
         ).all()

@@ -18,6 +18,10 @@ order_facts = sa.Table(
     metadata,
     sa.Column("order_id", sa.Text, primary_key=True),
     sa.Column("restaurant_id", sa.Text, nullable=False, index=True),
+    # The branch's brand (ADR-0028), from the event payload; NULL for facts
+    # projected before the cutover until the repoint consumer heals them.
+    # The owner's read API scopes on (brand_id OR restaurant_id).
+    sa.Column("brand_id", sa.Text, nullable=True, index=True),
     sa.Column("user_id", sa.Text, nullable=False),
     # The LATEST lifecycle state seen. Per-order ordering is guaranteed by
     # the topic key (= order_id → one partition), so last-write-wins here
@@ -48,6 +52,7 @@ menu_views = sa.Table(
     metadata,
     sa.Column("view_id", sa.Text, primary_key=True),
     sa.Column("restaurant_id", sa.Text, nullable=False),
+    sa.Column("brand_id", sa.Text, nullable=True),
     sa.Column("user_id", sa.Text, nullable=True),
     sa.Column("viewed_at", sa.TIMESTAMP(timezone=True), nullable=False),
 )

@@ -13,7 +13,7 @@ per-line details; the conditional UPDATE remains the true oversell guard
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from smartfood_kafka import EventType
 from smartfood_otel import get_logger
@@ -36,8 +36,18 @@ class AtCapacity(Exception):
     pass
 
 
-class StockScopeMismatch(Exception):
-    """The item exists but belongs to another restaurant — surfaces as 404."""
+class CatalogUnavailable(Exception):
+    """Catalog unreachable during a NEEDED branch→brand lookup — the route
+    answers 503, never a lying 404 (the caller's branch may be theirs).
+    Lives in the domain so the API layer never imports an adapter (the
+    layer contract); the adapter raises it from here."""
+
+
+class ParentsPort(Protocol):
+    """Branch→brand resolution (ADR-0028) — implemented by the memoized
+    catalog lookup adapter."""
+
+    async def brand_of(self, restaurant_id: str) -> str | None: ...  # pragma: no cover
 
 
 def _now() -> datetime:
@@ -92,15 +102,24 @@ class InventoryService:
             updated = await repo.update_stock(restaurant_id, item_id, available, now)
             if updated is None:
                 if not await repo.insert_stock(restaurant_id, item_id, available, now):
-                    # Row exists under ANOTHER restaurant (scoped update saw
-                    # nothing, insert conflicted) — not yours, 404.
-                    raise StockScopeMismatch
-                version = 0
+                    # Lost an insert race for THIS exact (branch, item) pair —
+                    # under the composite key that is the only way to conflict
+                    # (a foreign restaurant's row can't collide any more,
+                    # ADR-0028) — so the row exists now: take the update path.
+                    raced = await repo.update_stock(restaurant_id, item_id, available, now)
+                    assert raced is not None  # the conflicting row is ours by key
+                    version = raced.version
+                else:
+                    version = 0
             else:
                 version = updated.version
             await repo.stage_event(
                 aggregate_type="stock",
-                aggregate_id=item_id,
+                # One stock ledger per (branch, item): a shared base item has
+                # an independent count — and version — at every branch, so the
+                # aggregate must carry both or two branches' bumps would mint
+                # colliding deterministic event ids (ADR-0028).
+                aggregate_id=f"{restaurant_id}:{item_id}",
                 version=version,
                 event_type=EventType.STOCK_ADJUSTED,
                 payload={

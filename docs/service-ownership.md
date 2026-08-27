@@ -36,7 +36,7 @@ Every datastore is named for its owner, so the name answers "whose is this?" wit
 |---|---|
 | **money** | `edge:rl:*`, `edge:adm:place:*`, `order:idem:*`, `payment:idem:*`, `shared:ticket:*` |
 | **realtime** | `shared:geo:*`, `shared:loc:*`, `shared:hb:*`, `shared:trk:*`, `inventory:adm:*` |
-| **catalog** | `catalog:menu:*` (rendered menu, cache-aside), `catalog:browse:*`, `catalog:lock:*` |
+| **catalog** | `catalog:menu:*` (rendered menu per brand/branch, cache-aside), `catalog:browse:*`, `catalog:lock:*` |
 
 Compute legend: **MS** = ECS Fargate microservice · **GW** = ECS on EC2 connection gateway · **λ** = Lambda · **W** = worker (no inbound API).
 
@@ -70,7 +70,7 @@ Owns what a restaurant sells, and the entire menu cache pipeline.
 
 | | |
 |---|---|
-| Postgres | **`catalog_db`** — `restaurants`, `restaurant_cuisines` (many-to-many tag rows, lowercase slugs), `menu_categories` (name, sort order, item membership), `menu_items` (+ modifier groups/options, `item_tags` filter tags), promo rules, tax tables, `outbox` (`restaurants.version` bumps in the same tx as the rows, category edits included); search via `tsvector` + `pg_trgm` GIN indexes maintained in the same tx (ADR-0019) |
+| Postgres | **`catalog_db`** — `restaurants` (brand AND branch rows — `kind`/`brand_id`/`branch_label`, one brand per owner, ADR-0028), `branch_item_overrides` (presence-only per-branch 86), `restaurant_cuisines` (many-to-many tag rows, lowercase slugs), `menu_categories` (name, sort order, item membership), `menu_items` (+ modifier groups/options, `item_tags` filter tags), promo rules, tax tables, `outbox` (`restaurants.version` bumps in the same tx as the rows, category edits included); search via `tsvector` + `pg_trgm` GIN indexes maintained in the same tx (ADR-0019) |
 | Calls | Identity — `POST /v1/internal/grants` on self-serve onboarding (grant `restaurant_admin` + `restaurant_id` to the creating user; idempotent, retried; never edge-routed). Onboarding is idempotent by owner — phase-1 claim model allows **one restaurant per user**, enforced by `UNIQUE(owner_user_id)`; a repeat POST returns the existing restaurant and re-attempts the grant (the repair path) |
 | Redis | `catalog:menu:{rid}` — rendered menu, cache-aside: `DEL` on every menu-edit commit, refilled on read, 5-min TTL bounds the refill race (ADR-0027)<br>`catalog:browse:<gh5>:<cuisine>:<page>` — browse pages, 60s<br>`catalog:lock:menu:{rid}` — singleflight on render miss |
 | Kafka | **produces** `catalog.changes` (compacted, outbox → Debezium) |

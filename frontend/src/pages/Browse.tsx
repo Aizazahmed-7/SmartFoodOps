@@ -14,7 +14,7 @@ export function RestaurantTile({ r }: { r: RestaurantCard }) {
   return (
     <Link to={`/r/${r.id}`} className="card block transition hover:border-orange-500/50">
       <div className="flex items-start justify-between">
-        <h3 className="font-semibold">{r.name}</h3>
+        <h3 className="font-semibold">{r.display_name ?? r.name}</h3>
         {r.status === "paused" && (
           <span className="tag bg-red-950 text-red-300">closed</span>
         )}

@@ -18,6 +18,8 @@ from smartfood_auth import AuthContext, Role, require_role, require_system
 from ..domain.models import Restaurant
 from ..domain.ports import GrantRejected, GrantUnavailable
 from ..domain.service import (
+    BranchLimitReached,
+    BrandOwnedField,
     CatalogService,
     CategoryNotEmpty,
     CategoryNotFound,
@@ -61,6 +63,8 @@ class RestaurantCreate(StrictModel):
     lon: float | None = Field(default=None, ge=-180, le=180)
     hours: dict[str, list[str]] | None = None
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
+    # The first location's label ("Main" when omitted) — ADR-0028.
+    branch_label: str | None = Field(default=None, min_length=1, max_length=60)
 
     @field_validator("cuisines")
     @classmethod
@@ -110,6 +114,49 @@ class RestaurantOut(StrictModel):
     hours: dict[str, list[str]] | None
     timezone: str
     version: int
+    # Brands (ADR-0028) — additive; legacy rows read kind='branch', rest None.
+    kind: str
+    brand_id: str | None
+    branch_label: str | None
+    display_name: str
+    # Filled only by onboarding (the brand + its minted first branch).
+    branches: list["BranchOut"] | None = None
+
+
+class BranchOut(StrictModel):
+    id: str
+    brand_id: str | None
+    branch_label: str | None
+    name: str
+    display_name: str
+    city: str
+    status: str
+    lat: float | None
+    lon: float | None
+    version: int
+
+
+class BranchCreate(StrictModel):
+    branch_label: str = Field(min_length=1, max_length=60)
+    city: str = Field(min_length=1, max_length=64)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+    hours: dict[str, list[str]] | None = None
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, v: str | None) -> str | None:
+        return None if v is None else _valid_timezone(v)
+
+    @field_validator("city")
+    @classmethod
+    def _normalize_city(cls, v: str) -> str:
+        return "-".join(v.strip().lower().split())
+
+
+class AvailabilityIn(StrictModel):
+    available: bool
 
 
 def _unknown_restaurant() -> ApiError:
@@ -140,8 +187,18 @@ RestaurantAdmin = Annotated[
 _SCOPE_EXEMPT = {"system", "system_admin"}
 
 
-def _own(ctx: AuthContext, restaurant_id: str) -> None:
-    if ctx.role not in _SCOPE_EXEMPT and ctx.restaurant_id != restaurant_id:
+async def _own(ctx: AuthContext, restaurant_id: str, request: Request) -> None:
+    """Equality or parentage (ADR-0028): the claim is the BRAND id; a path
+    naming one of its branches passes via the row's brand_id. Old
+    branch-scoped tokens keep passing via equality through the repoint
+    window. Unknown ids and other people's rows share the one 404."""
+    if ctx.role in _SCOPE_EXEMPT or ctx.restaurant_id == restaurant_id:
+        return
+    try:
+        row = await _svc(request).get_restaurant(restaurant_id)
+    except RestaurantNotFound:
+        raise _unknown_restaurant() from None
+    if row.brand_id is None or row.brand_id != ctx.restaurant_id:
         raise _unknown_restaurant()
 
 
@@ -175,6 +232,7 @@ async def create_restaurant(
             lon=body.lon,
             hours=body.hours,
             timezone=body.timezone,
+            branch_label=body.branch_label,
         )
     except GrantRejected:
         raise ApiError(ErrorCode.GRANT_CONFLICT, "onboarding grant rejected", 409) from None
@@ -187,7 +245,11 @@ async def create_restaurant(
         ) from None
     if not created:
         response.status_code = 200
-    return _out(restaurant)
+    branches = await _svc(request).list_branches(restaurant.id)
+    out = _out(restaurant)
+    return out.model_copy(
+        update={"branches": [BranchOut.model_validate(b, from_attributes=True) for b in branches]}
+    )
 
 
 @router.get("/v1/restaurants/{restaurant_id}")
@@ -203,13 +265,20 @@ async def get_restaurant(restaurant_id: str, request: Request) -> RestaurantOut:
 async def update_restaurant(
     restaurant_id: str, body: RestaurantUpdate, ctx: RestaurantAdmin, request: Request
 ) -> RestaurantOut:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     changes = body.model_dump(exclude_none=True)
     cuisines = changes.pop("cuisines", None)
     try:
         restaurant = await _svc(request).update_restaurant(restaurant_id, changes, cuisines)
     except NothingToUpdate:
         raise _nothing_to_update() from None
+    except BrandOwnedField as exc:
+        raise ApiError(
+            ErrorCode.VALIDATION_FAILED,
+            "brand-owned field — edit the brand, copies propagate",
+            422,
+            details=[{"field": exc.field, "issue": "brand-owned"}],
+        ) from None
     except RestaurantNotFound:
         raise _unknown_restaurant() from None
     return _out(restaurant)
@@ -218,7 +287,7 @@ async def update_restaurant(
 async def _set_status(
     restaurant_id: str, status: str, ctx: AuthContext, request: Request
 ) -> RestaurantOut:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     try:
         restaurant = await _svc(request).set_status(restaurant_id, status)
     except RestaurantNotFound:
@@ -240,6 +309,68 @@ async def resume_restaurant(
     return await _set_status(restaurant_id, "open", ctx, request)
 
 
+# ── branches (ADR-0028) ────────────────────────────────────────────
+
+
+@router.post("/v1/restaurants/{brand_id}/branches", status_code=201)
+async def create_branch(
+    brand_id: str, body: BranchCreate, ctx: RestaurantAdmin, request: Request, response: Response
+) -> BranchOut:
+    """A new location under the brand. Idempotent by (brand, label): a
+    replayed label answers 200 with the existing branch (the seed replays)."""
+    await _own(ctx, brand_id, request)
+    try:
+        branch, created = await _svc(request).create_branch(
+            brand_id,
+            branch_label=body.branch_label,
+            city=body.city,
+            lat=body.lat,
+            lon=body.lon,
+            hours=body.hours,
+            timezone=body.timezone,
+        )
+    except BranchLimitReached:
+        raise ApiError(
+            ErrorCode.VALIDATION_FAILED, "branch limit reached for this brand", 409
+        ) from None
+    except RestaurantNotFound:
+        raise _unknown_restaurant() from None
+    if not created:
+        response.status_code = 200
+    return BranchOut.model_validate(branch, from_attributes=True)
+
+
+@router.get("/v1/restaurants/{brand_id}/branches")
+async def list_branches(brand_id: str, request: Request) -> dict:
+    """Public: the brand's locations (browse cards carry the same rows;
+    this is the dashboard's scope-switcher read)."""
+    try:
+        branches = await _svc(request).list_branches(brand_id)
+    except RestaurantNotFound:
+        raise _unknown_restaurant() from None
+    return {
+        "branches": [
+            BranchOut.model_validate(b, from_attributes=True).model_dump() for b in branches
+        ]
+    }
+
+
+@router.put("/v1/restaurants/{branch_id}/base-items/{item_id}/availability")
+async def set_base_item_availability(
+    branch_id: str, item_id: str, body: AvailabilityIn, ctx: RestaurantAdmin, request: Request
+) -> dict:
+    """The per-branch 86 of a BASE item (presence-only override). Branch-
+    local items keep the ordinary PATCH; base items are 86'd HERE because
+    their rows belong to the brand."""
+    await _own(ctx, branch_id, request)
+    try:
+        return await _svc(request).set_base_item_availability(
+            branch_id, item_id, available=body.available
+        )
+    except (RestaurantNotFound, ItemNotFound):
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown item", 404) from None
+
+
 # ── menu: categories ───────────────────────────────────────────────
 
 
@@ -257,7 +388,7 @@ class CategoryUpdate(StrictModel):
 async def add_category(
     restaurant_id: str, body: CategoryIn, ctx: RestaurantAdmin, request: Request
 ) -> dict:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     try:
         return await _svc(request).add_category(restaurant_id, name=body.name, rank=body.rank)
     except RestaurantNotFound:
@@ -272,7 +403,7 @@ async def update_category(
     ctx: RestaurantAdmin,
     request: Request,
 ) -> dict:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     try:
         return await _svc(request).update_category(
             restaurant_id, category_id, body.model_dump(exclude_none=True)
@@ -287,7 +418,7 @@ async def update_category(
 async def delete_category(
     restaurant_id: str, category_id: str, ctx: RestaurantAdmin, request: Request
 ) -> dict:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     try:
         return await _svc(request).delete_category(restaurant_id, category_id)
     except CategoryNotFound:
@@ -373,7 +504,7 @@ class ItemUpdate(StrictModel):
 async def add_item(
     restaurant_id: str, body: ItemIn, ctx: RestaurantAdmin, request: Request
 ) -> dict:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     fields = body.model_dump(exclude={"category_id", "tags", "modifier_groups"})
     try:
         return await _svc(request).add_item(
@@ -395,7 +526,7 @@ async def update_item(
     ctx: RestaurantAdmin,
     request: Request,
 ) -> dict:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     sent = body.model_fields_set
     changes = body.model_dump(exclude_unset=True, exclude={"tags", "modifier_groups"})
     try:
@@ -422,7 +553,7 @@ async def update_item(
 async def delete_item(
     restaurant_id: str, item_id: str, ctx: RestaurantAdmin, request: Request
 ) -> dict:
-    _own(ctx, restaurant_id)
+    await _own(ctx, restaurant_id, request)
     try:
         return await _svc(request).delete_item(restaurant_id, item_id)
     except ItemNotFound:

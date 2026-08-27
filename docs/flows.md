@@ -29,7 +29,7 @@ untagged: they are the return leg of the tagged call above them.
 
 | Id                    | Formula                                                               | Example                                  | Why deterministic / why not                                                   |
 | --------------------- | --------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------- |
-| Entity ids            | `prefix_ + uuid4().hex`                                               | `ord_42…`, `rst_9…`, `usr_1…`            | Random — entities are _created_, not derived                                  |
+| Entity ids            | `prefix_ + uuid4().hex`                                               | `ord_42…`, `rst_9…`, `brd_9…`, `usr_1…`  | Random — entities are _created_, not derived (cutover-minted brands reuse their branch's hex: `brd_` + the `rst_` tail) |
 | Event id              | `uuid5(NS, "{aggregate_type}:{aggregate_id}:{version}:{event_type}")` | `uuid5("order:ord_42:3:OrderConfirmed")` | Deterministic — same fact, same id, always → consumer dedupe, safe replays    |
 | Notification id       | `ntf_ + uuid5(NS, "{event_id}:{recipient_type}:{recipient_id}").hex`  | `ntf_e9cd…`                              | Deterministic per (event, recipient) → redelivery collides on PK, absorbed    |
 | Money idempotency key | `"{order_id}:{op}"`                                                   | `ord_42:auth`, `ord_42:capture`          | Natural key — one auth per order, ever                                        |
@@ -230,7 +230,7 @@ sequenceDiagram
 
 ## 6. Restaurant onboarding — sync grant + async convergence
 
-Two services must change state with no shared transaction; every layer is idempotent so replay is the repair mechanism. The topic `c1.catalog.changes` is **compacted** — which is why payloads are full-state.
+Two services must change state with no shared transaction; every layer is idempotent so replay is the repair mechanism. The topic `c1.catalog.changes` is **compacted** — which is why payloads are full-state. Since ADR-0028 one onboarding mints TWO rows — the **brand** (base-menu owner, the claim's target) and its first **branch** (the location customers order from).
 
 ```mermaid
 sequenceDiagram
@@ -246,22 +246,22 @@ sequenceDiagram
     FE->>E: [HTTP] POST /v1/restaurants — Bearer token, role customer
     E->>C: [HTTP] forward, X-Auth-Sub usr_1
     rect rgb(0,0,0)
-        Note over C,CDB: ONE TRANSACTION
-        C->>CDB: [DB] INSERT restaurant rst_9, owner_user_id usr_1 —<br/>UNIQUE owner — race loser rolls back and adopts the winner
-        C->>CDB: [DB] version bump to 1
-        C->>CDB: [DB] INSERT outbox RestaurantCreated<br/>id = uuid5 of "restaurant:rst_9:1:RestaurantCreated"<br/>payload FULL STATE — owner_user_id on EVERY event
+        Note over C,CDB: ONE TRANSACTION (ADR-0028: the mint)
+        C->>CDB: [DB] INSERT brand brd_9 + branch rst_9 (label Main) —<br/>owner unique among BRAND rows — race loser adopts the winner
+        C->>CDB: [DB] version bump both rows to 1
+        C->>CDB: [DB] INSERT outbox RestaurantCreated x2 —<br/>brand aggregate (base menu) AND branch aggregate<br/>(EFFECTIVE menu, payload carries brand_id)<br/>ids = uuid5 of "restaurant:{id}:1:RestaurantCreated"
         C->>CDB: [DB] COMMIT
     end
     C->>I: [HTTP] POST internal grant — post-commit, retry x3,<br/>4xx permanent, 5xx and network retried
-    I->>I: [DB] users row — role restaurant_admin, restaurant_id rst_9.<br/>Idempotent: replay of an applied grant is silent success
+    I->>I: [DB] users row — role restaurant_admin, restaurant_id brd_9<br/>(the BRAND). Idempotent replay — and a DIFFERENT id repoints<br/>last-writer-wins, which is how the cutover moved every owner
     I-->>C: 200
-    C-->>FE: 201 — a replay of the POST returns 200, same restaurant
+    C-->>FE: 201 — brand + branches[] — a replay returns 200, same brand
     FE->>E: [HTTP] refreshTokens — the new JWT claims carry the grant
     Note over FE: grant call failed instead? 503 + pending flag,<br/>the app replays the POST on every launch
     par async fan-out — always, regardless of the sync outcome
-        CDB->>KF: [KAFKA] poller publishes RestaurantCreated, key rst_9<br/>(same outbox pattern as diagram 5: [DB] read, then [KAFKA] produce)
-        KF->>I: [KAFKA] grant-convergence consumer — type-AGNOSTIC,<br/>compaction may keep ANY event and every payload<br/>carries owner_user_id → processed_events check →<br/>same idempotent grant → marked processed
-        KF->>INV: [KAFKA] stock provisioning — diff full menu vs known rows,<br/>INSERT stock rows at 0 (STRICT) + default capacity,<br/>ON CONFLICT DO NOTHING, replay-safe
+        CDB->>KF: [KAFKA] poller publishes both events, keys brd_9 and rst_9<br/>(same outbox pattern as diagram 5: [DB] read, then [KAFKA] produce)
+        KF->>I: [KAFKA] grant-convergence consumer — type-AGNOSTIC,<br/>targets payload.brand_id (falls back to the aggregate) →<br/>processed_events check → same idempotent grant
+        KF->>INV: [KAFKA] stock provisioning per BRANCH event — diff the<br/>effective menu vs known (branch, item) rows, INSERT at 0<br/>(STRICT) + default capacity, ON CONFLICT DO NOTHING
     end
 ```
 
@@ -479,6 +479,40 @@ Meanwhile the CUSTOMER's screen (OrderDetail) polls
 position from the 30s latest-loc key — and draws the courier dot crossing
 the same toy city the rider is driving. Real coordinates, drawn world:
 GEOSEARCH, the radii and the map all share one geometry.
+
+## 12. Brands — a base-menu edit fans out to every branch (ADR-0028)
+
+One owner, one brand, many branches. The base menu lives on the brand row; a branch's EFFECTIVE menu (base ∪ local − its 86 overrides) is computed at read time — but its **version, cache key, and Kafka aggregate are its own**, which is what keeps menu-version pinning, cache-aside invalidation, and stock provisioning blind to inheritance. The price of that blindness is paid HERE, in one transaction.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant FE as Owner dashboard
+    participant C as catalog
+    participant CDB as catalog_db
+    participant R as Redis
+    participant KF as Kafka catalog.changes
+    participant INV as inventory
+    participant OD as order and analytics
+
+    FE->>C: [HTTP] PATCH /v1/restaurants/brd_9/items/itm_x — the BASE menu<br/>(_own accepts the brand claim, or a branch path via row.brand_id)
+    rect rgb(0,0,0)
+        Note over C,CDB: ONE TRANSACTION — the fan-out, all or nothing
+        C->>CDB: [DB] UPDATE menu_items itm_x (a brand-owned row)
+        C->>CDB: [DB] bump brand version → stage brand event (base menu)
+        C->>CDB: [DB] per branch b: bump b.version → stage b's event<br/>with b's FULL EFFECTIVE menu (payload carries brand_id)<br/>bounded by MAX_BRANCHES = 20
+        C->>CDB: [DB] COMMIT — a failure on ANY aggregate rolls back ALL
+    end
+    C->>R: [REDIS] DEL catalog:menu:{brd_9} and every branch key —<br/>cache-aside: next read re-renders each effective menu
+    Note over C: a branch-local edit (or a branch 86 via<br/>PUT base-items availability) touches ONLY that branch:<br/>one bump, one event, one cache key
+    CDB->>KF: [KAFKA] poller publishes N+1 events, one per aggregate key
+    KF->>INV: [KAFKA] provisioning reads each BRANCH's effective payload —<br/>the shared base item lands one stock row per (branch, item)<br/>(the composite key: every fridge counts its own)
+    KF->>OD: [KAFKA] brand_id in every branch payload heals legacy rows<br/>(orders, order_facts, menu_views: SET brand_id WHERE IS NULL)<br/>— the cutover storm was exactly this, replayed for 22 brands
+```
+
+Why the pinned `menu_version` never learned about brands: a cart pins the BRANCH's version; any base edit moves that same number through the fan-out, so placement's `MenuVersionChanged` → 409 `PRICE_CHANGED` re-confirm fires exactly as it always did.
+
+---
 
 ## Reading these diagrams in a presentation
 

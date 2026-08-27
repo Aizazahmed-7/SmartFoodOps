@@ -15,6 +15,7 @@ from edge_bff.main import create_app as create_edge
 from fastapi.testclient import TestClient
 from identity.config import Settings as IdentitySettings
 from identity.main import create_app as create_identity
+from inventory.adapters.catalog_parent import CatalogParents
 from inventory.config import Settings as InventorySettings
 from inventory.main import create_app as create_inventory
 from seed.main import CITIES, PASSWORD, SEED_STOCK, TEMPLATES, SeedError, seed
@@ -71,8 +72,14 @@ def edge(tmp_path):
         cache=_NullCache(),
         search=_NullSearch(),
     )
+    # Inventory's branch→brand checks travel a REAL httpx hop into the
+    # catalog app — the same public read the live service makes.
     inventory_app = create_inventory(
-        InventorySettings(database_url="sqlite+aiosqlite://", create_all=True)
+        InventorySettings(database_url="sqlite+aiosqlite://", create_all=True),
+        parents=CatalogParents(
+            "http://catalog.test",
+            httpx.AsyncClient(transport=httpx.ASGITransport(app=catalog_app)),
+        ),
     )
     router = HostRouter(
         {
@@ -129,7 +136,13 @@ async def test_seed_creates_everything_then_replays_clean(edge):
         for city in CITIES:
             browse = (await client.get("/v1/restaurants", params={"city": city})).json()
             names = [r["name"] for r in browse["restaurants"]]
-            assert sorted(names) == sorted(t["name"] for t in TEMPLATES if t["city"] == city)
+            expected_names = [t["name"] for t in TEMPLATES if t["city"] == city] + [
+                t["name"] for t in TEMPLATES for b in t.get("branches", []) if b["city"] == city
+            ]
+            # Branch cards repeat the brand name; display_name disambiguates.
+            assert sorted(names) == sorted(expected_names)
+            display = [r["display_name"] for r in browse["restaurants"]]
+            assert len(display) == len(set(display))  # no two cards look alike
 
         browse = (await client.get("/v1/restaurants", params={"city": "springfield"})).json()
         biryani = next(r for r in browse["restaurants"] if r["name"] == "Biryani House")

@@ -20,6 +20,7 @@ from typing import Any, cast
 
 import sqlalchemy as sa
 from smartfood_kafka import EventType
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .. import tracking
@@ -110,6 +111,24 @@ async def record_rider(
         await session.commit()
 
 
+async def repoint_brand(
+    sessions: async_sessionmaker[AsyncSession], restaurant_id: str, brand_id: str
+) -> int:
+    """Backfills orders.brand_id for rows born before their restaurant had
+    a brand (ADR-0028) — not a status move, but it lives here because this
+    module is the orders-row's single writer (the source-scan test enforces
+    exactly that). Naturally idempotent: the IS NULL predicate is the
+    dedupe. Returns the number of rows healed."""
+    async with sessions() as session:
+        result = await session.execute(
+            orders.update()
+            .where((orders.c.restaurant_id == restaurant_id) & (orders.c.brand_id.is_(None)))
+            .values(brand_id=brand_id)
+        )
+        await session.commit()
+    return int(cast("CursorResult[Any]", result).rowcount)
+
+
 async def begin_cancel_from(
     sessions: async_sessionmaker[AsyncSession],
     order_id: str,
@@ -169,6 +188,7 @@ async def _full_state(
         "order_id": order_id,
         "user_id": order.user_id,
         "restaurant_id": order.restaurant_id,
+        "brand_id": order.brand_id,
         "restaurant_name": order.restaurant_name_snapshot,
         "status": status,
         "aggregate_version": version,

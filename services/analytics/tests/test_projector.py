@@ -222,3 +222,72 @@ async def test_rider_attribution_folds_and_never_blanks():
     )
     row = await _row(sessions)
     assert row.rider_id == "r_7"  # survived the null-carrying replay
+
+
+async def test_brand_id_folds_and_never_blanks(  # ADR-0028
+):
+    """A branded event stamps brand_id; a later legacy replay (no brand key)
+    must NOT blank it — same convergence rule as rider_id."""
+    sessions = await _sessions()
+    projector = FactsProjector(sessions)
+    await projector.handle(_event("OrderPlaced", brand_id="brd_1"))
+    row = await _row(sessions)
+    assert row is not None and row.brand_id == "brd_1"
+
+    await projector.handle(_event("OrderConfirmed"))  # legacy shape, no brand_id
+    row = await _row(sessions)
+    assert row is not None
+    assert (row.status, row.brand_id) == ("CONFIRMED", "brd_1")  # folded, not blanked
+
+
+async def test_brand_repoint_heals_only_null_rows():
+    from analytics.consumers import BrandRepointHandler
+
+    sessions = await _sessions()
+    projector = FactsProjector(sessions)
+    await projector.handle(_event("OrderPlaced", order_id="ord_legacy"))  # brand NULL
+    await projector.handle(_event("OrderPlaced", order_id="ord_new", brand_id="brd_1"))
+    await projector.handle(
+        _event("OrderPlaced", order_id="ord_other", restaurant_id="rst_2")
+    )  # a different branch
+
+    import json as _json
+
+    handler = BrandRepointHandler(sessions)
+    catalog_event = {
+        "aggregate_type": "restaurant",
+        "aggregate_id": "rst_1",
+        "payload": _json.dumps({"owner_user_id": "u", "brand_id": "brd_1"}),
+    }
+    await handler.handle(catalog_event)
+    await handler.handle(catalog_event)  # replay — naturally idempotent
+
+    async with sessions() as s:
+        rows = {r.order_id: r.brand_id for r in (await s.execute(sa.select(order_facts))).all()}
+    assert rows == {"ord_legacy": "brd_1", "ord_new": "brd_1", "ord_other": None}
+
+    # brand aggregates, brandless and foreign-type payloads: ignored
+    await handler.handle(
+        {
+            "aggregate_type": "restaurant",
+            "aggregate_id": "brd_1",
+            "payload": _json.dumps({"brand_id": "brd_1"}),
+        }
+    )
+    await handler.handle(
+        {"aggregate_type": "restaurant", "aggregate_id": "rst_2", "payload": _json.dumps({})}
+    )
+    await handler.handle(
+        {
+            "aggregate_type": "stock",
+            "aggregate_id": "rst_2",
+            "payload": _json.dumps({"brand_id": "brd_9"}),
+        }
+    )
+    async with sessions() as s:
+        untouched = (
+            await s.execute(
+                sa.select(order_facts.c.brand_id).where(order_facts.c.order_id == "ord_other")
+            )
+        ).scalar_one()
+    assert untouched is None

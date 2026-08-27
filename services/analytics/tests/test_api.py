@@ -198,3 +198,38 @@ def test_funnel_with_no_signed_in_viewers_answers_none(client, app):
     _fold_views(app, [_view_event("v8", None, _iso(5))])
     f = client.get("/v1/restaurant/analytics?days=7", headers=OWNER).json()["funnel"]
     assert f["views"] == 1 and f["viewers"] == 0 and f["conversion_rate"] is None
+
+
+def test_brand_claim_spans_every_branch(client, app):
+    """ADR-0028: the owner's claim is the BRAND — daily numbers must fold
+    orders from all branches, healed legacy rows included."""
+    BRAND_OWNER = headers_for(
+        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id="brd_1")
+    )
+    downtown = _event("OrderPlaced", "ord_dt", at=_iso(30))
+    downtown["payload"]["brand_id"] = "brd_1"  # stamped at placement
+    airport = _event("OrderPlaced", "ord_ap", restaurant="rst_9", at=_iso(20))
+    airport["payload"]["brand_id"] = "brd_1"
+    legacy = _event("OrderPlaced", "ord_old", at=_iso(40))  # pre-brands row, healed later
+    foreign = _event("OrderPlaced", "ord_x9", restaurant="rst_2", at=_iso(10))
+    _fold(app, [downtown, airport, legacy, foreign])
+
+    import asyncio
+    import json
+
+    from analytics.consumers import BrandRepointHandler
+
+    asyncio.run(
+        BrandRepointHandler(app.state.service._sessions).handle(
+            {
+                "aggregate_type": "restaurant",
+                "aggregate_id": "rst_1",
+                "payload": json.dumps({"owner_user_id": "u", "brand_id": "brd_1"}),
+            }
+        )
+    )
+
+    mine = client.get("/v1/restaurant/analytics?days=7", headers=BRAND_OWNER).json()
+    assert sum(d["orders"] for d in mine["days"]) == 3  # both branches + healed legacy
+    branch_token = client.get("/v1/restaurant/analytics?days=7", headers=OWNER).json()
+    assert sum(d["orders"] for d in branch_token["days"]) == 2  # old token still sees rst_1

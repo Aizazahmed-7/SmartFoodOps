@@ -38,7 +38,9 @@ export default function Search() {
             <Link key={hit.restaurant.id} to={`/r/${hit.restaurant.id}`}
               className="card block transition hover:border-orange-500/50">
               <div className="flex items-center justify-between">
-                <h3 className="font-semibold">{hit.restaurant.name}</h3>
+                <h3 className="font-semibold">
+                  {hit.restaurant.display_name ?? hit.restaurant.name}
+                </h3>
                 <span className="text-xs capitalize text-slate-500">{hit.restaurant.city}</span>
               </div>
               {hit.matched_items.length > 0 && (

@@ -77,3 +77,35 @@ class ViewsProjector:
                 await repo.apply_view(payload, str(event.get("event_id", "")))
             await session.commit()
         log.info("views folded", events=len(events))
+
+
+GROUP_REPOINT = "analytics.brand-repoint"
+
+
+class BrandRepointHandler:
+    """catalog.changes → heals NULL brand_id on legacy facts and views
+    (ADR-0028). NATURALLY idempotent — the IS NULL predicate is the dedupe,
+    so no processed_events ledger: replaying the compacted topic into a
+    rebuilt database converges to the same rows."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
+        self._sessions = sessions
+
+    async def handle(self, event: dict[str, Any]) -> None:
+        payload = json.loads(event["payload"])
+        brand_id = payload.get("brand_id")
+        if event.get("aggregate_type") != "restaurant" or not brand_id:
+            return  # not a restaurant fact, or a pre-brands payload
+        restaurant_id = str(event["aggregate_id"])
+        if restaurant_id == brand_id:
+            return  # the brand's own aggregate — facts reference branches
+        async with self._sessions() as session:
+            healed = await AnalyticsRepo(session).repoint_brand(restaurant_id, brand_id)
+            await session.commit()
+        if healed:
+            log.info(
+                "legacy facts repointed to brand",
+                restaurant_id=restaurant_id,
+                brand_id=brand_id,
+                rows=healed,
+            )

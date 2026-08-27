@@ -47,7 +47,9 @@ async def test_set_stock_stages_full_state_event():
         "version": 0,
     }
     assert events[1].payload["available"] == 30
-    assert events[1].id == event_id("stock", "itm_a", 1, "StockAdjusted")
+    # Aggregate = (branch, item): a shared base item has an independent
+    # ledger per branch (ADR-0028) — item_id alone would collide ids.
+    assert events[1].id == event_id("stock", "rst_1:itm_a", 1, "StockAdjusted")
 
 
 async def _win_race_then_collide(sessions, restaurant_id: str, capacity: int):

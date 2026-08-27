@@ -41,10 +41,28 @@ def test_grant_replay_is_silent_success(client):
     assert _grant(client, user_id).status_code == 200  # idempotent repair path
 
 
-def test_grant_conflicts_with_other_restaurant(client):
+def test_grant_repoints_to_a_different_restaurant(client):
+    """Last-writer-wins for restaurant_admin scope (ADR-0028): the brands
+    cutover moves every owner from their branch row to the minted brand
+    through this exact call. Callers are SystemOnly and catalog enforces
+    one brand per owner — there is no legitimate competing writer."""
     user_id = _register(client)
     _grant(client, user_id, "rst_1")
-    r = _grant(client, user_id, "rst_2")
+    r = _grant(client, user_id, "brd_1")
+    assert r.status_code == 200  # repoint, not conflict
+    assert _claims(client)["restaurant_id"] == "brd_1"  # the next issue carries it
+
+
+def test_grant_still_conflicts_across_role_classes(client):
+    """Repoint is scope-only: a rider can still never become an owner."""
+    user_id = _register(client)
+    rider = client.post(
+        "/v1/internal/grants",
+        json={"user_id": user_id, "role": "rider"},
+        headers=headers_for(AuthContext(sub="svc:test", role="system")),
+    )
+    assert rider.status_code == 200
+    r = _grant(client, user_id, "rst_1")
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "GRANT_CONFLICT"
 

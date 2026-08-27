@@ -14,15 +14,19 @@ metadata = sa.MetaData()
 ReservationStatus = Literal["active", "released", "consumed", "expired"]
 RESERVATION_STATUSES: tuple[str, ...] = get_args(ReservationStatus)
 
-# One row per menu item — STRICT stock (user decision): rows start at 0 and
-# an item cannot sell until its admin sets stock. Rows are auto-created by
-# the catalog.changes consumer; a missing row is treated as 0 at reserve
-# time (consumer-lag safety, same 409).
+# One row per (branch, menu item) — STRICT stock (user decision): rows start
+# at 0 and an item cannot sell until its admin sets stock. Rows are
+# auto-created by the catalog.changes consumer; a missing row is treated as
+# 0 at reserve time (consumer-lag safety, same 409). The composite PK is
+# forced by menu inheritance (ADR-0028): a BASE item keeps one item_id
+# across every branch, and each branch's fridge needs its own count — under
+# an item_id-only PK the second branch's provisioning row would silently
+# vanish into ON CONFLICT DO NOTHING and that branch could never sell it.
 stock = sa.Table(
     "stock",
     metadata,
+    sa.Column("restaurant_id", sa.Text, primary_key=True),
     sa.Column("item_id", sa.Text, primary_key=True),
-    sa.Column("restaurant_id", sa.Text, nullable=False, index=True),
     sa.Column("available", sa.Integer, nullable=False, server_default="0"),
     # Outbox event_id determinism: every mutation bumps it.
     sa.Column("version", sa.Integer, nullable=False, server_default="0"),

@@ -2,6 +2,7 @@
 case (concurrent offers to one rider yield exactly one reservation) run
 with real threads against real condition evaluation."""
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -45,15 +46,18 @@ def test_offline_rider_is_never_reserved(riders):
 
 def test_THE_DRILL_concurrent_offers_yield_exactly_one_lock(riders):
     """Eight threads race the same rider with distinct offers. DDB's
-    per-item conditional write is the only referee — exactly one wins."""
+    per-item conditional write is the only referee — exactly one wins.
+    The barrier holds every racer at the line until all eight are in
+    flight, so the pile-up is real on every run, not just on slow ones."""
     riders.set_online("r1")
+    start = threading.Barrier(8)
+
+    def racer(i: int) -> bool:
+        start.wait(timeout=10)
+        return riders.reserve("r1", offer_id=f"off_{i}", order_id=f"ord_{i}", cap=1)
+
     with ThreadPoolExecutor(max_workers=8) as pool:
-        wins = list(
-            pool.map(
-                lambda i: riders.reserve("r1", offer_id=f"off_{i}", order_id=f"ord_{i}", cap=1),
-                range(8),
-            )
-        )
+        wins = list(pool.map(racer, range(8)))
     assert wins.count(True) == 1
     assert riders.get("r1")["offers_made"] == 1  # only the winner's write landed
 
@@ -80,12 +84,23 @@ def test_late_accept_after_release_noops(riders):
 
 def test_accept_vs_release_race_has_exactly_one_winner(riders):
     """The other direction of the drill: expiry and accept race the SAME
-    lock — both are conditioned on it, so exactly one write survives."""
+    lock — both are conditioned on it, so exactly one write survives.
+    Same barrier discipline: both taps leave the line together."""
     riders.set_online("r1")
     riders.reserve("r1", offer_id="off_1", order_id="ord_1", cap=1)
+    start = threading.Barrier(2)
+
+    def tap() -> bool:
+        start.wait(timeout=10)
+        return riders.accept("r1", offer_id="off_1", order_id="ord_1")
+
+    def expire() -> bool:
+        start.wait(timeout=10)
+        return riders.release_offer("r1", offer_id="off_1")
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        accept = pool.submit(riders.accept, "r1", offer_id="off_1", order_id="ord_1")
-        release = pool.submit(riders.release_offer, "r1", offer_id="off_1")
+        accept = pool.submit(tap)
+        release = pool.submit(expire)
     assert [accept.result(), release.result()].count(True) == 1
 
 

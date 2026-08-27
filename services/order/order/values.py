@@ -53,6 +53,9 @@ class PlacementInput:
     currency: str
     amount_cents: int
     placed_at: str
+    # The branch's brand from the pricing snapshot (ADR-0028) — None for
+    # legacy/transitional restaurants; the orders row and every event carry it.
+    brand_id: str | None = None
     lines: list[LineSnapshot] = field(default_factory=list)
     pricing_snapshot: dict[str, Any] = field(default_factory=dict)
     address_snapshot: dict[str, Any] = field(default_factory=dict)

@@ -112,6 +112,11 @@ def create_app(
         else:
             # Alembic manages its own (sync) connection; run it off the event loop.
             await asyncio.to_thread(_run_migrations, settings.database_url)  # pragma: no cover
+        # The brands cutover storm (ADR-0028): any brand migration 0007
+        # minted still sits at version 0 — publish it (and its branches)
+        # exactly once, which drives every downstream backfill through the
+        # compacted topic. A no-op on every boot after the first.
+        await app.state.service.converge_brand_events()
         drain_task: asyncio.Task[None] | None = None
         if poller is not None:
             if own_producer is not None:  # pragma: no cover — live path

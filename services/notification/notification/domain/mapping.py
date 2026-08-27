@@ -64,7 +64,11 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
     restaurant_id, restaurant_name, items, totals — by contract."""
     name = payload["restaurant_name"]
     user_id = payload["user_id"]
-    restaurant_id = payload["restaurant_id"]
+    # The kitchen mailbox is the BRAND (one bell across every branch,
+    # ADR-0028); pre-brands events lack the key and address the branch —
+    # exactly the old behavior, healed once the order's next event carries
+    # the brand.
+    restaurant_id = payload.get("brand_id") or payload["restaurant_id"]
 
     if event_type == EventType.ORDER_CONFIRMED:
         count = len(payload["items"])

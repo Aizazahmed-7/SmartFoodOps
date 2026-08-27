@@ -12,6 +12,7 @@ from smartfood_outbox import OutboxPoller
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from .adapters.catalog_parent import CatalogParents
 from .api.routes import router
 from .config import Settings
 from .db import metadata, outbox
@@ -38,6 +39,7 @@ def create_app(
     poller: OutboxPoller | None = None,
     consumer: EventConsumer | None = None,
     reaper: Reaper | None = None,
+    parents: CatalogParents | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("inventory")
@@ -111,6 +113,7 @@ def create_app(
     install_error_handlers(app)
     mount_observability(app, engine=engine)
     app.state.service = service
+    app.state.parents = parents or CatalogParents(settings.catalog_base_url)
     app.include_router(router)
 
     @app.get("/healthz")

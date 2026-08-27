@@ -238,7 +238,10 @@ class OrderService:
             request_hash=request_hash,
             user_id=user_id,
             restaurant_id=restaurant_id,
-            restaurant_name=priced.restaurant_name,
+            # Customers, couriers and receipts see the branch-labeled name
+            # ("Biryani House — Downtown"); pre-brands snapshots lack it.
+            restaurant_name=snapshot["restaurant"].get("display_name") or priced.restaurant_name,
+            brand_id=snapshot["restaurant"].get("brand_id"),
             card_token=card_token,
             menu_version=priced.menu_version,
             currency=priced.currency,

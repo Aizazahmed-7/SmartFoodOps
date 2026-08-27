@@ -21,3 +21,12 @@ class Restaurant:
     hours: dict[str, Any] | None
     timezone: str
     version: int
+    kind: str = "branch"  # brand | branch (ADR-0028)
+    brand_id: str | None = None  # parent brand for branches; None for brands
+    branch_label: str | None = None  # "Downtown" — unique within the brand
+
+    @property
+    def display_name(self) -> str:
+        """What customers and couriers see: 'Biryani House — Downtown'.
+        `name` stays the pure brand name so find-by-name keeps working."""
+        return f"{self.name} — {self.branch_label}" if self.branch_label else self.name

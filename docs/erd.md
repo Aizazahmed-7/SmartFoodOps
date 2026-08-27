@@ -19,7 +19,7 @@ erDiagram
         text full_name
         text phone
         text role FK "-> roles.name; the enum stays authoritative"
-        text restaurant_id "set by grant; scopes partner access"
+        text restaurant_id "set by grant; the owner's BRAND id since ADR-0028"
         text rider_id
         timestamptz created_at
     }
@@ -85,17 +85,24 @@ erDiagram
 ```mermaid
 erDiagram
     restaurants {
-        text id PK
-        text owner_user_id UK "logical -> identity.users.id"
-        text name
+        text id PK "brd_ or rst_ (ADR-0028)"
+        text owner_user_id "logical -> identity.users.id; UNIQUE among brand rows only"
+        text name "the BRAND name; branch rows carry a synced copy"
         text city
         float lat
         float lon
         text status "CHECK: open|paused"
         json hours
-        int version "bumps on EVERY mutation"
+        int version "bumps on EVERY mutation (base edits fan out to branches)"
+        text kind "CHECK: brand|branch — brand rows never browse"
+        text brand_id FK "self-FK: a branch's parent; NULL iff kind=brand"
+        text branch_label "Downtown — unique per brand; display_name composes it"
         timestamptz created_at
         timestamptz updated_at
+    }
+    branch_item_overrides {
+        text branch_id PK "FK — presence-only per-branch 86 of a BASE item"
+        text item_id PK "FK"
     }
     restaurant_cuisines {
         text restaurant_id PK "FK"
@@ -148,14 +155,21 @@ erDiagram
         timestamptz published_at "NULL = undrained"
         text traceparent
     }
+    restaurants ||--o{ restaurants : "brand - its branches"
     restaurants ||--o{ restaurant_cuisines : ""
-    restaurants ||--o{ menu_categories : ""
-    restaurants ||--o{ menu_items : ""
+    restaurants ||--o{ menu_categories : "brand rows hold the BASE menu"
+    restaurants ||--o{ menu_items : "branch rows hold local items"
+    restaurants ||--o{ branch_item_overrides : ""
+    menu_items ||--o{ branch_item_overrides : ""
     menu_categories ||--o{ menu_items : ""
     menu_items ||--o{ item_tags : ""
     menu_items ||--o{ modifier_groups : ""
     modifier_groups ||--o{ modifier_options : ""
 ```
+
+A branch's **effective menu** = the brand's rows ∪ its own rows, minus its
+`branch_item_overrides` (rendered `available: false`) — computed at read
+time by `get_menu`/`pricing_read`, never materialized (ADR-0028).
 
 Search indexes worth knowing (Postgres-only — they live in migration 0001, not `db.py`, so sqlite's `create_all` never sees them): `pg_trgm` GIN indexes on `restaurants.name` and `menu_items.name` (typo-tolerant fuzzy match) plus FTS expression indexes over names + item descriptions — these four indexes ARE the search engine (ADR-0019).
 
@@ -163,11 +177,16 @@ Search indexes worth knowing (Postgres-only — they live in migration 0001, not
 
 One restaurant, three mutations. `restaurants.version` is the **current** counter; the outbox holds one event **per mutation** with a gapless `aggregate_version` (the revision history, as far as anything reads it — the once-planned `menu_versions` audit table was dropped unread in migration 0005):
 
-`restaurants` (current state only):
+`restaurants` (current state only — the brand row owns the base menu, its
+branch rows are the places customers order from, ADR-0028):
 
-| id    | owner_user_id | name          | status | version |
-| ----- | ------------- | ------------- | ------ | ------- |
-| rst_9 | usr_1         | Biryani House | open   | **3**   |
+| id    | owner_user_id | name          | kind   | brand_id | branch_label | version |
+| ----- | ------------- | ------------- | ------ | -------- | ------------ | ------- |
+| brd_9 | usr_1         | Biryani House | brand  | NULL     | NULL         | **3**   |
+| rst_9 | usr_1         | Biryani House | branch | brd_9    | Main         | **3**   |
+
+(A base-menu edit bumps BOTH versions in one transaction and stages one
+full-effective-state event per aggregate — the fan-out.)
 
 `outbox` — read `id` together with the three inputs that computed it. `aggregate_type` + `aggregate_id` say _whose fact_, `aggregate_version` says _which occurrence_, `event_type` says _what kind_:
 
@@ -184,8 +203,8 @@ Why the versions matter: two `ItemUpdated` events on the same restaurant get **d
 ```mermaid
 erDiagram
     stock {
+        text restaurant_id PK "logical -> catalog.restaurants.id (a BRANCH)"
         text item_id PK "logical -> catalog.menu_items.id"
-        text restaurant_id "logical -> catalog.restaurants.id"
         int available "CHECK >= 0 — the oversell guard"
         int version
         timestamptz updated_at
@@ -250,8 +269,9 @@ erDiagram
     orders {
         text order_id PK
         text user_id "logical -> identity.users.id"
-        text restaurant_id "logical -> catalog.restaurants.id"
-        text restaurant_name_snapshot
+        text restaurant_id "logical -> catalog.restaurants.id (a BRANCH)"
+        text brand_id "the branch's brand; NULL until the repoint heal (ADR-0028)"
+        text restaurant_name_snapshot "branch-labeled: Biryani House - Airport"
         text status "CHECK: 13 states PLACED..SETTLED"
         int aggregate_version
         text payment_method "CHECK: CARD|COD"
@@ -410,7 +430,7 @@ erDiagram
     notifications {
         text id PK "ntf_uuid5(event_id + recipient) — dedupe IS the key"
         text recipient_type "CHECK: customer|restaurant"
-        text recipient_id "user_id or restaurant_id"
+        text recipient_id "user_id, or the BRAND id for kitchen mail (ADR-0028)"
         text order_id "logical -> order.orders"
         text kind
         text title

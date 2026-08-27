@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # Event backbone: outbox → c1.orders.events (poller runs in the API
     # process ONLY — single-instance ordering; the worker just stages rows).
     outbox_mode: Literal["poller", "debezium", "off"] = "off"
+    # catalog.changes consumer: fills orders.brand_id for legacy rows
+    # (ADR-0028). Off in tests — the handler is driven directly.
+    kafka_consumers: Literal["on", "off"] = "off"
     kafka_bootstrap: str = "localhost:19092"
     schema_registry_url: str = "http://localhost:8086"
     cell_id: str = "c1"

@@ -47,20 +47,23 @@ def test_foreign_restaurant_is_404_not_403(client):
     assert r.json()["error"]["code"] == "NOT_FOUND"
 
 
-def test_item_owned_by_another_restaurant_is_404(client):
+def test_same_item_id_keeps_independent_rows_per_branch(client):
+    """The composite key (ADR-0028): a base item shared across branches has
+    one fridge count PER branch — the second write creates a sibling row,
+    never steals or 404s (StockScopeMismatch is unrepresentable now)."""
     client.put(
         "/v1/inventory/restaurants/rst_1/stock/itm_a",
         json={"available": 9},
         headers=admin("rst_1"),
     )
-    # system bypasses restaurant scoping, so the row-level guard must catch it
     r = client.put(
         "/v1/inventory/restaurants/rst_2/stock/itm_a",
         json={"available": 1},
         headers=SYSTEM,
     )
-    assert r.status_code == 404
-    # and the original row is untouched
+    assert r.status_code == 200
+    assert r.json() == {"item_id": "itm_a", "available": 1, "version": 0}
+    # and the original branch's row is untouched
     rows = client.get("/v1/inventory/restaurants/rst_1/stock", headers=admin("rst_1")).json()
     assert rows["items"][0]["available"] == 9
 

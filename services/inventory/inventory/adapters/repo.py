@@ -77,7 +77,9 @@ class InventoryRepo:
                     "version": 0,
                     "updated_at": now,
                 },
-                ["item_id"],
+                # Composite key (ADR-0028): the same base item_id legitimately
+                # exists once per branch — conflict only on the exact pair.
+                ["restaurant_id", "item_id"],
                 self._s.bind.dialect.name if self._s.bind is not None else "sqlite",
             )
         )

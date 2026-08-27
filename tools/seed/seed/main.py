@@ -94,6 +94,10 @@ TEMPLATES: list[dict[str, Any]] = [
         "city": "springfield",
         "name": "Biryani House",
         "cuisines": ["pakistani", "bbq"],
+        # The demo's multi-branch brand (ADR-0028): a second location whose
+        # branch inherits the base menu; seeded with its own stock and one
+        # branch-86'd base item for demo texture.
+        "branches": [{"label": "Airport", "city": "springfield"}],
         "menu": {
             "Mains": [
                 (
@@ -599,7 +603,10 @@ async def _seed_restaurant(
         headers=bearer,
     )
     restaurant = _expect(onboarded, 200, 201)
-    restaurant_id = restaurant["id"]
+    restaurant_id = restaurant["id"]  # the BRAND — menu CRUD edits the base menu
+    # The first branch is the physical location: stock, capacity and the
+    # map pin belong to it (ADR-0028).
+    branch_id = restaurant["branches"][0]["id"]
 
     # Refresh: the rotation carries the restaurant_admin grant into the claims.
     fresh = _expect(
@@ -608,15 +615,13 @@ async def _seed_restaurant(
     )
     admin = {"Authorization": f"Bearer {fresh['access_token']}"}
 
-    if restaurant.get("lat") is None:  # pragma: no cover — legacy-volume upgrade,
-        # exercised by the live seed against a pre-dispatch volume (the test
-        # world is always born WITH coordinates).
-        # Pre-dispatch rows were seeded before the city had coordinates —
-        # backfill exactly once (an admin-moved pin is never overwritten,
-        # because a present lat is left alone).
+    if restaurant["branches"][0].get("lat") is None:  # pragma: no cover — legacy-volume
+        # upgrade, exercised by the live seed against a pre-dispatch volume
+        # (the test world is always born WITH coordinates). Backfill exactly
+        # once, onto the BRANCH — dispatch reads the branch pin.
         _expect(
             await client.patch(
-                f"/v1/restaurants/{restaurant_id}", json={"lat": lat, "lon": lon}, headers=admin
+                f"/v1/restaurants/{branch_id}", json={"lat": lat, "lon": lon}, headers=admin
             ),
             200,
         )
@@ -625,7 +630,12 @@ async def _seed_restaurant(
     if menu["categories"]:
         # Already seeded — replays change nothing the admin may have touched;
         # stock is only topped up where it is verifiably untouched (0 @ v0).
-        await _ensure_stock(client, admin, restaurant_id, menu)
+        # EVERY branch gets the top-up, each from its own effective menu:
+        # base items AND any branch-local additions made since (ADR-0028).
+        for existing_branch in restaurant["branches"]:
+            b_menu = _expect(await client.get(f"/v1/menus/{existing_branch['id']}"), 200)
+            await _ensure_stock(client, admin, existing_branch["id"], b_menu)
+        await _seed_branches(client, admin, restaurant_id, template)
         return False
 
     created_item_ids: list[str] = []
@@ -660,7 +670,7 @@ async def _seed_restaurant(
     for item_id in created_item_ids:
         _expect(
             await client.put(
-                f"/v1/inventory/restaurants/{restaurant_id}/stock/{item_id}",
+                f"/v1/inventory/restaurants/{branch_id}/stock/{item_id}",
                 json={"available": SEED_STOCK},
                 headers=admin,
             ),
@@ -668,13 +678,56 @@ async def _seed_restaurant(
         )
     _expect(
         await client.put(
-            f"/v1/inventory/restaurants/{restaurant_id}/capacity",
+            f"/v1/inventory/restaurants/{branch_id}/capacity",
             json={"capacity": SEED_CAPACITY},
             headers=admin,
         ),
         200,
     )
+    await _seed_branches(client, admin, restaurant_id, template)
     return True
+
+
+async def _seed_branches(
+    client: httpx.AsyncClient,
+    admin: dict[str, str],
+    brand_id: str,
+    template: dict[str, Any],
+) -> None:
+    """Extra locations for multi-branch templates (ADR-0028). Idempotent:
+    branch create replays 200 by label; stock only tops up untouched rows;
+    the demo's branch-86 (one base item off at the extra branch — texture
+    for the inheritance story) is asserted only on first creation, so an
+    admin's later restore survives re-seeding."""
+    for offset, spec in enumerate(template.get("branches", [])):
+        # Grid slots 10+ sit below the ten template pins — distinct and stable.
+        lat, lon = city_coords(spec["city"], 10 + offset)
+        response = await client.post(
+            f"/v1/restaurants/{brand_id}/branches",
+            json={"branch_label": spec["label"], "city": spec["city"], "lat": lat, "lon": lon},
+            headers=admin,
+        )
+        branch = _expect(response, 200, 201)
+        if response.status_code == 201:  # replays were topped up by the caller
+            branch_menu = _expect(await client.get(f"/v1/menus/{branch['id']}"), 200)
+            await _ensure_stock(client, admin, branch["id"], branch_menu)
+            _expect(
+                await client.put(
+                    f"/v1/inventory/restaurants/{branch['id']}/capacity",
+                    json={"capacity": SEED_CAPACITY},
+                    headers=admin,
+                ),
+                200,
+            )
+            first_item = branch_menu["categories"][0]["items"][0]["id"]
+            _expect(
+                await client.put(
+                    f"/v1/restaurants/{branch['id']}/base-items/{first_item}/availability",
+                    json={"available": False},
+                    headers=admin,
+                ),
+                200,
+            )
 
 
 async def _ensure_stock(

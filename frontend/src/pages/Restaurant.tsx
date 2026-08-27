@@ -117,7 +117,11 @@ export default function RestaurantPage() {
   if (query.isLoading) return <Spinner />;
   if (query.error) return <ErrorNote error={query.error} />;
   const menu = query.data!;
-  const restaurant = { id: menu.restaurant_id, name: menu.name, version: menu.version };
+  const restaurant = {
+    id: menu.restaurant_id,
+    name: menu.display_name ?? menu.name,
+    version: menu.version,
+  };
 
   return (
     <div className="space-y-6">

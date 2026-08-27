@@ -183,7 +183,15 @@ class IdentityService:
 
     async def grant_restaurant_admin(self, *, user_id: str, restaurant_id: str) -> None:
         """Idempotent: Catalog re-attempts the same grant while repairing a
-        half-finished onboarding, so a replay must be a silent success."""
+        half-finished onboarding, so a replay must be a silent success.
+
+        A DIFFERENT restaurant_id for an existing admin is a REPOINT, not a
+        conflict (ADR-0028): the brands cutover moves every owner's scope
+        from their branch row to the minted brand, delivered through the
+        same convergence consumer. Last-writer-wins is safe because every
+        caller is SystemOnly and catalog enforces one brand per owner —
+        there is no legitimate competing writer. GrantConflict remains for
+        role-CLASS violations (riders/admins can't own restaurants)."""
         async with self._sessions() as session:
             repo = IdentityRepo(session)
             user = await repo.get_user_by_id(user_id)
@@ -192,7 +200,15 @@ class IdentityService:
             if user.role == "restaurant_admin":
                 if user.restaurant_id == restaurant_id:
                     return  # replay of an already-applied grant
-                raise GrantConflict  # scoped to a different restaurant
+                await repo.update_user(user_id, {"restaurant_id": restaurant_id})
+                await session.commit()
+                log.info(
+                    "restaurant_admin scope repointed",
+                    user=user_id,
+                    restaurant=restaurant_id,
+                    previous=user.restaurant_id,
+                )
+                return
             if user.role != "customer":
                 raise GrantConflict  # riders/admins can't own restaurants
             await repo.update_user(

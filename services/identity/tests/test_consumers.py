@@ -164,3 +164,32 @@ async def test_lifespan_runs_and_cancels_injected_consumer(settings):
     with TestClient(create_app(settings, consumer=fake)):  # type: ignore[arg-type]
         pass
     assert fake.started and fake.cancelled
+
+
+async def test_brand_id_in_payload_wins_over_the_aggregate(tmp_path):
+    """A branch event carries its brand_id (ADR-0028): converging from ANY
+    surviving compacted event must land the owner on the BRAND, and a later
+    branch event must repoint a legacy branch-scoped grant."""
+    handler, sessions, user_id = await _harness(tmp_path)
+    await handler.handle(_event(user_id))  # legacy event → scoped to rst_9
+    branded = _event(user_id, event_id="evt-2")
+    branded["payload"] = json.dumps(
+        {"owner_user_id": user_id, "name": "Biryani House", "brand_id": "brd_9"}
+    )
+    await handler.handle(branded)
+    user = await _user_row(sessions)
+    assert (user.role, user.restaurant_id) == ("restaurant_admin", "brd_9")
+    assert await _processed_count(sessions) == 2
+
+
+async def test_null_brand_id_falls_back_to_the_aggregate(tmp_path):
+    """Transitional legacy branches emit brand_id=None — the pre-brands
+    behavior must hold exactly (never stamp a null scope)."""
+    handler, sessions, user_id = await _harness(tmp_path)
+    event = _event(user_id)
+    event["payload"] = json.dumps(
+        {"owner_user_id": user_id, "name": "Biryani House", "brand_id": None}
+    )
+    await handler.handle(event)
+    user = await _user_row(sessions)
+    assert (user.role, user.restaurant_id) == ("restaurant_admin", "rst_9")

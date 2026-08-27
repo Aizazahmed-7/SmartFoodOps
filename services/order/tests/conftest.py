@@ -194,15 +194,23 @@ def make_snapshot():
     """Builder for the canonical catalog snapshot (Biryani House / itm_a);
     pass `items` when a suite needs richer menu contents."""
 
-    def _snapshot(*, version=3, status="open", items=None):
+    def _snapshot(*, version=3, status="open", items=None, brand_id=None, display_name=None):
+        restaurant = {
+            "id": "rst_1",
+            "name": "Biryani House",
+            "city": "springfield",
+            "status": status,
+            "version": version,
+        }
+        # Brands (ADR-0028): present only when a suite opts in — the default
+        # mirrors a legacy/transitional snapshot without the keys, which
+        # placement must tolerate (payload.get, not payload[]).
+        if brand_id is not None:
+            restaurant["brand_id"] = brand_id
+        if display_name is not None:
+            restaurant["display_name"] = display_name
         return {
-            "restaurant": {
-                "id": "rst_1",
-                "name": "Biryani House",
-                "city": "springfield",
-                "status": status,
-                "version": version,
-            },
+            "restaurant": restaurant,
             "items": _default_items() if items is None else items,
             "missing_item_ids": [],
         }

@@ -41,6 +41,7 @@ class OrderRepo:
         order_id: str,
         user_id: str,
         restaurant_id: str,
+        brand_id: str | None = None,
         restaurant_name: str,
         card_token: str,
         request_hash: str,
@@ -55,6 +56,7 @@ class OrderRepo:
                 order_id=order_id,
                 user_id=user_id,
                 restaurant_id=restaurant_id,
+                brand_id=brand_id,
                 restaurant_name_snapshot=restaurant_name,
                 status="PLACED",
                 aggregate_version=0,
@@ -118,7 +120,13 @@ class OrderRepo:
         exclusive continuation point; limit+1 rows = has_more probe."""
         query = (
             sa.select(orders)
-            .where((orders.c.restaurant_id == restaurant_id) & (orders.c.status == status))
+            .where(
+                # Brand claims see every branch's queue; branch-scoped rows
+                # (legacy orders, future branch managers) match the first
+                # arm (ADR-0028). Each arm walks its own feed index.
+                ((orders.c.restaurant_id == restaurant_id) | (orders.c.brand_id == restaurant_id))
+                & (orders.c.status == status)
+            )
             .order_by(orders.c.placed_at.asc(), orders.c.order_id.asc())
             .limit(limit + 1)
         )

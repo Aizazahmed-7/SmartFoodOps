@@ -21,9 +21,11 @@ function useFeed(status: OrderStatus) {
 function FeedCard({
   order,
   actions,
+  branchLabel,
 }: {
   order: FeedOrder;
   actions: { label: string; run: (id: string) => Promise<unknown>; danger?: boolean }[];
+  branchLabel?: string;
 }) {
   const queryClient = useQueryClient();
   const act = useMutation({
@@ -34,6 +36,7 @@ function FeedCard({
     <div className="card space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-xs text-slate-500">
+          {branchLabel && <span className="tag mr-1 bg-sky-950 text-sky-300">{branchLabel}</span>}
           {order.order_id.slice(0, 12)}… · {new Date(order.placed_at).toLocaleTimeString()}
         </span>
         <span className="font-semibold"><Money cents={order.total_cents} /></span>
@@ -67,11 +70,13 @@ function Queue({
   status,
   actions,
   empty,
+  branchLabels,
 }: {
   title: string;
   status: OrderStatus;
   actions: (order: FeedOrder) => { label: string; run: (id: string) => Promise<unknown>; danger?: boolean }[];
   empty: string;
+  branchLabels?: Record<string, string>;
 }) {
   const feed = useFeed(status);
   return (
@@ -91,19 +96,32 @@ function Queue({
       )}
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {feed.data?.items.map((o) => (
-          <FeedCard key={o.order_id} order={o} actions={actions(o)} />
+          <FeedCard
+            key={o.order_id}
+            order={o}
+            actions={actions(o)}
+            branchLabel={o.restaurant_id ? branchLabels?.[o.restaurant_id] : undefined}
+          />
         ))}
       </div>
     </section>
   );
 }
 
-export default function PartnerOrders() {
+export default function PartnerOrders({
+  branchLabels,
+}: {
+  // Branch label per ticket (ADR-0028) — shown only for multi-branch brands.
+  branchLabels?: Record<string, string>;
+} = {}) {
+  const labels =
+    branchLabels && Object.keys(branchLabels).length > 1 ? branchLabels : undefined;
   return (
     <div className="space-y-8">
       <Queue
         title="Incoming"
         status="CONFIRMED"
+        branchLabels={labels}
         empty="No new orders — they appear here the moment payment clears."
         actions={() => [
           { label: "Accept", run: acceptOrder },
@@ -113,18 +131,21 @@ export default function PartnerOrders() {
       <Queue
         title="Accepted"
         status="ACCEPTED"
+        branchLabels={labels}
         empty="Nothing accepted yet."
         actions={() => [{ label: "Start preparing", run: markPreparing }]}
       />
       <Queue
         title="In the kitchen"
         status="PREPARING"
+        branchLabels={labels}
         empty="Nothing on the stove."
         actions={() => [{ label: "Food is ready", run: markReady }]}
       />
       <Queue
         title="Awaiting pickup"
         status="READY"
+        branchLabels={labels}
         empty="Nothing waiting for a courier."
         actions={() => []}
       />

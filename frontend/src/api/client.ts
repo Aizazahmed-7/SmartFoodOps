@@ -10,6 +10,7 @@ import type { CartLine } from "../state/cart";
 import type { ErrorCode } from "./errors";
 import type {
   Address,
+  Branch,
   BrowseResult,
   CancelResult,
   CourierView,
@@ -163,6 +164,19 @@ export async function onboardRestaurant(body: {
   await refreshTokens(); // the grant landed — next token carries restaurant_admin
   return restaurant;
 }
+
+export const listBranches = (brandId: string) =>
+  request<{ branches: Branch[] }>("GET", `/v1/restaurants/${brandId}/branches`);
+export const createBranch = (
+  brandId: string,
+  body: { branch_label: string; city: string; lat?: number; lon?: number },
+) => request<Branch>("POST", `/v1/restaurants/${brandId}/branches`, body);
+export const setBaseItemAvailability = (branchId: string, itemId: string, available: boolean) =>
+  request<{ item_id: string; available: boolean; version: number }>(
+    "PUT",
+    `/v1/restaurants/${branchId}/base-items/${itemId}/availability`,
+    { available },
+  );
 
 export const pauseRestaurant = (id: string) =>
   request<RestaurantCard>("POST", `/v1/restaurants/${id}/pause`);

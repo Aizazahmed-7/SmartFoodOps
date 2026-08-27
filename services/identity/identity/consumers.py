@@ -63,9 +63,14 @@ class GrantConvergenceHandler:
             return  # replay of an already-processed delivery
 
         try:
+            # The owner's scope is the BRAND when the payload names one
+            # (ADR-0028); pre-brands events lack the key and fall back to
+            # the aggregate — exactly the old behavior. Branch events carry
+            # their brand_id, so converging from ANY surviving compacted
+            # event lands the owner on the brand.
             await self._service.grant_restaurant_admin(
                 user_id=owner_user_id,
-                restaurant_id=str(event["aggregate_id"]),
+                restaurant_id=str(payload.get("brand_id") or event["aggregate_id"]),
             )
             log.info("grant converged from event", event_id=event_id)
         except (GrantConflict, UnknownUser) as exc:

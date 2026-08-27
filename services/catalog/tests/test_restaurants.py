@@ -23,7 +23,10 @@ def test_create_normalizes_and_dedupes(client):
     r = client.post("/v1/restaurants", json=BODY, headers=CUSTOMER)
     assert r.status_code == 201
     body = r.json()
-    assert body["id"].startswith("rst_")
+    assert body["id"].startswith("brd_")  # onboarding returns the BRAND (ADR-0028)
+    assert body["kind"] == "brand"
+    assert [b["branch_label"] for b in body["branches"]] == ["Main"]
+    assert body["branches"][0]["id"].startswith("rst_")
     assert body["cuisines"] == ["bbq", "pakistani"]  # slugged, deduped, order kept
     assert body["city"] == "springfield"
     assert body["status"] == "open"

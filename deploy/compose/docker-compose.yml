@@ -278,6 +278,9 @@ services:
       <<: *app-env
       UV_PROJECT_ENVIRONMENT: /venvs/inventory
       DATABASE_URL: postgresql+asyncpg://inventory_svc:inventory_svc@postgres:5432/inventory_db
+      # Branch→brand ownership checks (ADR-0028) resolve via catalog's
+      # public read, memoized per process.
+      CATALOG_BASE_URL: http://catalog:8002
     command:
       [
         "uv",

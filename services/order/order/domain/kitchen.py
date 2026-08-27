@@ -105,6 +105,9 @@ class KitchenService:
     def _feed_entry(row: Row[Any], items: list[Row[Any]]) -> dict[str, Any]:
         return {
             "order_id": row.order_id,
+            # Which branch this ticket belongs to — the FE joins branch
+            # labels client-side for the brand-wide feed (ADR-0028).
+            "restaurant_id": row.restaurant_id,
             "status": row.status,
             "placed_at": _aware(row.placed_at).isoformat(),
             "total_cents": row.pricing_snapshot["total_cents"],
@@ -183,7 +186,10 @@ class KitchenService:
     async def _owned(self, restaurant_id: str, order_id: str) -> Row[Any]:
         async with self._sessions() as session:
             row = await OrderRepo(session).get_order_any(order_id)
-        if row is None or row.restaurant_id != restaurant_id:
+        # The claim may be the BRAND (owner) or the branch itself (old
+        # tokens through the repoint window; per-branch managers later) —
+        # either arm owns the order (ADR-0028).
+        if row is None or restaurant_id not in (row.restaurant_id, row.brand_id):
             raise OrderNotFound  # not-found and not-yours are the same 404
         return row
 

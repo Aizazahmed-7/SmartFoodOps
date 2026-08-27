@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 import httpx
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers, mount_observability
-from smartfood_kafka import AvroSerde, EventProducer, SchemaRegistry, Topic, topic
+from smartfood_kafka import AvroSerde, EventConsumer, EventProducer, SchemaRegistry, Topic, topic
 from smartfood_otel import RequestContextMiddleware, setup_logging, setup_tracing
 from smartfood_outbox import OutboxPoller
 from smartfood_pricing import PricingConfig
@@ -56,6 +56,7 @@ def create_app(
     saga: SagaPort | None = None,
     poller: OutboxPoller | None = None,
     tracking_port: TrackingPort | None = None,
+    consumer: EventConsumer | None = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("order")
@@ -116,6 +117,20 @@ def create_app(
             sessions, outbox, topic=events_topic, producer=own_producer, cell_id=settings.cell_id
         )
 
+    live_consumer = consumer
+    if live_consumer is None and settings.kafka_consumers == "on":  # pragma: no cover — live
+        # Live wiring only: the loop, its aiokafka config, and the
+        # retry/DLQ policy all live (tested) in smartfood-kafka.
+        from .consumers import GROUP, BrandRepointHandler
+
+        live_consumer = EventConsumer(
+            topic(settings.cell_id, Topic.CATALOG_CHANGES),
+            GROUP,
+            BrandRepointHandler(sessions),
+            AvroSerde(SchemaRegistry(settings.schema_registry_url)),
+            bootstrap=settings.kafka_bootstrap,
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if settings.create_all:
@@ -128,6 +143,8 @@ def create_app(
             if own_producer is not None:  # pragma: no cover — live path
                 await own_producer.start()
             tasks.append(asyncio.create_task(poller.run()))
+        if live_consumer is not None:
+            tasks.append(asyncio.create_task(live_consumer.run()))
         yield
         for task in tasks:
             task.cancel()  # cancellation IS the tasks' shutdown signal

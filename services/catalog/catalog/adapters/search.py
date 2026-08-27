@@ -48,12 +48,19 @@ def _filters(city: str | None, cuisine: str | None, tag: str | None) -> str:
         clauses.append(
             "AND EXISTS (SELECT 1 FROM menu_items mi "
             "JOIN item_tags it ON it.item_id = mi.id "
-            "WHERE mi.restaurant_id = r.id AND it.tag = :tag AND mi.available)"
+            "WHERE (mi.restaurant_id = r.id OR mi.restaurant_id = r.brand_id) "
+            "AND it.tag = :tag AND mi.available)"
         )
     return " ".join(clauses)
 
 
 def build_queries(city: str | None, cuisine: str | None, tag: str | None) -> dict[str, str]:
+    # Every leg resolves to BRANCH cards (r.kind filter): brand rows are menu
+    # templates, never search results. Item/tag legs join through ownership
+    # OR inheritance, so a base item surfaces every branch that serves it —
+    # one row per branch is the point, not a bug (ADR-0028). Per-branch 86
+    # overrides are deliberately NOT filtered here (display-only staleness;
+    # the menu page is truth) — the named deferral in the brands plan.
     f = _filters(city, cuisine, tag)
     rest_fts = RESTAURANT_FTS.replace("name", "r.name")
     item_fts = ITEM_FTS.replace("name", "i.name", 1).replace("description", "i.description")
@@ -64,29 +71,31 @@ def build_queries(city: str | None, cuisine: str | None, tag: str | None) -> dic
                             word_similarity(:q, r.name)) AS score
             FROM restaurants r
             WHERE ({rest_fts} @@ websearch_to_tsquery('simple', :q) OR :q <% r.name)
+              AND r.kind = 'branch'
             {f} ORDER BY score DESC LIMIT {_CAP}""",
         "cuisines": f"""
             SELECT r.id AS restaurant_id, word_similarity(:q, rc2.cuisine) AS score
             FROM restaurants r
             JOIN restaurant_cuisines rc2 ON rc2.restaurant_id = r.id
             WHERE :q <% rc2.cuisine
+              AND r.kind = 'branch'
             {f} ORDER BY score DESC LIMIT {_CAP}""",
         "items": f"""
-            SELECT i.restaurant_id, i.id, i.name, i.price_cents,
+            SELECT r.id AS restaurant_id, i.id, i.name, i.price_cents,
                    GREATEST(ts_rank({item_fts}, websearch_to_tsquery('simple', :q)),
                             word_similarity(:q, i.name)) AS score
             FROM menu_items i
-            JOIN restaurants r ON r.id = i.restaurant_id
+            JOIN restaurants r ON (r.id = i.restaurant_id OR r.brand_id = i.restaurant_id)
             WHERE ({item_fts} @@ websearch_to_tsquery('simple', :q) OR :q <% i.name)
-              AND i.available
+              AND i.available AND r.kind = 'branch'
             {f} ORDER BY score DESC LIMIT {_CAP}""",
         "tags": f"""
-            SELECT i.restaurant_id, i.id, i.name, i.price_cents,
+            SELECT r.id AS restaurant_id, i.id, i.name, i.price_cents,
                    word_similarity(:q, it2.tag) AS score
             FROM item_tags it2
             JOIN menu_items i ON i.id = it2.item_id
-            JOIN restaurants r ON r.id = i.restaurant_id
-            WHERE :q <% it2.tag AND i.available
+            JOIN restaurants r ON (r.id = i.restaurant_id OR r.brand_id = i.restaurant_id)
+            WHERE :q <% it2.tag AND i.available AND r.kind = 'branch'
             {f} ORDER BY score DESC LIMIT {_CAP}""",
     }
 

@@ -118,3 +118,22 @@ def test_no_rider_cancel_tells_both_sides():
     assert "couldn't find a rider" in drafts[0].body
     assert "was not charged" in drafts[0].body
     assert drafts[1].title == "No rider available"
+
+
+def test_brand_id_addresses_the_kitchen_drafts(  # ADR-0028: one bell per brand
+):
+    confirmed = order_drafts("OrderConfirmed", _order_payload(brand_id="brd_1"))
+    assert (confirmed[0].recipient_type, confirmed[0].recipient_id) == ("restaurant", "brd_1")
+    assert (confirmed[1].recipient_type, confirmed[1].recipient_id) == ("customer", "usr_1")
+
+    cancelled = order_drafts(
+        "OrderCancelled",
+        _order_payload(status="CANCELLED", cancel_reason="customer_cancelled", brand_id="brd_1"),
+    )
+    assert ("restaurant", "brd_1") in [(d.recipient_type, d.recipient_id) for d in cancelled]
+
+
+def test_null_brand_id_falls_back_to_the_branch():
+    """Transitional payloads carry brand_id=None — the pre-brands address."""
+    drafts = order_drafts("OrderConfirmed", _order_payload(brand_id=None))
+    assert (drafts[0].recipient_type, drafts[0].recipient_id) == ("restaurant", "rst_1")

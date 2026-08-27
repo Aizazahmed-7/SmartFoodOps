@@ -66,7 +66,8 @@ export default function PartnerOnboard() {
     <form onSubmit={submit} className="mx-auto mt-6 max-w-md space-y-4">
       <h1 className="text-xl font-bold">Become a partner</h1>
       <p className="text-sm text-slate-400">
-        List your restaurant on SmartFood. You'll manage your menu right after.
+        List your restaurant on SmartFood — this creates your brand and its
+        first location. You'll manage the menu (and open more branches) right after.
       </p>
       <input className="input" placeholder="Restaurant name" value={name} required
         maxLength={120} onChange={(e) => setName(e.target.value)} />
