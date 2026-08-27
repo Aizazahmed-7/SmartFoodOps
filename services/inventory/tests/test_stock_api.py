@@ -41,6 +41,19 @@ def test_list_stock_scoped_and_ordered(client):
     assert [row["item_id"] for row in r.json()["items"]] == ["itm_a", "itm_b"]
 
 
+def test_stock_response_carries_the_true_capacity(client):
+    """The stock tab renders capacity from THIS response — found live when
+    a typed draft haunted a sibling branch's screen and neither showed the
+    real value. None = never provisioned."""
+    r = client.get("/v1/inventory/restaurants/rst_1/stock", headers=admin("rst_1"))
+    assert r.json()["capacity"] is None  # fresh location, no load row yet
+    client.put(
+        "/v1/inventory/restaurants/rst_1/capacity", json={"capacity": 5}, headers=admin("rst_1")
+    )
+    r = client.get("/v1/inventory/restaurants/rst_1/stock", headers=admin("rst_1"))
+    assert r.json()["capacity"] == 5
+
+
 def test_foreign_restaurant_is_404_not_403(client):
     r = client.get("/v1/inventory/restaurants/rst_other/stock", headers=admin("rst_1"))
     assert r.status_code == 404

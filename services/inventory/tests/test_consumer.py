@@ -24,9 +24,12 @@ async def _service(**kwargs):
     return InventoryService(sessions, **kwargs), sessions
 
 
-def _catalog_event(restaurant_id="rst_1", item_ids=("itm_a", "itm_b"), event_type="ItemAdded"):
+def _catalog_event(
+    restaurant_id="rst_1", item_ids=("itm_a", "itm_b"), event_type="ItemAdded", kind="branch"
+):
     payload = {
         "id": restaurant_id,
+        "kind": kind,
         "menu": {
             "categories": [{"id": "cat_1", "items": [{"id": item_id} for item_id in item_ids]}]
         },
@@ -49,6 +52,19 @@ async def test_new_items_provisioned_at_zero_with_default_load():
     assert set(rows) == {"itm_a", "itm_b"}
     assert all(r.available == 0 for r in rows.values())  # STRICT stock: born at 0
     assert (load.capacity, load.active) == (10, 0)
+
+
+async def test_brand_events_provision_nothing():
+    """Brand aggregates carry the base menu but own no fridge (ADR-0028):
+    provisioning them minted phantom (brd_, item) stock rows and a phantom
+    capacity row — the live find that built this test. Branch events carry
+    the same items under the id that actually sells them."""
+    _, sessions = await _service()
+    handler = StockProvisioningHandler(sessions)
+    await handler.handle(_catalog_event(restaurant_id="brd_1", kind="brand"))
+    async with sessions() as s:
+        assert (await s.execute(sa.select(stock))).all() == []
+        assert (await s.execute(sa.select(restaurant_load))).all() == []
 
 
 async def test_existing_counts_survive_menu_edits():

@@ -51,6 +51,14 @@ class StockProvisioningHandler:
             log.warning("unprovisionable catalog event", event_id=str(event.get("event_id")))
             return
 
+        if payload.get("kind") == "brand":
+            # Brand aggregates are menu TEMPLATES (ADR-0028): they carry the
+            # base menu but own no fridge and no kitchen. Provisioning them
+            # would mint phantom (brd_, item) stock rows and a phantom
+            # capacity row — the branches' own events carry the same items
+            # with the id that actually sells them.
+            return
+
         async with self._sessions() as session:
             repo = InventoryRepo(session)
             known = {row.item_id for row in await repo.list_stock(restaurant_id)}

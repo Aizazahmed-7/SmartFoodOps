@@ -49,11 +49,16 @@ function StockLine({
 }
 
 export default function PartnerStock({ rid }: { rid: string }) {
+  const queryClient = useQueryClient();
   const menu = useQuery({ queryKey: ["menu", rid], queryFn: () => getMenu(rid) });
   const stock = useQuery({ queryKey: ["stock", rid], queryFn: () => getStock(rid) });
   const [capacityValue, setCapacityValue] = useState("");
   const saveCapacity = useMutation({
     mutationFn: () => setCapacity(rid, Math.max(1, parseInt(capacityValue, 10) || 1)),
+    onSuccess: () => {
+      setCapacityValue(""); // back to showing the server truth
+      queryClient.invalidateQueries({ queryKey: ["stock", rid] });
+    },
   });
 
   if (menu.isLoading || stock.isLoading) return <Spinner />;
@@ -67,7 +72,14 @@ export default function PartnerStock({ rid }: { rid: string }) {
     <div className="space-y-6">
       <section className="card flex max-w-md items-center gap-3">
         <div className="flex-1">
-          <p className="font-medium">Kitchen capacity</p>
+          <p className="font-medium">
+            Kitchen capacity
+            {stock.data!.capacity != null && (
+              <span className="ml-2 tag bg-slate-800 text-slate-300">
+                current: {stock.data!.capacity}
+              </span>
+            )}
+          </p>
           <p className="text-xs text-slate-500">
             Concurrent orders before new ones get "at capacity".
           </p>
@@ -76,7 +88,7 @@ export default function PartnerStock({ rid }: { rid: string }) {
           className="input w-24 text-right tabular-nums"
           type="number"
           min={1}
-          placeholder="10"
+          placeholder={String(stock.data!.capacity ?? 10)}
           value={capacityValue}
           onChange={(e) => setCapacityValue(e.target.value)}
         />

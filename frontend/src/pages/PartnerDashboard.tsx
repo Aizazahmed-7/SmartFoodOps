@@ -309,7 +309,9 @@ export default function PartnerDashboard() {
       )}
 
       {tab === "orders" && <PartnerOrders branchLabels={branchLabels} />}
-      {tab === "stock" && onBranch && <PartnerStock rid={scope!} />}
+      {/* key: full remount on branch switch — draft inputs must never leak
+          from one branch's screen to another's (the capacity ghost bug). */}
+      {tab === "stock" && onBranch && <PartnerStock key={scope} rid={scope!} />}
       {tab === "insights" && <PartnerInsights />}
       {tab !== "menu" ? null : (<>
       <ErrorNote error={removeCategory.error ?? toggle86.error ?? removeItem.error} />

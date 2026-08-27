@@ -316,7 +316,8 @@ export const getRestaurantAnalytics = (days: number) =>
   request<RestaurantAnalytics>("GET", `/v1/restaurant/analytics?days=${days}`);
 
 export const getStock = (rid: string) =>
-  request<{ items: StockRow[] }>("GET", `/v1/inventory/restaurants/${rid}/stock`);
+  request<{ items: StockRow[]; capacity: number | null }>(
+    "GET", `/v1/inventory/restaurants/${rid}/stock`);
 export const setStock = (rid: string, itemId: string, available: number) =>
   request<StockRow>("PUT", `/v1/inventory/restaurants/${rid}/stock/${itemId}`, { available });
 export const setCapacity = (rid: string, capacity: number) =>

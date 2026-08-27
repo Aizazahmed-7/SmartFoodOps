@@ -80,6 +80,13 @@ class InventoryService:
 
     # ── admin: stock & capacity ────────────────────────────────────
 
+    async def get_capacity(self, restaurant_id: str) -> int | None:
+        """The load row's capacity, or None for a location that has never
+        been provisioned — the API's honest 'no value yet'."""
+        async with self._sessions() as session:
+            row = await InventoryRepo(session).get_load(restaurant_id)
+        return None if row is None else row.capacity
+
     async def list_stock(self, restaurant_id: str) -> list[StockRow]:
         async with self._sessions() as session:
             rows = await InventoryRepo(session).list_stock(restaurant_id)

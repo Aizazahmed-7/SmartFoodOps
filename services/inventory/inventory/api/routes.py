@@ -103,10 +103,15 @@ def _reservation_out(reservation: Reservation) -> dict:
 async def list_stock(restaurant_id: str, ctx: RestaurantAdmin, request: Request) -> dict:
     await _own(ctx, restaurant_id, request)
     rows = await _svc(request).list_stock(restaurant_id)
+    # Capacity rides along so the stock tab can show the TRUTH instead of a
+    # placeholder — found live when one branch's typed value haunted the
+    # other branch's screen. None = never provisioned (fresh location).
+    capacity = await _svc(request).get_capacity(restaurant_id)
     return {
         "items": [
             {"item_id": r.item_id, "available": r.available, "version": r.version} for r in rows
-        ]
+        ],
+        "capacity": capacity,
     }
 
 
