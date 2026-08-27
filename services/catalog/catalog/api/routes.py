@@ -615,6 +615,7 @@ async def get_menu(
             restaurant_id,
             user_id=request.headers.get("x-auth-sub"),
             request_id=str(ctxvars.get("request_id", "")) or f"anon-{id(request)}",
+            brand_id=menu.get("brand_id"),
         )
     response.headers["Cache-Control"] = "public, max-age=5"
     return menu

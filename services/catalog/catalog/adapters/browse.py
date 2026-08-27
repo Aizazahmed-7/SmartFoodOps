@@ -51,7 +51,12 @@ class BrowseEvents:
         self._rng = rng
 
     async def menu_viewed(
-        self, restaurant_id: str, *, user_id: str | None, request_id: str
+        self,
+        restaurant_id: str,
+        *,
+        user_id: str | None,
+        request_id: str,
+        brand_id: str | None = None,
     ) -> None:
         if self._rng() >= self._sample_rate:
             return
@@ -73,6 +78,7 @@ class BrowseEvents:
                     "payload": json.dumps(
                         {
                             "restaurant_id": restaurant_id,
+                            "brand_id": brand_id,
                             "user_id": user_id,
                             "viewed_at": now.isoformat(),
                         }

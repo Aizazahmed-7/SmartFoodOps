@@ -76,7 +76,7 @@ class ViewsProjector:
                 payload: dict[str, Any] = json.loads(raw) if isinstance(raw, str) else raw
                 await repo.apply_view(payload, str(event.get("event_id", "")))
             await session.commit()
-        log.info("views folded", events=len(events))
+        log.info("views added", events=len(events))
 
 
 GROUP_REPOINT = "analytics.brand-repoint"

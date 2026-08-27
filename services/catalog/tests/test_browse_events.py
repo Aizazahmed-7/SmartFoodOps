@@ -66,6 +66,26 @@ def test_menu_get_fires_a_view_with_the_stamped_identity():
     assert payload["user_id"] == "usr_9" and payload["restaurant_id"] == rid
 
 
+def test_branch_views_carry_the_brand_for_insights_scoping():
+    """Insights scopes views by (brand_id == claim OR restaurant_id ==
+    claim). A BRANCH view matches only through brand_id — drop the stamp
+    and every owner's funnel goes blind to their busiest surface (the live
+    find that built this test: 28 NULL-brand rows, a flat views count)."""
+    producer = RecordingProducer()
+    app = _app(_browse(producer))
+    with TestClient(app) as c:
+        body = c.post(
+            "/v1/restaurants",
+            json={"name": "Biryani House", "city": "springfield", "cuisines": ["pakistani"]},
+            headers=CUSTOMER,
+        ).json()
+        branch = body["branches"][0]["id"]
+        assert c.get(f"/v1/menus/{branch}").status_code == 200
+    payload = json.loads(producer.sent[-1]["record"]["payload"])
+    assert payload["restaurant_id"] == branch
+    assert payload["brand_id"] == body["id"]  # the owner's claim — the OR's first arm
+
+
 def test_anonymous_views_ride_with_null_identity():
     """public_read menus arrive unstamped — the view still counts (volume),
     with user_id null (excluded from conversion; you cannot join an order
