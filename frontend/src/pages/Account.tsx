@@ -6,6 +6,7 @@ import {
 } from "../api/client";
 import { useAuth } from "../state/auth";
 import { ErrorNote, Section, Spinner } from "../components/ui";
+import { CITIES, DEFAULT_CITY } from "../cities";
 
 export default function Account() {
   const { claims } = useAuth();
@@ -13,7 +14,7 @@ export default function Account() {
   const queryClient = useQueryClient();
   const [name, setName] = useState<string | null>(null);
   const [phone, setPhone] = useState<string | null>(null);
-  const [addr, setAddr] = useState({ label: "", line1: "", city: "springfield" });
+  const [addr, setAddr] = useState({ label: "", line1: "", city: DEFAULT_CITY });
 
   const profile = useQuery({ queryKey: ["profile"], queryFn: getProfile, enabled: !!claims });
   const addresses = useQuery({ queryKey: ["addresses"], queryFn: listAddresses, enabled: !!claims });
@@ -29,7 +30,7 @@ export default function Account() {
   const createAddress = useMutation({
     mutationFn: () => addAddress(addr),
     onSuccess: () => {
-      setAddr({ label: "", line1: "", city: "springfield" });
+      setAddr({ label: "", line1: "", city: DEFAULT_CITY });
       queryClient.invalidateQueries({ queryKey: ["addresses"] });
     },
   });
@@ -81,8 +82,9 @@ export default function Account() {
               onChange={(e) => setAddr({ ...addr, label: e.target.value })} />
             <select className="input" value={addr.city}
               onChange={(e) => setAddr({ ...addr, city: e.target.value })}>
-              <option value="springfield">Springfield</option>
-              <option value="shelbyville">Shelbyville</option>
+              {CITIES.map((c) => (
+                <option key={c.id} value={c.id}>{c.label}</option>
+              ))}
             </select>
           </div>
           <input className="input" placeholder="Street address" value={addr.line1}

@@ -26,6 +26,7 @@ import type { RiderMe } from "../api/types";
 import CityMap, { CITY, Pin, clampToCity, project } from "../components/CityMap";
 import { ErrorNote } from "../components/ui";
 import { useAuth } from "../state/auth";
+import { DEFAULT_CITY } from "../cities";
 
 const SPEED_MPS = 45; // arcade-brisk — the demo shouldn't feel like traffic
 const ARRIVE_M = 40; // mirrors rider_sim.main.ARRIVE_M and the sim's taps
@@ -73,7 +74,7 @@ export default function RiderConsole() {
   });
   const restaurants = useQuery({
     queryKey: ["rider-city"],
-    queryFn: () => browse("springfield", {}),
+    queryFn: () => browse(DEFAULT_CITY, {}),
     enabled: isRider,
     staleTime: 300_000,
   });

@@ -11,6 +11,7 @@ import { ErrorNote, Money, Spinner } from "../components/ui";
 import PartnerOrders from "./PartnerOrders";
 import PartnerInsights from "./PartnerInsights";
 import PartnerStock from "./PartnerStock";
+import { CITIES, DEFAULT_CITY } from "../cities";
 
 type Tab = "orders" | "menu" | "stock" | "insights";
 
@@ -132,7 +133,7 @@ function AddBranchForm({
   onClose: () => void;
 }) {
   const [label, setLabel] = useState("");
-  const [city, setCity] = useState("springfield");
+  const [city, setCity] = useState<string>(DEFAULT_CITY);
   const [lat, setLat] = useState("");
   const [lon, setLon] = useState("");
   const create = useMutation({
@@ -151,8 +152,12 @@ function AddBranchForm({
         <h3 className="font-semibold">New branch</h3>
         <input className="input" placeholder="Label (Downtown, Airport…)"
           value={label} onChange={(e) => setLabel(e.target.value)} />
-        <input className="input" placeholder="City"
-          value={city} onChange={(e) => setCity(e.target.value)} />
+        <select className="input" value={city}
+          onChange={(e) => setCity(e.target.value)}>
+          {CITIES.map((c) => (
+            <option key={c.id} value={c.id}>{c.label}</option>
+          ))}
+        </select>
         <div className="flex gap-2">
           <input className="input" placeholder="lat (optional)"
             value={lat} onChange={(e) => setLat(e.target.value)} />

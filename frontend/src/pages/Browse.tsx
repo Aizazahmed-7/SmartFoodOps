@@ -5,7 +5,7 @@ import { browse } from "../api/client";
 import type { RestaurantCard } from "../api/types";
 import { ErrorNote, Spinner } from "../components/ui";
 
-const CITIES = ["springfield", "shelbyville"];
+import { CITIES, DEFAULT_CITY } from "../cities";
 const CUISINES = ["pakistani", "burgers", "italian", "japanese", "mexican", "indian",
                   "vietnamese", "middle-eastern", "chinese", "pizza"];
 const TAGS = ["vegetarian", "vegan", "halal", "spicy"];
@@ -28,7 +28,7 @@ export function RestaurantTile({ r }: { r: RestaurantCard }) {
 }
 
 export default function Browse() {
-  const [city, setCity] = useState(CITIES[0]);
+  const [city, setCity] = useState<string>(DEFAULT_CITY);
   const [cuisine, setCuisine] = useState<string | undefined>();
   const [tag, setTag] = useState<string | undefined>();
   const [pages, setPages] = useState(1);
@@ -54,9 +54,9 @@ export default function Browse() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         {CITIES.map((c) => (
-          <button key={c} className={chip(city === c)}
-            onClick={() => { setCity(c); setPages(1); }}>
-            {c}
+          <button key={c.id} className={chip(city === c.id)}
+            onClick={() => { setCity(c.id); setPages(1); }}>
+            {c.label}
           </button>
         ))}
         <span className="mx-1 text-slate-700">|</span>

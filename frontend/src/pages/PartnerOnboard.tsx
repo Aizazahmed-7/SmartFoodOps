@@ -3,6 +3,7 @@ import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { ApiError, onboardRestaurant } from "../api/client";
 import { useAuth } from "../state/auth";
 import { ErrorNote } from "../components/ui";
+import { CITIES, DEFAULT_CITY } from "../cities";
 
 const CUISINES = ["pakistani", "burgers", "italian", "japanese", "mexican", "indian",
                   "vietnamese", "middle-eastern", "chinese", "pizza", "bbq", "fast-food"];
@@ -15,7 +16,7 @@ export default function PartnerOnboard() {
   const location = useLocation();
   const { claims, setPendingOnboarding } = useAuth();
   const [name, setName] = useState("");
-  const [city, setCity] = useState("springfield");
+  const [city, setCity] = useState<string>(DEFAULT_CITY);
   const [cuisines, setCuisines] = useState<string[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [pendingNote, setPendingNote] = useState(false);
@@ -72,8 +73,9 @@ export default function PartnerOnboard() {
       <input className="input" placeholder="Restaurant name" value={name} required
         maxLength={120} onChange={(e) => setName(e.target.value)} />
       <select className="input" value={city} onChange={(e) => setCity(e.target.value)}>
-        <option value="springfield">Springfield</option>
-        <option value="shelbyville">Shelbyville</option>
+        {CITIES.map((c) => (
+          <option key={c.id} value={c.id}>{c.label}</option>
+        ))}
       </select>
       <div>
         <p className="mb-2 text-sm text-slate-400">Cuisines (1–5)</p>

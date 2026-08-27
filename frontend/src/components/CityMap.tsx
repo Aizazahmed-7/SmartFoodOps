@@ -2,7 +2,8 @@
  * The toy city, drawn by us — no tiles, no map provider (the user's call:
  * "a 2d map created by us, just like a game").
  *
- * Coordinates are REAL lat/lon inside the seed's Springfield box, so the
+ * Coordinates are REAL lat/lon inside the toy-city box (Rawalpindi in the
+ * FE's city list), so the
  * same numbers feed Redis GEOSEARCH, the 3 km offer radius, and this SVG.
  * `project()` is the only bridge: degrees → viewBox units, with latitude
  * flipped (north is up, SVG y grows down) and longitude scaled by
@@ -10,7 +11,9 @@
  */
 import type { ReactNode } from "react";
 
-// MUST mirror tools/seed/seed/main.py CITY_BOXES["springfield"].
+// MUST mirror tools/seed/seed/main.py CITY_BOXES first box — the FE shows
+// it as Rawalpindi (src/cities.ts); coordinates are the contract, the city
+// NAME is display-level only.
 export const CITY = { south: 39.78, west: -89.67, north: 39.82, east: -89.63 };
 
 const LAT_SPAN = CITY.north - CITY.south;
