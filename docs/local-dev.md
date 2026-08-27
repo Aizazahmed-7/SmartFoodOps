@@ -287,7 +287,7 @@ The invariant this machinery exists to prove (and CI asserts): **N injected time
 
 ## 10. Debugging
 
-- **Hot reload**: containerized apps mount `app/` + `libs/` and run `uvicorn --reload`; native (`make dev`) does the same. A lib edit reloads every consumer.
+- **Hot reload**: containerized apps mount the repo and run `uvicorn --reload` **scoped** (`--reload-dir <own package> --reload-dir libs`): a service restarts only for its own code or a shared lib — never for another service's files or anyone's tests. (Unscoped, every repo edit bounced all 12 services at once, surfacing as random 503 `DEPENDENCY_UNAVAILABLE` bursts mid-demo.) A lib edit still reloads every consumer; native (`make dev`) behaves the same.
 - **debugpy**: start any service with `DEBUGPY=1` (works for both `make dev` and containers) — it listens on **app port + 1000** (order = 9006). A checked-in `.vscode/launch.json` with an attach configuration per service is planned *(W3)*; until then add your own attach config pointing at the port.
 - **Temporal**: the dev server persists SQLite history, so **workers replay in-flight workflows after restart** — you can kill and restart the order service mid-saga and watch it resume. Use the UI (8233) to inspect activity failures/retries and to send signals manually (e.g. fake a `restaurant_decision`).
 - **Data poking**: `make psql DB=order_db` (also `payment_db`, `catalog_db`, …), Redpanda Console (8085) for topics + schemas, `make logs SVC=x` for container logs. DynamoDB Admin (8088) browses LocalStack's tables and Redis Commander (8087) all three Redis DBs — both start with `make up-ui`.
