@@ -1,7 +1,12 @@
-// The kitchen screen (S6/S7 surfaces): three status-grouped queues polling
-// every 3s. Decisions are honest-async — a 202 means "the saga has it";
-// the next poll shows the truth, including a customer beating us to it.
+// The kitchen screen (S6/S7 surfaces): four status-grouped queues off ONE
+// batched query. Freshness is push-over-pull: the bell's SSE hints
+// invalidate ["feed"] the moment an order arrives or cancels, our own
+// actions invalidate on settle, and a 15s floor bounds what push can miss
+// (courier pickups emit no hint). Decisions are honest-async — a 202 means
+// "the saga has it"; the next refresh shows the truth, including a
+// customer beating us to it.
 
+import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   acceptOrder, getRestaurantOrders, markPreparing, markReady, rejectOrder,
@@ -9,11 +14,14 @@ import {
 import type { FeedOrder, OrderStatus } from "../api/types";
 import { ErrorNote, Money, StatusTag } from "../components/ui";
 
-function useFeed(status: OrderStatus) {
+// The whole board, oldest-first across queues, in one request.
+const BOARD: OrderStatus[] = ["CONFIRMED", "ACCEPTED", "PREPARING", "READY"];
+
+function useBoard() {
   return useQuery({
-    queryKey: ["feed", status],
-    queryFn: () => getRestaurantOrders(status),
-    refetchInterval: 3000,
+    queryKey: ["feed"],
+    queryFn: () => getRestaurantOrders(BOARD),
+    refetchInterval: 15000, // the floor; hints carry the speed
     refetchIntervalInBackground: true, // kitchen tablets live in background tabs
   });
 }
@@ -67,35 +75,30 @@ function FeedCard({
 
 function Queue({
   title,
-  status,
+  orders,
+  loaded,
   actions,
   empty,
   branchLabels,
 }: {
   title: string;
-  status: OrderStatus;
+  orders: FeedOrder[];
+  loaded: boolean;
   actions: (order: FeedOrder) => { label: string; run: (id: string) => Promise<unknown>; danger?: boolean }[];
   empty: string;
   branchLabels?: Record<string, string>;
 }) {
-  const feed = useFeed(status);
   return (
     <section className="space-y-2">
       <h2 className="flex items-center gap-2 text-lg font-semibold">
         {title}
-        {feed.data && feed.data.items.length > 0 && (
-          <span className="tag bg-orange-500/20 text-orange-300">{feed.data.items.length}</span>
+        {orders.length > 0 && (
+          <span className="tag bg-orange-500/20 text-orange-300">{orders.length}</span>
         )}
       </h2>
-      <ErrorNote error={feed.error} />
-      {feed.data?.items.length === 0 && <p className="text-sm text-slate-500">{empty}</p>}
-      {feed.data?.next_cursor && (
-        <p className="text-sm text-amber-300">
-          Showing the oldest 100 — more are waiting. Work the queue down!
-        </p>
-      )}
+      {loaded && orders.length === 0 && <p className="text-sm text-slate-500">{empty}</p>}
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-        {feed.data?.items.map((o) => (
+        {orders.map((o) => (
           <FeedCard
             key={o.order_id}
             order={o}
@@ -116,11 +119,25 @@ export default function PartnerOrders({
 } = {}) {
   const labels =
     branchLabels && Object.keys(branchLabels).length > 1 ? branchLabels : undefined;
+  const board = useBoard();
+  const byStatus = useMemo(() => {
+    const groups: Record<string, FeedOrder[]> = {};
+    for (const o of board.data?.items ?? []) (groups[o.status] ??= []).push(o);
+    return groups;
+  }, [board.data]);
+  const loaded = board.data !== undefined;
   return (
     <div className="space-y-8">
+      <ErrorNote error={board.error} />
+      {board.data?.next_cursor && (
+        <p className="text-sm text-amber-300">
+          Showing the oldest 100 active tickets — more are waiting. Work the board down!
+        </p>
+      )}
       <Queue
         title="Incoming"
-        status="CONFIRMED"
+        orders={byStatus["CONFIRMED"] ?? []}
+        loaded={loaded}
         branchLabels={labels}
         empty="No new orders — they appear here the moment payment clears."
         actions={() => [
@@ -130,21 +147,24 @@ export default function PartnerOrders({
       />
       <Queue
         title="Accepted"
-        status="ACCEPTED"
+        orders={byStatus["ACCEPTED"] ?? []}
+        loaded={loaded}
         branchLabels={labels}
         empty="Nothing accepted yet."
         actions={() => [{ label: "Start preparing", run: markPreparing }]}
       />
       <Queue
         title="In the kitchen"
-        status="PREPARING"
+        orders={byStatus["PREPARING"] ?? []}
+        loaded={loaded}
         branchLabels={labels}
         empty="Nothing on the stove."
         actions={() => [{ label: "Food is ready", run: markReady }]}
       />
       <Queue
         title="Awaiting pickup"
-        status="READY"
+        orders={byStatus["READY"] ?? []}
+        loaded={loaded}
         branchLabels={labels}
         empty="Nothing waiting for a courier."
         actions={() => []}
@@ -157,7 +177,8 @@ export default function PartnerOrders({
 function StatusNote() {
   return (
     <p className="text-xs text-slate-500">
-      Queues refresh every 3s. An order can leave ANY queue without your
+      Queues update live (new and cancelled orders push instantly); a 15s
+      refresh guards the stream. An order can leave ANY queue without your
       action: the customer may cancel until the courier picks up, and
       un-answered incoming orders time out. <StatusTag status="READY" /> orders
       leave when the courier collects them.

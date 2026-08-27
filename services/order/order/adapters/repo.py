@@ -3,6 +3,7 @@ Ownership lives in every WHERE clause (user_id scoping → 404, docs §5.2)."""
 
 import base64
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -111,13 +112,15 @@ class OrderRepo:
         self,
         *,
         restaurant_id: str,
-        status: str,
+        statuses: Sequence[str],
         limit: int,
         after: tuple[datetime, str] | None,
     ) -> list[Row[Any]]:
-        """Kitchen queue down ix_orders_feed — OLDEST first (a kitchen is a
-        FIFO; customer history is the newest-first mirror). `after` is the
-        exclusive continuation point; limit+1 rows = has_more probe."""
+        """Kitchen queues down ix_orders_feed — OLDEST first (a kitchen is a
+        FIFO; customer history is the newest-first mirror). `statuses` is a
+        set of queues fetched in ONE round trip (the kitchen page batches
+        all four); `after` is the exclusive continuation point; limit+1
+        rows = has_more probe."""
         query = (
             sa.select(orders)
             .where(
@@ -125,7 +128,7 @@ class OrderRepo:
                 # (legacy orders, future branch managers) match the first
                 # arm (ADR-0028). Each arm walks its own feed index.
                 ((orders.c.restaurant_id == restaurant_id) | (orders.c.brand_id == restaurant_id))
-                & (orders.c.status == status)
+                & (orders.c.status.in_(statuses))
             )
             .order_by(orders.c.placed_at.asc(), orders.c.order_id.asc())
             .limit(limit + 1)

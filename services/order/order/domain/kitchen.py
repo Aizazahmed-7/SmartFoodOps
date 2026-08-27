@@ -21,6 +21,7 @@ Scoping: an admin's claim IS their restaurant; someone else's order (or a
 nonexistent one) is the same 404 — no existence leaks.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -78,7 +79,7 @@ class KitchenService:
     # ── the feed ───────────────────────────────────────────────────
 
     async def feed(
-        self, restaurant_id: str, *, status: OrderStatus, limit: int, cursor: str | None
+        self, restaurant_id: str, *, statuses: Sequence[OrderStatus], limit: int, cursor: str | None
     ) -> dict[str, Any]:
         after: tuple[datetime, str] | None = None
         if cursor is not None:
@@ -89,7 +90,7 @@ class KitchenService:
         async with self._sessions() as session:
             repo = OrderRepo(session)
             rows = await repo.list_feed(
-                restaurant_id=restaurant_id, status=status, limit=limit, after=after
+                restaurant_id=restaurant_id, statuses=statuses, limit=limit, after=after
             )
             page, has_more = rows[:limit], len(rows) > limit
             items = await repo.get_items_for([row.order_id for row in page])

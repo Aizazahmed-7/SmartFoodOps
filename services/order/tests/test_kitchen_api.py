@@ -87,6 +87,39 @@ def test_feed_is_a_fifo_queue_with_batched_items(client, db_url, place, advance_
     assert entry["total_cents"] > 0 and entry["currency"] == "USD"
 
 
+def test_feed_batches_multiple_statuses_in_one_call(client, db_url, place, advance_order):
+    """The kitchen board's whole read: repeated status params, one round
+    trip, entries carry their status so the FE groups client-side."""
+    confirmed = place(client)
+    advance_order(db_url, confirmed, TO_CONFIRMED)
+    preparing = place(client)
+    advance_order(
+        db_url, preparing, [*TO_CONFIRMED, ("CONFIRMED", "ACCEPTED"), ("ACCEPTED", "PREPARING")]
+    )
+    place(client)  # stays PLACED — on no board
+
+    r = client.get(
+        "/v1/restaurant/orders",
+        params={"status": ["CONFIRMED", "PREPARING", "READY"]},
+        headers=OWNER,
+    )
+    assert r.status_code == 200
+    feed = r.json()
+    assert {(e["order_id"], e["status"]) for e in feed["items"]} == {
+        (confirmed, "CONFIRMED"),
+        (preparing, "PREPARING"),
+    }
+    keys = [(e["placed_at"], e["order_id"]) for e in feed["items"]]
+    assert keys == sorted(keys)  # one FIFO across the whole board
+
+    # One bad status in the batch poisons the whole request — 422, not a
+    # silently narrower board.
+    bad = client.get(
+        "/v1/restaurant/orders", params={"status": ["CONFIRMED", "COOKING"]}, headers=OWNER
+    )
+    assert bad.status_code == 422
+
+
 def test_feed_keyset_pagination_never_overlaps(client, db_url, place, advance_order):
     ids = {place(client) for _ in range(3)}
     for order_id in ids:

@@ -291,11 +291,12 @@ export const cancelOrder = (orderId: string) =>
 
 // ── kitchen: feed, decisions, prep (W2, partner side) ──────────────
 
-export const getRestaurantOrders = (status: OrderStatus, cursor?: string) =>
+export const getRestaurantOrders = (statuses: OrderStatus[], cursor?: string) =>
   request<Feed>(
     "GET",
-    // limit=100 (the backend max): a kitchen screen wants the whole queue.
-    `/v1/restaurant/orders?status=${status}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+    // Repeated status params: ONE round trip fetches every queue the page
+    // renders; limit=100 (the backend max) — a kitchen wants the whole board.
+    `/v1/restaurant/orders?${statuses.map((s) => `status=${s}`).join("&")}&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
   );
 
 export const acceptOrder = (orderId: string) =>

@@ -68,12 +68,17 @@ _KITCHEN_ERRORS = (OrderNotFound, AlreadyDecided, KitchenStateConflict, SagaUnav
 async def feed(
     ctx: RestaurantAdmin,
     request: Request,
-    status: Annotated[OrderStatus, Query()],  # required: the feed is per-queue by design
+    # Repeated: ?status=CONFIRMED&status=PREPARING — one round trip serves
+    # every queue the kitchen page renders (it batches all four and groups
+    # client-side). A single value still parses as a one-element list.
+    status: Annotated[list[OrderStatus], Query(min_length=1, max_length=8)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     cursor: str | None = None,
 ) -> dict[str, Any]:
     try:
-        return await _kitchen(request).feed(_claim(ctx), status=status, limit=limit, cursor=cursor)
+        return await _kitchen(request).feed(
+            _claim(ctx), statuses=status, limit=limit, cursor=cursor
+        )
     except InvalidCursor:
         raise ApiError(
             ErrorCode.VALIDATION_FAILED,
