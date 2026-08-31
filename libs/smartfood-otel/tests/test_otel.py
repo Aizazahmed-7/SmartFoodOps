@@ -118,6 +118,38 @@ def test_every_request_emits_a_completed_line(capsys):
     assert isinstance(line["duration_ms"], float)
 
 
+def test_stream_prefixes_are_logged_but_never_measured(capsys):
+    """A held connection's duration is policy, not latency: stream paths
+    keep their completion log line but stay OUT of the histogram (and the
+    span) — the fix for notification's p95 pinning at the top bucket
+    whenever a 15-minute bell stream closed."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient as TC
+
+    stream_app = FastAPI()
+    stream_app.add_middleware(RequestContextMiddleware, stream_prefixes=("/v1/stream/",))
+
+    @stream_app.get("/v1/stream/{channel}")
+    async def stream(channel: str) -> dict:
+        return {"held": channel}
+
+    @stream_app.get("/v1/plain")
+    async def plain() -> dict:
+        return {"ok": True}
+
+    setup_logging("stream-test")
+    with TC(stream_app) as c:
+        before = _count("GET", 200)
+        assert c.get("/v1/stream/ord_42").status_code == 200
+        assert _count("GET", 200) == before  # no histogram sample for the stream
+        assert c.get("/v1/plain").status_code == 200
+        assert _count("GET", 200) == before + 1  # plain paths still measured
+    lines = _events(capsys, "request completed")
+    assert [entry["path"] for entry in lines] == ["/v1/stream/ord_42", "/v1/plain"]
+    # the stream still LOGS its completion — one line per close is the
+    # debugging trail; only the measurement is suppressed.
+
+
 def test_healthchecks_stay_quiet(capsys):
     setup_logging("access-test")
     assert client.get("/healthz").status_code == 200

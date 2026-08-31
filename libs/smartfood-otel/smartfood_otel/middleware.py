@@ -55,8 +55,16 @@ ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
 
 class RequestContextMiddleware:
-    def __init__(self, app: ASGIApp):
+    def __init__(self, app: ASGIApp, stream_prefixes: tuple[str, ...] = ()):
+        """`stream_prefixes` names this service's held-connection endpoints
+        (SSE lanes). They keep their completion LOG line (one line per
+        stream close — priceless in debugging) but skip the latency
+        histogram AND the span: a stream's duration is its lifetime
+        POLICY, not a latency — recording it pinned notification's p95
+        at the top bucket for a full day (the live find). Prefix match
+        because tracking streams carry the order id in the path."""
         self.app = app
+        self._stream_prefixes = stream_prefixes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -67,6 +75,9 @@ class RequestContextMiddleware:
         request_id = headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
         path = scope.get("path", "")
         method = scope.get("method", "")
+        # One decision, applied to histogram and span alike ("" prefixes
+        # never match: str.startswith(()) is False).
+        measured = path not in _METRICS_SKIP and not path.startswith(self._stream_prefixes)
 
         # This hop's SERVER span, parented on the caller's context. With
         # tracing unconfigured the no-op tracer makes it free.
@@ -74,7 +85,7 @@ class RequestContextMiddleware:
             get_tracer().start_as_current_span(
                 f"{method} {path}", context=extract_context(headers), kind=SpanKind.SERVER
             )
-            if path not in _METRICS_SKIP
+            if measured
             else nullcontext(INVALID_SPAN)
         )
         with span_cm as span:
@@ -121,7 +132,7 @@ class RequestContextMiddleware:
                         status=status["code"],
                         duration_ms=round(duration_s * 1000, 1),
                     )
-                if path not in _METRICS_SKIP and status["code"] is not None:
+                if measured and status["code"] is not None:
                     observe_request(method, status["code"], duration_s)
                     if span.is_recording():
                         span.set_attribute("http.method", method)

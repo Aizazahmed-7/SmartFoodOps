@@ -161,7 +161,9 @@ def create_app(
             await own_http.aclose()
 
     app = FastAPI(title="order", lifespan=lifespan)
-    app.add_middleware(RequestContextMiddleware)
+    # SSE lanes are lifetimes, not latencies — keep them out of the
+    # p95 histogram and out of Jaeger (smartfood-otel stream_prefixes).
+    app.add_middleware(RequestContextMiddleware, stream_prefixes=("/v1/track/",))
     install_error_handlers(app)
     mount_observability(app, engine=engine)
     # Exposed for the same reason state.service is: it is this app's one
