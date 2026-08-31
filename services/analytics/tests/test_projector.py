@@ -170,6 +170,47 @@ async def test_create_orders_placed_shape_folds_too():
     assert row is not None and row.placed_at is not None and row.total_cents == 4096
 
 
+async def test_fold_guarantees_one_row_per_order():
+    """The invariant that makes the bulk upsert LEGAL: Postgres refuses one
+    statement whose ON CONFLICT DO UPDATE touches a row twice, and a single
+    poll routinely carries an order's whole lifecycle. sqlite tolerates the
+    duplicate, so the behavioral suite alone could never catch a broken
+    fold — this test pins the seam directly."""
+    from analytics.consumers import fold_facts
+
+    rows = fold_facts(
+        [
+            _event("OrderPlaced", at="2026-08-24T10:00:00+00:00"),
+            _event("OrderConfirmed", at="2026-08-24T10:00:02+00:00"),
+            _event("OrderPlaced", order_id="ord_2"),
+            _event("OrderRefundLaunched"),  # unknown type: contributes nothing
+        ]
+    )
+    assert sorted(r["order_id"] for r in rows) == ["ord_1", "ord_2"]
+    merged = next(r for r in rows if r["order_id"] == "ord_1")
+    assert merged["status"] == "CONFIRMED"  # later event wins shared columns
+    assert "placed_at" in merged and "confirmed_at" in merged  # both milestones kept
+
+
+async def test_mixed_shapes_in_one_batch_group_by_signature():
+    """Two orders whose merged rows carry DIFFERENT column sets (one has
+    cancel_reason, one does not) must both land — the repo groups them into
+    one statement per signature; a naive single statement cannot express
+    two SET lists."""
+    sessions = await _sessions()
+    await FactsProjector(sessions).handle_batch(
+        [
+            _event("OrderPlaced", order_id="ord_a"),
+            _event("OrderPlaced", order_id="ord_b"),
+            _event("OrderCancelled", order_id="ord_b", cancel_reason="customer_cancelled"),
+        ]
+    )
+    row_a, row_b = await _row(sessions, "ord_a"), await _row(sessions, "ord_b")
+    assert row_a is not None and row_a.status == "PLACED" and row_a.cancel_reason is None
+    assert row_b is not None and row_b.status == "CANCELLED"
+    assert row_b.cancel_reason == "customer_cancelled"
+
+
 # ── the views projector (S8) ────────────────────────────────────────
 
 
@@ -181,6 +222,20 @@ def _view(event_id, user: str | None = "usr_1", restaurant="rst_1", at="2026-08-
         "event_id": event_id,
         "payload": _json.dumps({"restaurant_id": restaurant, "user_id": user, "viewed_at": at}),
     }
+
+
+async def test_duplicate_view_ids_within_one_batch_land_once():
+    """Intra-STATEMENT duplicates: the whole batch is one multi-VALUES
+    INSERT .. DO NOTHING, and DO NOTHING (unlike DO UPDATE) legally skips
+    a key it already touched — a double-polled hint costs nothing."""
+    from analytics.consumers import ViewsProjector
+    from analytics.db import menu_views
+
+    sessions = await _sessions()
+    await ViewsProjector(sessions).handle_batch([_view("v_dup"), _view("v_dup")])
+    async with sessions() as s:
+        count = (await s.execute(sa.select(sa.func.count()).select_from(menu_views))).scalar_one()
+    assert count == 1
 
 
 async def test_views_fold_and_redelivery_collapses_on_the_pk():

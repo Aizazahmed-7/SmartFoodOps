@@ -54,69 +54,93 @@ def _total_cents(payload: dict[str, Any]) -> int:
     return int(value) if isinstance(value, (int, float)) else 0
 
 
+def event_values(event_type: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """One lifecycle event → the fact-row columns it owns (None = unknown
+    type, skipped for forward compatibility: a newer producer must not park
+    this consumer's batches). Pure on purpose — the consumer's fold merges
+    these dicts in batch order, and every convergence guard lives HERE,
+    once, whether events land singly or bulk."""
+    milestone = _EVENT_COLUMNS.get(event_type)
+    if milestone is None:
+        return None
+    # Two producer shapes share this topic: transition events stamp
+    # `occurred_at`; the OrderPlaced staged by create_order stamps
+    # `placed_at` (the API's own clock — semantically the right moment
+    # for that milestone anyway). History is immutable, so the READER
+    # tolerates both; a payload with neither raises → retries → parks
+    # with forensics, which is the right fate for a shapeless one.
+    raw_ts = payload.get("occurred_at") or payload["placed_at"]
+    occurred = datetime.fromisoformat(raw_ts)
+    values: dict[str, Any] = {
+        "order_id": payload["order_id"],
+        "restaurant_id": payload["restaurant_id"],
+        "user_id": payload.get("user_id", ""),
+        "status": payload["status"],
+        "aggregate_version": int(payload.get("aggregate_version", 0)),
+        "total_cents": _total_cents(payload),
+        "updated_at": occurred,
+        milestone: occurred,
+    }
+    if event_type == "OrderCancelled":
+        values["cancel_reason"] = payload.get("cancel_reason")
+    # Only a KNOWN courier updates the column: pre-assignment events
+    # carry null, and an out-of-order early event must never blank a
+    # later stamp (the delivered_at convergence rule, applied again).
+    if payload.get("rider_id"):
+        values["rider_id"] = payload["rider_id"]
+    # Same convergence rule as rider_id: only a KNOWN brand writes the
+    # column — a legacy event replay must never blank a healed stamp.
+    if payload.get("brand_id"):
+        values["brand_id"] = payload["brand_id"]
+    return values
+
+
+def view_values(payload: dict[str, Any], event_id: str) -> dict[str, Any]:
+    """One MenuViewed → a menu_views row, keyed by the deterministic
+    event id so redelivery lands on the PK and vanishes."""
+    return {
+        "view_id": event_id,
+        "restaurant_id": payload["restaurant_id"],
+        "brand_id": payload.get("brand_id"),
+        "user_id": payload.get("user_id"),
+        "viewed_at": datetime.fromisoformat(payload["viewed_at"]),
+    }
+
+
 class AnalyticsRepo:
     def __init__(self, session: AsyncSession):
         self._s = session
 
-    async def apply_event(self, event_type: str, payload: dict[str, Any]) -> None:
-        """Fold one lifecycle event into the fact row. Unknown event types
-        are skipped (forward compatibility: a newer producer must not park
-        this consumer's batches)."""
-        milestone = _EVENT_COLUMNS.get(event_type)
-        if milestone is None:
-            return
-        # Two producer shapes share this topic: transition events stamp
-        # `occurred_at`; the OrderPlaced staged by create_order stamps
-        # `placed_at` (the API's own clock — semantically the right moment
-        # for that milestone anyway). History is immutable, so the READER
-        # tolerates both; a payload with neither raises → retries → parks
-        # with forensics, which is the right fate for a shapeless one.
-        raw_ts = payload.get("occurred_at") or payload["placed_at"]
-        occurred = datetime.fromisoformat(raw_ts)
-        values: dict[str, Any] = {
-            "order_id": payload["order_id"],
-            "restaurant_id": payload["restaurant_id"],
-            "user_id": payload.get("user_id", ""),
-            "status": payload["status"],
-            "aggregate_version": int(payload.get("aggregate_version", 0)),
-            "total_cents": _total_cents(payload),
-            "updated_at": occurred,
-            milestone: occurred,
-        }
-        if event_type == "OrderCancelled":
-            values["cancel_reason"] = payload.get("cancel_reason")
-        # Only a KNOWN courier updates the column: pre-assignment events
-        # carry null, and an out-of-order early event must never blank a
-        # later stamp (the delivered_at convergence rule, applied again).
-        if payload.get("rider_id"):
-            values["rider_id"] = payload["rider_id"]
-        # Same convergence rule as rider_id: only a KNOWN brand writes the
-        # column — a legacy event replay must never blank a healed stamp.
-        if payload.get("brand_id"):
-            values["brand_id"] = payload["brand_id"]
-
+    async def upsert_facts(self, rows: list[dict[str, Any]]) -> None:
+        """Bulk fold: rows arrive PRE-MERGED, one per order (the consumer's
+        fold guarantees it — Postgres refuses one upsert statement touching
+        the same row twice; sqlite tolerates it, so the test that guards
+        the invariant lives on the FOLD, not here). Rows carry per-event
+        column SETS ("only the columns this event owns" — the redelivery
+        idempotency rule), so they group by signature: one multi-VALUES
+        statement per distinct column set, `excluded` carrying each row's
+        own values."""
         insert = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
-        update_cols = {k: v for k, v in values.items() if k != "order_id"}
-        await self._s.execute(
-            insert(order_facts)
-            .values(**values)
-            .on_conflict_do_update(index_elements=["order_id"], set_=update_cols)
-        )
-
-    async def apply_view(self, payload: dict[str, Any], event_id: str) -> None:
-        """Fold one MenuViewed. INSERT .. DO NOTHING on the deterministic
-        view_id: redelivery lands on the PK and vanishes."""
-        insert = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
-        await self._s.execute(
-            insert(menu_views)
-            .values(
-                view_id=event_id,
-                restaurant_id=payload["restaurant_id"],
-                brand_id=payload.get("brand_id"),
-                user_id=payload.get("user_id"),
-                viewed_at=datetime.fromisoformat(payload["viewed_at"]),
+        by_signature: dict[frozenset[str], list[dict[str, Any]]] = {}
+        for row in rows:
+            by_signature.setdefault(frozenset(row), []).append(row)
+        for signature, group in by_signature.items():
+            stmt = insert(order_facts).values(group)
+            update_cols = {k: stmt.excluded[k] for k in signature if k != "order_id"}
+            await self._s.execute(
+                stmt.on_conflict_do_update(index_elements=["order_id"], set_=update_cols)
             )
-            .on_conflict_do_nothing(index_elements=["view_id"])
+
+    async def insert_views(self, rows: list[dict[str, Any]]) -> None:
+        """Bulk MenuViewed fold: INSERT .. DO NOTHING on the deterministic
+        view_id — one multi-VALUES statement per batch. Duplicate view_ids
+        WITHIN the statement are legal for DO NOTHING (unlike DO UPDATE):
+        redelivered or double-polled ids just skip."""
+        if not rows:
+            return
+        insert = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
+        await self._s.execute(
+            insert(menu_views).values(rows).on_conflict_do_nothing(index_elements=["view_id"])
         )
 
     async def repoint_brand(self, restaurant_id: str, brand_id: str) -> int:
