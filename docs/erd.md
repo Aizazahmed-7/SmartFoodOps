@@ -423,7 +423,7 @@ erDiagram
 
 Every row has exactly one non-zero side (the CHECK); every op sums to zero across accounts — the books always balance.
 
-## notification_db — the inbox (consumer-only: no outbox)
+## notification_db — the inbox and the receipts (consumer-only: no outbox)
 
 ```mermaid
 erDiagram
@@ -443,9 +443,30 @@ erDiagram
         text user_id "payment events carry no user_id;"
         text restaurant_id "this projection is the join"
     }
+    receipts {
+        text order_id PK "one receipt per order forever — replays conflict-ignore"
+        text user_id "resolved to an address at SEND time; no PII stored here"
+        text restaurant_name "copied from the OrderSettled payload"
+        json items "claim check: the event's item shape, verbatim"
+        json totals "the pricing snapshot, verbatim"
+        timestamptz settled_at "event occurred_at — the instant the PDF prints"
+        timestamptz created_at "consume time; the sweeper's grace anchor"
+        text s3_key "NULL until render_receipt stores the PDF"
+        timestamptz rendered_at
+        timestamptz failed_at "non-NULL = POISON, parked out of the sweeper"
+    }
+    delivery_log {
+        text order_id PK
+        text channel PK "'email' today; SMS later"
+        timestamptz sent_at
+        text provider_message_id "the mailer's ref"
+    }
+    receipts |o--o| delivery_log : "logical (order_id): existence = sent"
 ```
 
 Index: `ix_notifications_inbox (recipient_type, recipient_id, created_at DESC, id DESC)` — one keyset walk per bell poll.
+
+The two halves of this database answer different questions and never join. `notifications` + `order_recipients` are the **bell** (in-app, minted from every notifying event). `receipts` + `delivery_log` are the **receipt pipeline** (S10, FR-41): `OrderSettled` writes the `receipts` row in the same transaction as the inbox rows — that row is a **claim check**, holding everything the PDF needs so the Celery chain can be handed only an `order_id` and never call another service for data. `delivery_log` is the send ledger: a row exists ⇔ that channel was accepted by the provider, which is what makes `receipts.send` re-runnable and the beat sweeper (`receipts.sweep`) safe to be dumb. Neither table has a FK — even inside one database these are id conventions, because the writers are independent tasks.
 
 ---
 
@@ -463,6 +484,22 @@ Index: `ix_notifications_inbox (recipient_type, recipient_id, created_at DESC, i
 | ------------------------ | -------------- | ------------ | --------------- | ------------------- | -------------------------------- |
 | "b7e4…:restaurant:rst_9" | restaurant     | rst_9        | order_confirmed | New order to accept | 12:03                            |
 | "b7e4…:customer:usr_1"   | customer       | usr_1        | order_confirmed | Order confirmed     | NULL _(unread — the bell badge)_ |
+
+`receipts` — three orders mid-pipeline, showing every state the row can be in. Note `ord_42` settled but minted **no** notification: settlement is a deliberate silence in the bell (`mapping.py`), and the receipt is the only thing the customer sees:
+
+| order_id | settled_at | s3_key                    | rendered_at | failed_at | means                                             |
+| -------- | ---------- | ------------------------- | ----------- | --------- | ------------------------------------------------- |
+| ord_42   | 12:40      | receipts/ord_42.pdf       | 12:40       | NULL      | rendered and sent (see the log below)             |
+| ord_43   | 12:41      | NULL                      | NULL        | NULL      | owed — render hasn't run (or is retrying) yet     |
+| ord_44   | 12:38      | receipts/ord_44.pdf       | 12:38       | 12:39     | parked: the mailer 4xx'd, or identity has no user |
+
+`delivery_log` — the send ledger. `ord_42` has a row, so a sweeper re-enqueue or a Celery retry short-circuits to a no-op; `ord_43` has none and is past the grace window, so the sweeper owes it a chain; `ord_44` has none but `failed_at` parks it out of the sweep until a human clears the marker:
+
+| order_id | channel | sent_at | provider_message_id |
+| -------- | ------- | ------- | ------------------- |
+| ord_42   | email   | 12:40   | msg_a1c9…           |
+
+The sweeper's query is exactly that reading: `receipts LEFT JOIN delivery_log ON (order_id, channel='email')` where the join misses, `failed_at IS NULL`, and `created_at < now() - grace`.
 
 ---
 
@@ -494,6 +531,7 @@ flowchart LR
     subgraph notification_db
         notifications[notifications]
         order_recipients[order_recipients]
+        receipts[receipts]
     end
 
     restaurants -. "owner_user_id" .-> users
@@ -508,6 +546,8 @@ flowchart LR
     notifications -. "order_id" .-> orders
     order_recipients -. "user_id" .-> users
     order_recipients -. "restaurant_id" .-> restaurants
+    receipts -. "order_id" .-> orders
+    receipts -. "user_id (→ email, read at send time)" .-> users
 ```
 
 Two idioms to notice while reading:
