@@ -249,3 +249,37 @@ async def test_injected_rng_pins_the_jitter():
     ]
     assert calls == [(900.0, 1800.0)]
     assert frames[-1] == sse_event("reconnect", "lifetime")
+
+
+async def test_quiet_channels_heartbeat_on_polling_ticks():
+    """The live find: a real bus returns None every ~1s poll tick, and each
+    tick RESET the old timeout-based beat — 18 silent seconds on a live
+    stream delivered zero bytes (test fakes BLOCKED, which live Redis never
+    does, so coverage was green while every quiet stream would die behind a
+    60s-idle ALB). The beat must accumulate across ticks."""
+    import asyncio
+    from collections.abc import AsyncGenerator
+    from typing import cast
+
+    from smartfood_realtime.stream import StreamConfig, stream_events
+
+    class PollingBus:
+        def subscription(self, channel):
+            from contextlib import asynccontextmanager
+
+            @asynccontextmanager
+            async def cm():
+                class Sub:
+                    async def next_message(self):
+                        await asyncio.sleep(0.01)  # a quiet poll tick
+                        return None
+
+                yield Sub()
+
+            return cm()
+
+    cfg = StreamConfig(heartbeat_s=0.05, rng=lambda a, b: 60.0)
+    agen = cast(AsyncGenerator[str, None], stream_events("chan", PollingBus(), cfg, event_name="x"))
+    frame = await asyncio.wait_for(agen.__anext__(), timeout=2.0)
+    assert frame == ": hb\n\n"  # silence accumulated into a beat
+    await agen.aclose()

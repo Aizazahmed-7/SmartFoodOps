@@ -48,10 +48,12 @@ async def stream_events(
         yield sse_event(event_name, first)
         if ends_stream(first):
             return
-    deadline = asyncio.get_running_loop().time() + cfg.rng(cfg.lifetime_min_s, cfg.lifetime_max_s)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + cfg.rng(cfg.lifetime_min_s, cfg.lifetime_max_s)
+    last_beat = loop.time()
     async with bus.subscription(channel) as sub:
         while True:
-            remaining = deadline - asyncio.get_running_loop().time()
+            remaining = deadline - loop.time()
             if remaining <= 0:
                 yield sse_event("reconnect", "lifetime")
                 return
@@ -59,10 +61,20 @@ async def stream_events(
                 async with asyncio.timeout(min(cfg.heartbeat_s, remaining)):
                     message = await sub.next_message()
             except TimeoutError:
-                yield ": hb\n\n"  # SSE comment — keeps proxies from reaping us
-                continue
+                message = None  # a WEDGED bus still beats via the clock below
             if message is None:
-                continue  # bus poll tick with nothing to say
+                # The bus polls in ~1s ticks, so quiet channels arrive here
+                # over and over — the beat is OWED once enough silent ticks
+                # accumulate, not on a timeout that every tick resets. Found
+                # live: 18 silent seconds, zero bytes on the wire — the old
+                # timeout-only beat was unreachable off a polling bus (test
+                # fakes BLOCKED, which live Redis never does), and behind a
+                # 60s-idle ALB every quiet stream would have died at :60.
+                if loop.time() - last_beat >= cfg.heartbeat_s:
+                    yield ": hb\n\n"  # SSE comment — keeps proxies from reaping us
+                    last_beat = loop.time()
+                continue
             yield sse_event(event_name, message)
+            last_beat = loop.time()
             if ends_stream(message):
                 return
