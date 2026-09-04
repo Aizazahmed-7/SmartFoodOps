@@ -1,6 +1,6 @@
-# Architecture Decision Records — SmartFoodOps Part A
+# Architecture Decision Records — SmartFoodOps
 
-Source of truth for *why* the architecture is the way it is. Each ADR is short (Context / Decision / Consequences) and carries an explicit revisit trigger. The design plan and `docs/ARCHITECTURE.md` describe *what*; these records pin the *why* so future changes argue against the original reasoning, not folklore.
+Source of truth for *why* the architecture is the way it is. Each ADR is short (Context / Decision / Consequences) and carries an explicit revisit trigger. The design plan and `docs/ARCHITECTURE.md` describe *what*; these records pin the *why* so future changes argue against the original reasoning, not folklore. **0001–0028 are Part A; 0029 onward are Part B (the GenAI plane).**
 
 | # | Title | Status |
 |---|---|---|
@@ -32,5 +32,8 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0026](0026-dispatch-truth-in-dynamodb-events-as-copies.md) | Dispatch's truth lives in DynamoDB; its events are copies | Accepted |
 | [0027](0027-menu-cache-aside.md) | Menu cache is cache-aside; versioned blob + pointer retired | Accepted |
 | [0028](0028-brands-and-branch-menu-inheritance.md) | Brands as restaurant rows; branch menus inherit by fan-out | Accepted |
+| [0029](0029-genai-plane-is-a-separate-service.md) | The GenAI plane is a separate service; the ordering path never awaits an LLM | Accepted |
+| [0030](0030-llm-providers-behind-a-port.md) | LLM providers behind a port: task routing, failover, budget breaker | Accepted |
+| [0031](0031-orchestration-split-langgraph-temporal-celery.md) | Orchestration split: LangGraph owns the turn, Temporal owns sagas, Celery owns batch | Accepted |
 
 **Conventions**: files are `NNNN-kebab-title.md`; numbers are never reused. Superseding an ADR = new ADR + status change here, never editing the old decision.

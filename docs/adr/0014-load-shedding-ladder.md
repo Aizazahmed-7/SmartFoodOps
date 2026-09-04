@@ -1,6 +1,6 @@
 # 0014 — Load-shedding ladder: admission control at edge, money path never shed
 
-**Status**: Accepted
+**Status**: Accepted — amended by [ADR-0029](0029-genai-plane-is-a-separate-service.md) (the AI plane sheds at step 2a, above analytics)
 
 ## Context
 
@@ -17,16 +17,31 @@ Degradation ladder (steps 1–4 automated, 5–6 ops-approved):
 | # | Step | Trigger class |
 |---|---|---|
 | 1 | CDN serves stale browse pages | automated |
-| 2 | Pause analytics / Part B consumers | automated |
+| 2a | AI generation → retrieval-only (templated explanations, cached recommendations, lexical+vector search; no LLM call) | automated |
+| 2b | Pause analytics / Part B consumers (incl. the embedding projection) | automated |
 | 3 | GPS sampling 0.2 → 0.05 Hz | automated |
 | 4 | Tracking cadence 2s → 5s | automated |
 | 5 | Serve stale menu cache | ops-approved |
 | 6 | Restaurant capacity gating | ops-approved |
 
+**Amendment (ADR-0029)**: step 2 splits because the AI plane and the analytics plane are not
+the same sacrifice. **2a** costs a minority of users a nicer sentence — search, recommendations
+and delay explanations all still answer, from the vector index, the taste profile and the
+template cache respectively — while freeing the single most expensive per-request resource in
+the fleet. It therefore sheds *before* the telemetry that the dashboards driving this very
+ladder are computed from. **2b** is the original step, now explicitly including the embedding
+projection, whose lag costs only menu-freshness in retrieval.
+
+The AI plane additionally sheds on **its own** signal, independently of this ladder: the
+per-cell spend/quota circuit breaker in [ADR-0030](0030-llm-providers-behind-a-port.md) §5
+drives the same 2a degrade when the provider — not the platform — is the thing under strain.
+Two triggers, one degrade path, so there is only ever one degraded mode to reason about.
+
 ## Consequences
 
 **Positive**
-- Overload degrades read freshness and telemetry — never order or money correctness; every shed step is loss-tolerant by construction.
+- Overload degrades read freshness, generated prose and telemetry — never order or money
+  correctness; every shed step is loss-tolerant by construction.
 - 429-before-write means rejected requests need no cleanup, no compensation, no orphaned state.
 - The ladder is rehearsable: each step has a known cost, owner, and rollback, instead of ad-hoc incident improvisation.
 

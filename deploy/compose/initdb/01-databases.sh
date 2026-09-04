@@ -39,6 +39,13 @@ create_db order_db order_svc
 create_db payment_db payment_svc
 create_db notification_db notification_svc
 create_db analytics_db analytics_svc
+create_db assistant_db assistant_svc
+
+# NOTE: `CREATE EXTENSION vector` is deliberately NOT here yet. It needs an
+# image that ships pgvector, and the obvious one is a glibc downgrade this
+# volume rejects (see the postgres block in docker-compose.yml). B0 needs no
+# vectors; ADR-0032 picks the route in B1 and adds the pre-create here then,
+# exactly like pg_trgm above.
 
 # Read-only role for Grafana's business dashboard (S7). SELECT and nothing
 # else: a dashboard is a guest in the database — it may look, never touch.

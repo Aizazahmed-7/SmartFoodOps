@@ -34,6 +34,8 @@ scrape_configs:
     static_configs: [{ targets: ["notification:8008"] }]
   - job_name: analytics
     static_configs: [{ targets: ["analytics:8009"] }]
+  - job_name: ai-assistant
+    static_configs: [{ targets: ["ai-assistant:8013"] }]
   # Celery workers (S10): no HTTP app, so each serves a bare exposition
   # port — dns_sd for the same scale-out reason as order-worker.
   - job_name: receipt-renderer

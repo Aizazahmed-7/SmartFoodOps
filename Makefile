@@ -37,6 +37,13 @@ up-m4: ## Dispatch milestone working set: the m3 set + dispatch, rider-gateway
 	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
 	@echo "✔ m4 stack up — gateway :8080 · dispatch :8012 · rider-gateway :8010 · rabbitmq-ui :15672"
 
+up-ai: ## AI plane working set: the W1 core + ai-assistant (~5 GB — deliberately NOT the m4 set)
+	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry gateway identity catalog edge-bff ai-assistant
+	@# Same initdb convergence as up-m3/up-m4: assistant_db (and its vector
+	@# extension) must appear without `make nuke`.
+	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
+	@echo "✔ ai stack up — gateway :8080 · ai-assistant :8013 · catalog :8002"
+
 dlq-replay: ## Replay parked DLQ events after a fix: make dlq-replay TOPIC=c1.orders.events.dlq
 	uv run --package smartfood-kafka python -m smartfood_kafka.replay $(TOPIC)
 
@@ -80,7 +87,7 @@ cov: ## Unit tests + coverage report
 		--cov=smartfood_api --cov=smartfood_auth --cov=smartfood_kafka --cov=smartfood_otel \
 		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency --cov=smartfood_realtime \
 		--cov=identity --cov=edge_bff \
-		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification --cov=analytics --cov=dispatch --cov=rider_gateway \
+		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification --cov=analytics --cov=dispatch --cov=rider_gateway --cov=ai_assistant \
 		--cov=mock_psp --cov=mock_mailer --cov=seed --cov=canary --cov=rider_sim \
 		--cov-fail-under=100 \
 		--cov-report=term-missing

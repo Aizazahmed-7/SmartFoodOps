@@ -720,12 +720,13 @@ Every alert carries a runbook URL + dashboard + pre-built Jaeger query; alert-wi
 
 Edge admission = token bucket at 1.5× load-tested capacity — 429 **before any state is written**. **The money path is queued, never shed** — Temporal backlog is the sanctioned buffer.
 
-Degradation order (steps 1–4 automated, 5–6 ops-approved):
+Degradation order (steps 1–4 automated, 5–6 ops-approved; step 2 split by [ADR-0029](adr/0029-genai-plane-is-a-separate-service.md) — the AI plane sheds above analytics, and also on its own spend/quota breaker per [ADR-0030](adr/0030-llm-providers-behind-a-port.md)):
 
 | Step | Action | Cost |
 |---|---|---|
 | 1 | CDN serves stale browse pages | Discovery staleness only |
-| 2 | Pause analytics / Part B consumers | Dashboards lag; facts retained in Kafka |
+| 2a | AI generation → retrieval-only (no LLM call) | Plainer wording; search, recommendations and delay explanations still answer |
+| 2b | Pause analytics / Part B consumers (incl. embedding projection) | Dashboards lag; facts retained in Kafka; menus embed later |
 | 3 | GPS sampling 0.2 → 0.05 Hz | Coarser analytics breadcrumbs |
 | 4 | Tracking cadence 2s → 5s | Slightly staler customer map |
 | 5 | Serve stale menu cache | Bounded menu staleness (placement still re-validates) |

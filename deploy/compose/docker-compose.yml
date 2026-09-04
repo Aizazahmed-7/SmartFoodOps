@@ -37,6 +37,7 @@ x-app-base: &app-base
     DISPATCH_BASE_URL: http://dispatch:8012
     PAYMENT_BASE_URL: http://payment:8007
     NOTIFICATION_BASE_URL: http://notification:8008
+    ASSISTANT_BASE_URL: http://ai-assistant:8013
     MOCK_PSP_BASE_URL: http://mock-psp:9080
     MAILER_BASE_URL: http://mock-mailer:9081
     # Arms the receipts pipeline (S10) — only notification and its workers
@@ -66,6 +67,14 @@ services:
 
   postgres:
     profiles: [core]
+    # STAYS on postgres:15. The obvious pgvector swap (pgvector/pgvector:pg15)
+    # is a glibc DOWNGRADE — postgres:15 is Debian trixie (glibc 2.41), the
+    # pgvector image is bookworm (glibc 2.36) — and Postgres refuses a
+    # collation-version downgrade: `template1` mismatches, which blocks
+    # CREATE DATABASE outright and fails initdb convergence with exit 3.
+    # Found live in B0. Choosing between a REINDEX migration, a `make nuke`,
+    # and a base-matched image is ADR-0032's job in B1, where vectors are
+    # actually needed. See docs/local-dev.md §11.
     image: postgres:15
     ports: ["5432:5432"]
     # logical WAL: what Debezium's pgoutput plugin decodes (S6). Costs a
@@ -534,6 +543,48 @@ services:
         "3",
         "--reload-dir",
         "services/analytics/analytics",
+        "--reload-dir",
+        "libs",
+        "--no-access-log",
+      ]
+
+  # ai-assistant (the GenAI plane, ADR-0029): request-shaped and
+  # latency-sensitive, so a container beside the domain services rather than
+  # a Lambda. Provider keys come from an untracked deploy/compose/.env — an
+  # EMPTY key disarms that provider (ADR-0030 §7), so this service starts
+  # and answers /healthz with no credentials at all, which is the default.
+  ai-assistant:
+    <<: *app-base
+    profiles: [apps]
+    restart: unless-stopped
+    ports: ["8013:8013"]
+    environment:
+      <<: *app-env
+      UV_PROJECT_ENVIRONMENT: /venvs/ai-assistant
+      DATABASE_URL: postgresql+asyncpg://assistant_svc:assistant_svc@postgres:5432/assistant_db
+      REDIS_URL: redis://redis:6379/3
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Ladder step 2a as a manual switch: "off" keeps retrieval, templates
+      # and caches answering while every generative path returns 503.
+      GENERATION: ${GENERATION:-on}
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "ai-assistant",
+        "uvicorn",
+        "ai_assistant.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8013",
+        "--reload",
+        "--timeout-graceful-shutdown",
+        "3",
+        "--reload-dir",
+        "services/ai-assistant/ai_assistant",
         "--reload-dir",
         "libs",
         "--no-access-log",
