@@ -512,6 +512,148 @@ sequenceDiagram
 
 Why the pinned `menu_version` never learned about brands: a cart pins the BRANCH's version; any base edit moves that same number through the fan-out, so placement's `MenuVersionChanged` → 409 `PRICE_CHANGED` re-confirm fires exactly as it always did.
 
+The read side of the same inheritance — how `base ∪ local − overrides` is actually computed — is diagram 13.
+
+---
+
+## 13. Brands — rendering a branch's effective menu (`GET /v1/menus/{rid}`)
+
+The mirror of diagram 12: that one pays the fan-out cost at WRITE time, this
+one assembles the inherited menu at READ time. "Render" here means one
+specific thing — **turning five flat result sets into one nested tree**.
+Categories → items → modifier groups → options is a tree; SQL returns lists.
+Closing that gap without N+1 (a query per parent row) and without a 5-way
+JOIN (which multiplies rows: one item × 3 options × 2 tags = 6 duplicates)
+is the entire job.
+
+Brands add exactly two things to it: the scope is `IN (brand_id, branch_id)`
+instead of one id, and a set-subtraction flips locally-86'd base items to
+unavailable. Everything else is the same render the platform had before
+brands existed.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant FE as Customer app
+    participant C as catalog
+    participant R as Redis
+    participant CDB as catalog_db
+
+    FE->>C: [HTTP] GET /v1/menus/rst_10 — the Airport BRANCH
+    C->>R: [REDIS] GET catalog:menu:rst_10 — key is per BRANCH,<br/>the blob is the already-computed effective menu
+    alt cache hit — the common path
+        R-->>C: the finished tree
+        C-->>FE: 200 — zero SQL. Inheritance costs NOTHING on a hit.
+    else miss — render it
+        C->>R: [REDIS] SET NX lock:menu:rst_10, 3s — singleflight:<br/>one renderer per restaurant — losers wait 50ms and re-check
+        Note over C,CDB: THE RENDER — 9 queries, FLAT in menu size
+        C->>CDB: [DB] 1. SELECT restaurants WHERE id = rst_10
+        CDB-->>C: kind=branch, brand_id=brd_9, version=7
+        C->>CDB: [DB] 2. SELECT restaurant_cuisines — _read builds the FULL<br/>domain model, but this path discards cuisines.<br/>KNOWN REDUNDANCY — see the note below the diagram
+        Note over C: _menu_scope: brand_id is not null, so scope = brd_9 + rst_10.<br/>THE HIERARCHY IS A COLUMN ON THE ROW WE JUST READ —<br/>no self-join, no recursive CTE, depth-1 by construction
+        C->>CDB: [DB] 3. SELECT item_id FROM branch_item_overrides<br/>WHERE branch_id = rst_10
+        CDB-->>C: the 86 set — itm_pulao
+        C->>CDB: [DB] 4. SELECT menu_categories WHERE restaurant_id IN scope
+        C->>CDB: [DB] 5. SELECT menu_items WHERE restaurant_id IN scope<br/>← the IN-list IS the base ∪ local union.<br/>86'd rows COME BACK: they render greyed, not missing
+        C->>CDB: [DB] 6. SELECT item_tags WHERE item_id IN the found ids
+        C->>CDB: [DB] 7. SELECT modifier_groups WHERE item_id IN the found ids
+        C->>CDB: [DB] 8. SELECT modifier_options WHERE group_id IN the found ids
+        Note over C: [LOCAL] the stitch — see the pipeline below.<br/>Five flat lists become one tree, in memory
+        C->>CDB: [DB] 9. re-read version — moved? the doc TORE under<br/>READ COMMITTED: re-render. Bounded at 3 tries.<br/>Stale is display-only, mixed-version is not
+        C->>R: [REDIS] SET catalog:menu:rst_10, TTL 300s
+        C-->>FE: 200 — effective menu + version
+        C->>C: [LOCAL] MenuViewed telemetry, fire-and-forget (diagram 7)
+    end
+```
+
+### The query budget — and why it is 9, not 1
+
+Nine on a miss, **flat in menu size** — that flatness is the property that
+matters, not the constant. Two of the nine are worth knowing:
+
+- **Query 2 is dead weight on this path.** `_read` builds the whole
+  `Restaurant` domain model, and `_profile` genuinely needs `cuisines` for
+  the compacted-topic event payload — but neither the menu doc nor the
+  pricing snapshot emits cuisines. A `_read` variant that skips them takes
+  the menu render to 8 and, more importantly, `pricing_read` from 7 to 6 on
+  the **uncached money path** — every checkout pays that one.
+- **Query 9 is the tearing guard, not a read.** It re-reads only the version
+  column. Merging it into the render is not possible: its whole job is to
+  observe a value *after* the other reads finished.
+
+Collapsing 3–8 into a single `jsonb_agg` tree query is achievable in
+PostgreSQL and was considered and declined. `db.py` must stay
+sqlite-compatible for the unit suite, so a PG-only render would follow the
+`search.py` precedent — stubbed sessions in unit tests, correctness proven
+only by the live smoke. That trade is acceptable for search, where ranking
+is fuzzy anyway; it is not acceptable for the most-read endpoint in the
+platform, whose output feeds `available` and `source` semantics. It would
+also move CPU from the tier that scales cheapest (catalog pods) to the one
+that scales hardest (Postgres).
+
+### The stitch — five flat lists into one tree
+
+```mermaid
+flowchart TB
+    A["restaurants row rst_10<br/>kind=branch, brand_id = brd_9"] --> B["_menu_scope = brd_9 + rst_10<br/>a brand or a legacy row scopes to its own id alone"]
+    A --> O["override set for rst_10<br/>itm_pulao — skipped entirely when brand_id is null"]
+    B --> C["categories WHERE restaurant_id IN scope<br/>cat_rice·brd_9 · cat_drinks·brd_9 · cat_local·rst_10"]
+    B --> D["items WHERE restaurant_id IN scope — base ∪ local<br/>itm_biryani·brd_9 · itm_pulao·brd_9 · itm_lassi·brd_9<br/>itm_kebab·rst_10 · itm_wrap·rst_10"]
+    D --> E["tags, modifier_groups, modifier_options<br/>fetched by the item ids just found"]
+    E --> F["BUCKET BY PARENT ID — this is what replaces N+1<br/>groups_by_item · options_by_group · tags_by_item<br/>one pass to index, then O(1) lookups"]
+    F --> G["PER ITEM, three lines do all the brand work:<br/>source = local if item.restaurant_id equals rst_10, else base<br/>available = false if the id is in the override set<br/>append into items_by_category, keyed by category_id"]
+    O --> G
+    G --> H["EMIT — walk the rank-ordered categories,<br/>attach each item bucket. Tree assembled."]
+    C --> H
+```
+
+Trace the five items through that middle box — this table is the whole feature:
+
+| item | owner | `source` | 86'd here? | `available` | lands in |
+| ---- | ----- | -------- | ---------- | ----------- | -------- |
+| itm_biryani | brd_9 | `base` | no | true | cat_rice |
+| itm_pulao | brd_9 | `base` | **yes** | **false** | cat_rice |
+| itm_lassi | brd_9 | `base` | no | true | cat_drinks |
+| itm_kebab | rst_10 | `local` | no | true | **cat_rice** |
+| itm_wrap | rst_10 | `local` | no | true | cat_local |
+
+Three things that table makes visible:
+
+1. **`source` is computed, not stored** — `item.restaurant_id == restaurant.id`. It tells the owner dashboard which items are editable here (`local`) versus inherited from the brand (`base`).
+2. **The 86 is a set-membership test, not a SQL anti-join** — because the item must still appear, greyed out. An anti-join would delete it from the response.
+3. **Bucketing is by `category_id` regardless of who owns the category** — so `itm_kebab`, a branch-local item filed under a brand category, sits in Rice Dishes right next to the inherited Biryani. Base and local intermix naturally.
+
+### The same code, three callers
+
+`_menu_scope` is the only place that knows about inheritance, which is why
+nothing else needed a brand/branch special case:
+
+| Read | Scope | Overrides | Result |
+| ---- | ----- | --------- | ------ |
+| `GET /v1/menus/rst_10` (Airport) | `brd_9, rst_10` | `itm_pulao` | base − Pulao + Kebab + Wrap |
+| `GET /v1/menus/rst_9` (Main) | `brd_9, rst_9` | none | the plain base menu, all `source: base` |
+| `GET /v1/menus/brd_9` (the brand) | `brd_9` | skipped — no `brand_id` | the base menu the owner edits |
+| legacy pre-brands row | its own id | skipped | byte-identical to pre-ADR-0028 behaviour |
+
+Note the guard is `if restaurant.brand_id is not None`, **never** `if kind ==
+'brand'` — the parent pointer is the discriminator that matters, which is
+exactly why legacy rows needed no backfill to keep working.
+
+**No branch ever stores a copy of the base menu.** It is computed per render
+and cached per branch — that is the trade ADR-0028 made: pay at read time
+(absorbed by the cache) rather than own N materialized copies and a
+reconciliation problem forever.
+
+### The money path is the same scope, different guarantees
+
+`GET /v1/internal/restaurants/{rid}/snapshot` (diagram 1, step 4) calls the
+identical `_menu_scope` but **bypasses every cache** — money math reads truth
+— and selects only the requested item ids. The scope lives in the `WHERE`, so
+an item belonging to another brand simply does not come back; it lands in
+`missing_item_ids` and pricing rejects the cart. Ownership is structural
+there, not a check anyone can forget. The 86 collapses into the same boolean
+the pricing engine already reads: `available AND id NOT IN overrides`.
+
 ---
 
 ## Reading these diagrams in a presentation
