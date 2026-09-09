@@ -76,16 +76,21 @@ erDiagram
         text id PK "brd_ or rst_ (ADR-0028)"
         text owner_user_id "logical -> identity.users.id; UNIQUE among brand rows only"
         text name "the BRAND name; branch rows carry a synced copy"
-        text city
-        float lat
-        float lon
-        text status "CHECK: open|paused"
-        json hours
         int version "bumps on EVERY mutation (base edits fan out to branches)"
         text kind "CHECK: brand|branch — brand rows never browse"
         text brand_id FK "self-FK: a branch's parent; NULL iff kind=brand"
-        text branch_label "Downtown — unique per brand; display_name composes it"
+        text branch_label "Downtown — UNIQUE(brand_id, branch_label); stays HERE"
         timestamptz created_at
+        timestamptz updated_at
+    }
+    branch_metadata {
+        text restaurant_id PK "FK -> restaurants.id — BRANCH rows only, never a brand"
+        text city "NOT NULL here; the browse filter and its index moved with it"
+        float lat
+        float lon
+        text status "CHECK: open|paused — a brand can no longer carry one"
+        json hours
+        text timezone "NOT NULL — hours are wall-clock, meaningless without it"
         timestamptz updated_at
     }
     branch_item_overrides {
@@ -144,6 +149,7 @@ erDiagram
         text traceparent
     }
     restaurants ||--o{ restaurants : "brand - its branches"
+    restaurants ||--o| branch_metadata : "1:0..1 — a branch has one, a brand has none"
     restaurants ||--o{ restaurant_cuisines : ""
     restaurants ||--o{ menu_categories : "brand rows hold the BASE menu"
     restaurants ||--o{ menu_items : "branch rows hold local items"
@@ -158,6 +164,47 @@ erDiagram
 A branch's **effective menu** = the brand's rows ∪ its own rows, minus its
 `branch_item_overrides` (rendered `available: false`) — computed at read
 time by `get_menu`/`pricing_read`, never materialized (ADR-0028).
+
+**Why the location columns live in `branch_metadata`.** A brand has no address,
+no opening hours and no timezone, so on a single table those columns were
+meaningless NULLs on every brand row — and `city`/`timezone` were `NOT NULL`, which
+forced migration 0007 to copy the first branch's city onto the brand. `brand.city`
+was therefore a lie: "whichever branch happened to be first". Splitting them out
+makes the columns *unrepresentable* on a brand rather than merely conventionally
+absent.
+
+**What deliberately stayed on `restaurants`:**
+
+- **`brand_id` and `branch_label`** — they cannot be separated, because
+  `UNIQUE(brand_id, branch_label)` is one index and an index cannot span two tables.
+  Moving *both* was considered and rejected for two reasons: the
+  `(kind='brand' AND brand_id IS NULL) OR (kind='branch' AND brand_id IS NOT NULL)`
+  CHECK cannot span tables either, so "a branch always has a parent" would stop being
+  enforceable; and `_menu_scope()` reads `brand_id` off the row it has already read —
+  moving it puts a join on **every** scope resolution including `pricing_read` on the
+  uncached money path, and costs the "the hierarchy is a column, no self-join, no
+  recursive CTE" property outright.
+- **`kind`** — the discriminator has to be readable without a join.
+- **`name`, `version`, `owner_user_id`** — identity and ownership, meaningful for both.
+
+The split is therefore *identity and hierarchy* in `restaurants`, *where and when it
+operates* in `branch_metadata`.
+
+**The invariant this buys and the one it costs.** Gained: a brand cannot hold a city.
+Lost: PostgreSQL can enforce **at most one** metadata row (the PK) but has no
+declarative form for **at least one** — so a branch with no metadata row is possible,
+and reads assume it is there. Close it with circular deferred FKs
+(`DEFERRABLE INITIALLY DEFERRED` both ways, both rows inserted in one transaction)
+rather than a trigger, which would put the invariant outside the schema and outside
+the source-scan suite.
+
+**Consequences to carry into the code:** `ix_restaurants_city` becomes
+`ix_branch_metadata_city`; the join is needed at four sites — `_read()`,
+`browse_by_city`, `pricing_read`'s `is_open_at`, and each of `search.py`'s four raw-SQL
+legs; and moving `status` means a brand can no longer carry one, so **brand-wide pause
+(a named ADR-0028 deferral) would need a new column on `restaurants`** when it ships.
+Note `timezone` was missing from this diagram entirely before the split — it has
+always existed in `db.py`.
 
 Search indexes worth knowing (Postgres-only — they live in migration 0001, not `db.py`, so sqlite's `create_all` never sees them): `pg_trgm` GIN indexes on `restaurants.name` and `menu_items.name` (typo-tolerant fuzzy match) plus FTS expression indexes over names + item descriptions — these four indexes ARE the search engine (ADR-0019).
 
