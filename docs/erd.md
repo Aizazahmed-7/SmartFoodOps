@@ -113,7 +113,6 @@ erDiagram
         text name
         text description "feeds FTS search"
         int price_cents "integer cents, never floats"
-        text currency
         boolean available "the 86 flag"
         int rank
     }
@@ -333,7 +332,6 @@ erDiagram
         text order_id PK "one payment per order, keyed by it"
         text status "CHECK: AUTHORIZED|DECLINED|CAPTURED|VOIDED|REFUNDED"
         int amount_cents "CHECK >= 1; from stored auth, never the caller"
-        text currency
         text card_token
         text psp
         text payment_intent_id "the PSP's ref"
@@ -348,7 +346,6 @@ erDiagram
         text account "customer | platform_cash"
         int debit_cents "CHECK: exactly one side > 0"
         int credit_cents
-        text currency
         timestamptz created_at
     }
     idempotency_keys {
