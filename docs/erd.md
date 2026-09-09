@@ -1,6 +1,6 @@
 # SmartFoodOps — ERD (as built, W3)
 
-**Read this first:** the platform is database-per-service — six PostgreSQL databases, one per owning service, and **no foreign keys ever cross a database**. Real FK lines appear only inside each diagram; references _between_ services travel as plain id columns (shown in the last diagram) and are kept consistent by events + idempotent consumers, not constraints. Two table shapes come from shared libs: `outbox` (smartfood-outbox, 9 columns) repeats across services; `idempotency_keys` (smartfood-idempotency) survives only in payment_db — order's copy was retired by ADR-0024 (the orders row itself is placement's idempotency record). Identity's `processed_events` ledger is likewise **retired** (design review, 2026-09-08): `grant_restaurant_admin` already short-circuits an already-applied grant, so the seen-check traded one indexed read for one indexed read while adding two statements per event — dedupe now rides the write in all five consumers, per ADR-0018's per-sink modes.
+**Read this first:** the platform is database-per-service — six PostgreSQL databases, one per owning service, and **no foreign keys ever cross a database**. Real FK lines appear only inside each diagram; references _between_ services travel as plain id columns (shown in the last diagram) and are kept consistent by events + idempotent consumers, not constraints. Two table shapes come from shared libs: `outbox` (smartfood-outbox, 8 columns) repeats across services; `idempotency_keys` (smartfood-idempotency) survives only in payment_db — order's copy was retired by ADR-0024 (the orders row itself is placement's idempotency record). Identity's `processed_events` ledger is likewise **retired** (design review, 2026-09-08): `grant_restaurant_admin` already short-circuits an already-applied grant, so the seen-check traded one indexed read for one indexed read while adding two statements per event — dedupe now rides the write in all five consumers, per ADR-0018's per-sink modes.
 
 ---
 
@@ -76,21 +76,20 @@ erDiagram
         text id PK "brd_ or rst_ (ADR-0028)"
         text owner_user_id "logical -> identity.users.id; UNIQUE among brand rows only"
         text name "the BRAND name; branch rows carry a synced copy"
-        int version "bumps on EVERY mutation (base edits fan out to branches)"
         text kind "CHECK: brand|branch — brand rows never browse"
         text brand_id FK "self-FK: a branch's parent; NULL iff kind=brand"
-        text branch_label "Downtown — UNIQUE(brand_id, branch_label); stays HERE"
+        text branch_label "Downtown — unique per brand; display_name composes it"
         timestamptz created_at
         timestamptz updated_at
     }
     branch_metadata {
-        text restaurant_id PK "FK -> restaurants.id — BRANCH rows only, never a brand"
-        text city "NOT NULL here; the browse filter and its index moved with it"
+        text restaurant_id PK "FK — branch rows only"
+        text city
         float lat
         float lon
-        text status "CHECK: open|paused — a brand can no longer carry one"
+        text status "CHECK: open|paused"
         json hours
-        text timezone "NOT NULL — hours are wall-clock, meaningless without it"
+        text timezone
         timestamptz updated_at
     }
     branch_item_overrides {
@@ -138,10 +137,9 @@ erDiagram
         int rank
     }
     outbox {
-        text id PK "UUIDv5 of the fact"
+        text id PK "random uuid4"
         text aggregate_type
         text aggregate_id
-        int aggregate_version
         text event_type
         json payload "FULL STATE incl. owner + menu"
         timestamptz occurred_at
@@ -165,73 +163,30 @@ A branch's **effective menu** = the brand's rows ∪ its own rows, minus its
 `branch_item_overrides` (rendered `available: false`) — computed at read
 time by `get_menu`/`pricing_read`, never materialized (ADR-0028).
 
-**Why the location columns live in `branch_metadata`.** A brand has no address,
-no opening hours and no timezone, so on a single table those columns were
-meaningless NULLs on every brand row — and `city`/`timezone` were `NOT NULL`, which
-forced migration 0007 to copy the first branch's city onto the brand. `brand.city`
-was therefore a lie: "whichever branch happened to be first". Splitting them out
-makes the columns *unrepresentable* on a brand rather than merely conventionally
-absent.
-
-**What deliberately stayed on `restaurants`:**
-
-- **`brand_id` and `branch_label`** — they cannot be separated, because
-  `UNIQUE(brand_id, branch_label)` is one index and an index cannot span two tables.
-  Moving *both* was considered and rejected for two reasons: the
-  `(kind='brand' AND brand_id IS NULL) OR (kind='branch' AND brand_id IS NOT NULL)`
-  CHECK cannot span tables either, so "a branch always has a parent" would stop being
-  enforceable; and `_menu_scope()` reads `brand_id` off the row it has already read —
-  moving it puts a join on **every** scope resolution including `pricing_read` on the
-  uncached money path, and costs the "the hierarchy is a column, no self-join, no
-  recursive CTE" property outright.
-- **`kind`** — the discriminator has to be readable without a join.
-- **`name`, `version`, `owner_user_id`** — identity and ownership, meaningful for both.
-
-The split is therefore *identity and hierarchy* in `restaurants`, *where and when it
-operates* in `branch_metadata`.
-
-**The invariant this buys and the one it costs.** Gained: a brand cannot hold a city.
-Lost: PostgreSQL can enforce **at most one** metadata row (the PK) but has no
-declarative form for **at least one** — so a branch with no metadata row is possible,
-and reads assume it is there. Close it with circular deferred FKs
-(`DEFERRABLE INITIALLY DEFERRED` both ways, both rows inserted in one transaction)
-rather than a trigger, which would put the invariant outside the schema and outside
-the source-scan suite.
-
-**Consequences to carry into the code:** `ix_restaurants_city` becomes
-`ix_branch_metadata_city`; the join is needed at four sites — `_read()`,
-`browse_by_city`, `pricing_read`'s `is_open_at`, and each of `search.py`'s four raw-SQL
-legs; and moving `status` means a brand can no longer carry one, so **brand-wide pause
-(a named ADR-0028 deferral) would need a new column on `restaurants`** when it ships.
-Note `timezone` was missing from this diagram entirely before the split — it has
-always existed in `db.py`.
-
 Search indexes worth knowing (Postgres-only — they live in migration 0001, not `db.py`, so sqlite's `create_all` never sees them): `pg_trgm` GIN indexes on `restaurants.name` and `menu_items.name` (typo-tolerant fuzzy match) plus FTS expression indexes over names + item descriptions — these four indexes ARE the search engine (ADR-0019).
 
-### Example rows — versions and the outbox, concretely
+### Example rows — the outbox, concretely
 
-One restaurant, three mutations. `restaurants.version` is the **current** counter; the outbox holds one event **per mutation** with a gapless `aggregate_version` (the revision history, as far as anything reads it — the once-planned `menu_versions` audit table was dropped unread in migration 0005):
+One restaurant, three mutations — the outbox holds one event **per mutation**. (The once-planned `menu_versions` audit table was dropped unread in migration 0005.)
 
 `restaurants` (current state only — the brand row owns the base menu, its
 branch rows are the places customers order from, ADR-0028):
 
-| id    | owner_user_id | name          | kind   | brand_id | branch_label | version |
-| ----- | ------------- | ------------- | ------ | -------- | ------------ | ------- |
-| brd_9 | usr_1         | Biryani House | brand  | NULL     | NULL         | **3**   |
-| rst_9 | usr_1         | Biryani House | branch | brd_9    | Main         | **3**   |
+| id    | owner_user_id | name          | kind   | brand_id | branch_label |
+| ----- | ------------- | ------------- | ------ | -------- | ------------ |
+| brd_9 | usr_1         | Biryani House | brand  | NULL     | NULL         |
+| rst_9 | usr_1         | Biryani House | branch | brd_9    | Main         |
 
-(A base-menu edit bumps BOTH versions in one transaction and stages one
-full-effective-state event per aggregate — the fan-out.)
+(A base-menu edit stages one full-effective-state event per aggregate in one
+all-or-nothing transaction — the fan-out.)
 
-`outbox` — read `id` together with the three inputs that computed it. `aggregate_type` + `aggregate_id` say _whose fact_, `aggregate_version` says _which occurrence_, `event_type` says _what kind_:
+`outbox` — `aggregate_type` + `aggregate_id` say _whose fact_, `event_type` says _what kind_:
 
-| id = uuid5 of…                                   | aggregate_type | aggregate_id | aggregate_version | event_type        | payload (full state!)                                       | published_at                                   |
-| ------------------------------------------------ | -------------- | ------------ | ----------------- | ----------------- | ----------------------------------------------------------- | ---------------------------------------------- |
-| `a3f1…` = "restaurant:rst_9:1:RestaurantCreated" | restaurant     | rst_9        | 1                 | RestaurantCreated | {owner_user_id: usr_1, name: …, menu: {…}}                  | 12:00                                          |
-| `5c88…` = "restaurant:rst_9:2:ItemAdded"         | restaurant     | rst_9        | 2                 | ItemAdded         | {owner_user_id: usr_1, …, menu: {full menu incl. new item}} | 12:10                                          |
-| `d901…` = "restaurant:rst_9:3:ItemUpdated"       | restaurant     | rst_9        | 3                 | ItemUpdated       | {owner_user_id: usr_1, …, menu: {full menu, new price}}     | **NULL** _(staged, poller hasn't drained yet)_ |
-
-Why the versions matter: two `ItemUpdated` events on the same restaurant get **different** ids (versions 3 vs 4) — but a _redelivery_ of version 3 recomputes the **same** `d901…`, which is what lets every consumer dedupe.
+| id (random uuid4) | aggregate_type | aggregate_id | event_type        | payload (full state!)                                       | published_at                                   |
+| ----------------- | -------------- | ------------ | ----------------- | ----------------------------------------------------------- | ---------------------------------------------- |
+| `a3f1…`           | restaurant     | rst_9        | RestaurantCreated | {owner_user_id: usr_1, name: …, menu: {…}}                  | 12:00                                          |
+| `5c88…`           | restaurant     | rst_9        | ItemAdded         | {owner_user_id: usr_1, …, menu: {full menu incl. new item}} | 12:10                                          |
+| `d901…`           | restaurant     | rst_9        | ItemUpdated       | {owner_user_id: usr_1, …, menu: {full menu, new price}}     | **NULL** _(staged, poller hasn't drained yet)_ |
 
 ## inventory_db — what can actually be sold
 
@@ -241,21 +196,18 @@ erDiagram
         text restaurant_id PK "logical -> catalog.restaurants.id (a BRANCH)"
         text item_id PK "logical -> catalog.menu_items.id"
         int available "CHECK >= 0 — the oversell guard"
-        int version
         timestamptz updated_at
     }
     restaurant_load {
         text restaurant_id PK
         int active "concurrent-order slots in use"
         int capacity
-        int version
     }
     reservations {
         text order_id PK "logical -> order.orders; PK = replay idempotency"
         text restaurant_id
         json lines "the restore recipe for release"
         text status "CHECK: active|released|consumed|expired"
-        int version
         timestamptz created_at
         timestamptz expires_at "reaper TTL"
     }
@@ -263,7 +215,6 @@ erDiagram
         text id PK
         text aggregate_type "stock | reservation"
         text aggregate_id
-        int aggregate_version
         text event_type
         json payload
         timestamptz occurred_at
@@ -276,12 +227,12 @@ Index worth knowing: `ix_reservations_reaper (status, expires_at)` — the reape
 
 ### Example rows — a reservation's life against the stock it holds
 
-`stock` — before `ord_42` reserves 2 portions, and after (note `version` bumps on every mutation; `StockAdjusted` events computed from it):
+`stock` — before `ord_42` reserves 2 portions, and after (the oversell guard is the `WHERE available >= :qty` on the decrement):
 
-| item_id                       | restaurant_id | available | version |
-| ----------------------------- | ------------- | --------- | ------- |
-| itm_biryani _(before)_        | rst_9         | 100       | 4       |
-| itm_biryani _(after reserve)_ | rst_9         | **98**    | 5       |
+| item_id                       | restaurant_id | available |
+| ----------------------------- | ------------- | --------- |
+| itm_biryani _(before)_        | rst_9         | 100       |
+| itm_biryani _(after reserve)_ | rst_9         | **98**    |
 
 `reservations` — three orders, three fates. `lines` is the restore-recipe; `expires_at` is the reaper's clock:
 
@@ -293,9 +244,9 @@ Index worth knowing: `ix_reservations_reaper (status, expires_at)` — the reape
 
 `restaurant_load` — slots as stock; two orders currently cooking:
 
-| restaurant_id | active | capacity | version |
-| ------------- | ------ | -------- | ------- |
-| rst_9         | 2      | 10       | 1       |
+| restaurant_id | active | capacity |
+| ------------- | ------ | -------- |
+| rst_9         | 2      | 10       |
 
 ## order_db — the state machine
 
@@ -308,11 +259,9 @@ erDiagram
         text brand_id "the branch's brand; NULL until the repoint heal (ADR-0028)"
         text restaurant_name_snapshot "branch-labeled: Biryani House - Airport"
         text status "CHECK: 13 states PLACED..SETTLED"
-        int aggregate_version
         text payment_method "CHECK: CARD|COD"
         text card_token
         text request_hash "ADR-0024: body guard; NULL = pre-0024 row"
-        int menu_version "pinned at placement"
         json pricing_snapshot "totals; activities READ, never recompute"
         json delivery_address_snapshot
         text cancel_reason
@@ -333,7 +282,6 @@ erDiagram
         text id PK
         text aggregate_type "order"
         text aggregate_id
-        int aggregate_version
         text event_type
         json payload "full state per event"
         timestamptz occurred_at
@@ -345,13 +293,13 @@ erDiagram
 
 Indexes worth knowing: `ix_orders_history (user_id, placed_at DESC, order_id DESC)` — customer keyset paging; `ix_orders_feed (restaurant_id, status, placed_at)` — kitchen queues.
 
-### Example rows — one order, its versions, and its gappy event trail
+### Example rows — one order and its event trail
 
-`orders` — the finished `ord_42`. `aggregate_version=9` means nine guarded transitions happened; `menu_version=7` pins _which_ menu priced it:
+`orders` — the finished `ord_42`:
 
-| order_id | user_id | restaurant_id | status  | aggregate_version | menu_version | pricing_snapshot                                        |
-| -------- | ------- | ------------- | ------- | ----------------- | ------------ | ------------------------------------------------------- |
-| ord_42   | usr_1   | rst_9         | SETTLED | **9**             | 7            | {subtotal: 3000, fee: 199, tax: 247, total_cents: 3446} |
+| order_id | user_id | restaurant_id | status  | pricing_snapshot                                        |
+| -------- | ------- | ------------- | ------- | ------------------------------------------------------- |
+| ord_42   | usr_1   | rst_9         | SETTLED | {subtotal: 3000, fee: 199, tax: 247, total_cents: 3446} |
 
 `order_items` — the cart snapshot (survives any future menu edit):
 
@@ -359,14 +307,14 @@ Indexes worth knowing: `ix_orders_history (user_id, placed_at DESC, order_id DES
 | -------- | ------- | ------------ | --------------- | ---------------- | --- | ---------------------------------------------------------- | ---------------- |
 | ord_42   | 1       | itm_biryani  | Chicken Biryani | 1200             | 2   | [{group_name: Size, name: Family, price_delta_cents: 600}] | 3600             |
 
-`outbox` — the **gappy** version sequence made visible. Nine transitions, but only four staged events (the in-between statuses bump silently):
+`outbox` — nine guarded transitions, but only four staged events (the in-between statuses transition silently). Per-order ordering comes from the Kafka key (`aggregate_id`):
 
-| aggregate_version | event_type     | id = uuid5 of…                                                                      |
-| ----------------- | -------------- | ----------------------------------------------------------------------------------- |
-| 0                 | OrderPlaced    | "order:ord_42:0:OrderPlaced"                                                        |
-| 3                 | OrderConfirmed | "order:ord_42:3:OrderConfirmed" _(v1 VALIDATED, v2 PAYMENT_CLEARED staged nothing)_ |
-| 8                 | OrderDelivered | "order:ord_42:8:OrderDelivered" _(v4–v7 = kitchen + pickup, silent)_                |
-| 9                 | OrderSettled   | "order:ord_42:9:OrderSettled"                                                       |
+| event_type     | id (random uuid4) | note                                            |
+| -------------- | ----------------- | ----------------------------------------------- |
+| OrderPlaced    | `7c1e…`           |                                                 |
+| OrderConfirmed | `b7e4…`           | VALIDATED and PAYMENT_CLEARED staged nothing    |
+| OrderDelivered | `4f2a…`           | kitchen + pickup transitions are silent         |
+| OrderSettled   | `9d03…`           |                                                 |
 
 **Idempotency without a table (ADR-0024)** — `order_id = ord_ + uuid5(NS, "usr_1:K-7f3a…")`, so the ROW is the record:
 
@@ -390,7 +338,6 @@ erDiagram
         text psp
         text payment_intent_id "the PSP's ref"
         timestamptz capture_before
-        int version
         timestamptz created_at
         timestamptz updated_at
     }
@@ -423,7 +370,6 @@ erDiagram
         text id PK
         text aggregate_type "payment"
         text aggregate_id "the order_id"
-        int aggregate_version
         text event_type
         json payload
         timestamptz occurred_at
@@ -588,4 +534,4 @@ flowchart LR
 Two idioms to notice while reading:
 
 - **Snapshots over joins.** `orders` copies the restaurant _name_, the _address_, the _prices_ at placement time. The order is a historical fact; a later menu edit or address change must not rewrite what you bought. Where a normalized design would join, this design copies-at-commit.
-- **The same four service-local columns everywhere.** `version` (optimistic bump feeding deterministic event ids), `status` with a CHECK against a closed vocabulary, an `outbox` staged in-transaction, and either `processed_events` or a natural key for consumer dedupe. Learn them once, and every service's schema reads the same.
+- **The same service-local shapes everywhere.** `status` with a CHECK against a closed vocabulary, an `outbox` staged in-transaction, and a natural key (or a guarding WHERE) for consumer dedupe. No table carries a `version` column: event ids are random, and a priced cart's drift is caught by comparing the recomputed total against `expected_total_cents`.
