@@ -1,6 +1,6 @@
 # SmartFoodOps — ERD (as built, W3)
 
-**Read this first:** the platform is database-per-service — six PostgreSQL databases, one per owning service, and **no foreign keys ever cross a database**. Real FK lines appear only inside each diagram; references _between_ services travel as plain id columns (shown in the last diagram) and are kept consistent by events + idempotent consumers, not constraints. Two table shapes come from shared libs: `outbox` (smartfood-outbox, 9 columns) repeats across services; `idempotency_keys` (smartfood-idempotency) survives only in payment_db — order's copy was retired by ADR-0024 (the orders row itself is placement's idempotency record).
+**Read this first:** the platform is database-per-service — six PostgreSQL databases, one per owning service, and **no foreign keys ever cross a database**. Real FK lines appear only inside each diagram; references _between_ services travel as plain id columns (shown in the last diagram) and are kept consistent by events + idempotent consumers, not constraints. Two table shapes come from shared libs: `outbox` (smartfood-outbox, 9 columns) repeats across services; `idempotency_keys` (smartfood-idempotency) survives only in payment_db — order's copy was retired by ADR-0024 (the orders row itself is placement's idempotency record). Identity's `processed_events` ledger is likewise **retired** (design review, 2026-09-08): `grant_restaurant_admin` already short-circuits an already-applied grant, so the seen-check traded one indexed read for one indexed read while adding two statements per event — dedupe now rides the write in all five consumers, per ADR-0018's per-sink modes.
 
 ---
 
@@ -43,11 +43,6 @@ erDiagram
         boolean revoked
         timestamptz created_at
     }
-    processed_events {
-        text consumer_group PK
-        text event_id PK
-        timestamptz processed_at
-    }
     roles ||--o{ users : "referenced by name"
     users ||--o{ addresses : "has"
     users ||--o{ refresh_tokens : "session families"
@@ -72,13 +67,6 @@ erDiagram
 | rt_1 | fam_a     | usr_1   | 12:00 _(exchanged for rt_2)_ | false   |
 | rt_2 | fam_a     | usr_1   | 14:30 _(exchanged for rt_3)_ | false   |
 | rt_3 | fam_a     | usr_1   | NULL _(the live one)_        | false   |
-
-`processed_events` — the grant-convergence consumer's memory. Note the second row: a **failure verdict** ("can never apply") is also recorded, so redeliveries stop re-alarming:
-
-| consumer_group             | event_id                                                     | processed_at |
-| -------------------------- | ------------------------------------------------------------ | ------------ |
-| identity.grant-convergence | `a3f1…` _(RestaurantCreated rst_9 — grant applied)_          | 12:01        |
-| identity.grant-convergence | `77b0…` _(owner was a rider — GrantConflict, marked anyway)_ | 12:05        |
 
 ## catalog_db — what can be ordered
 
