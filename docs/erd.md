@@ -76,14 +76,14 @@ erDiagram
         text id PK "brd_ or rst_ (ADR-0028)"
         text owner_user_id "logical -> identity.users.id; UNIQUE among brand rows only"
         text name "the BRAND name; branch rows carry a synced copy"
-        text kind "CHECK: brand|branch — brand rows never browse"
-        text brand_id FK "self-FK: a branch's parent; NULL iff kind=brand"
-        text branch_label "Downtown — unique per brand; display_name composes it"
+        text kind "CHECK: brand|branch — the partial unique index needs it"
         timestamptz created_at
         timestamptz updated_at
     }
     branch_metadata {
         text restaurant_id PK "FK — branch rows only"
+        text brand_id FK "the branch's parent"
+        text branch_label "Downtown — UNIQUE(brand_id, branch_label)"
         text city
         float lat
         float lon
@@ -145,8 +145,8 @@ erDiagram
         timestamptz published_at "NULL = undrained"
         text traceparent
     }
-    restaurants ||--o{ restaurants : "brand - its branches"
-    restaurants ||--o| branch_metadata : "1:0..1 — a branch has one, a brand has none"
+    restaurants ||--o| branch_metadata : "its own row — a branch has one, a brand has none"
+    restaurants ||--o{ branch_metadata : "brand - its branches (brand_id)"
     restaurants ||--o{ restaurant_cuisines : ""
     restaurants ||--o{ menu_categories : "brand rows hold the BASE menu"
     restaurants ||--o{ menu_items : "branch rows hold local items"
@@ -171,10 +171,16 @@ One restaurant, three mutations — the outbox holds one event **per mutation**.
 `restaurants` (current state only — the brand row owns the base menu, its
 branch rows are the places customers order from, ADR-0028):
 
-| id    | owner_user_id | name          | kind   | brand_id | branch_label |
-| ----- | ------------- | ------------- | ------ | -------- | ------------ |
-| brd_9 | usr_1         | Biryani House | brand  | NULL     | NULL         |
-| rst_9 | usr_1         | Biryani House | branch | brd_9    | Main         |
+| id    | owner_user_id | name          | kind   |
+| ----- | ------------- | ------------- | ------ |
+| brd_9 | usr_1         | Biryani House | brand  |
+| rst_9 | usr_1         | Biryani House | branch |
+
+`branch_metadata` — only `rst_9` has a row; the brand has none:
+
+| restaurant_id | brand_id | branch_label | city    | status |
+| ------------- | -------- | ------------ | ------- | ------ |
+| rst_9         | brd_9    | Main         | Chicago | open   |
 
 (A base-menu edit stages one full-effective-state event per aggregate in one
 all-or-nothing transaction — the fan-out.)
