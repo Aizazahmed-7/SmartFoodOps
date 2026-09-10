@@ -18,10 +18,21 @@ erDiagram
         text password_hash
         text full_name
         text phone
-        text role FK "-> roles.name; the enum stays authoritative"
-        text restaurant_id "set by grant; the owner's BRAND id since ADR-0028"
-        text rider_id
         timestamptz created_at
+    }
+    user_roles {
+        text user_id PK "FK -> users.id"
+        text role PK "FK -> roles.name; the enum stays authoritative"
+        timestamptz granted_at
+    }
+    riders {
+        text user_id PK "FK -> users.id; the old rider_id was always == users.id"
+        timestamptz onboarded_at
+    }
+    restaurant_owners {
+        text user_id PK "FK -> users.id; PK = one brand per owner"
+        text brand_id "logical -> catalog.restaurants.id (a BRAND)"
+        timestamptz granted_at
     }
     addresses {
         text id PK
@@ -34,18 +45,19 @@ erDiagram
         timestamptz created_at
     }
     refresh_tokens {
-        text id PK
-        text family_id "kill the whole family on reuse"
+        text id PK "one row per LOGIN, updated in place on rotation"
         text user_id FK
-        text token_sha256 UK
+        text token_sha256 UK "the live token"
         timestamptz expires_at
-        timestamptz rotated_at "non-null = already rotated"
-        boolean revoked
+        timestamptz rotated_at "last rotation"
         timestamptz created_at
     }
-    roles ||--o{ users : "referenced by name"
+    users ||--o{ user_roles : "roles held"
+    roles ||--o{ user_roles : "held by"
+    users ||--o| riders : "rider profile, when granted"
+    users ||--o| restaurant_owners : "owned brand, when granted"
     users ||--o{ addresses : "has"
-    users ||--o{ refresh_tokens : "session families"
+    users ||--o{ refresh_tokens : "one row per active session"
 ```
 
 ### Example rows — the tricky identity tables
@@ -60,13 +72,19 @@ erDiagram
 | system_admin     | 12:00      |
 | system           | 12:00      |
 
-`refresh_tokens` — one login's **family**, rotated twice. Reuse of `rt_1` or `rt_2` now = theft signal → the whole `fam_a` chain is revoked:
+`user_roles` — a promoted owner **keeps** `customer`, which is what the old single `users.role` column threw away (and why every customer-facing endpoint had to list both):
 
-| id   | family_id | user_id | rotated_at                   | revoked |
-| ---- | --------- | ------- | ---------------------------- | ------- |
-| rt_1 | fam_a     | usr_1   | 12:00 _(exchanged for rt_2)_ | false   |
-| rt_2 | fam_a     | usr_1   | 14:30 _(exchanged for rt_3)_ | false   |
-| rt_3 | fam_a     | usr_1   | NULL _(the live one)_        | false   |
+| user_id | role             | granted_at |
+| ------- | ---------------- | ---------- |
+| usr_1   | customer         | 12:00      |
+| usr_1   | restaurant_admin | 12:05      |
+
+`refresh_tokens` — one row per **login**, not per token: rotation UPDATES the row in place. Two devices are two rows:
+
+| id         | user_id | token_sha256 | expires_at |
+| ---------- | ------- | ------------ | ---------- |
+| ses_phone  | usr_1   | h(rt_3)      | +30d       |
+| ses_laptop | usr_1   | h(rt_9)      | +30d       |
 
 ## catalog_db — what can be ordered
 
@@ -495,6 +513,7 @@ These lines are _conventions kept true by events and idempotent consumers_, neve
 flowchart LR
     subgraph identity_db
         users[users]
+        restaurant_owners[restaurant_owners]
         addresses[addresses]
     end
     subgraph catalog_db
@@ -519,7 +538,7 @@ flowchart LR
     end
 
     restaurants -. "owner_user_id" .-> users
-    users -. "restaurant_id (grant)" .-> restaurants
+    restaurant_owners -. "brand_id (grant)" .-> restaurants
     orders -. "user_id" .-> users
     orders -. "restaurant_id" .-> restaurants
     orders -. "delivery_address_snapshot (copied)" .-> addresses
