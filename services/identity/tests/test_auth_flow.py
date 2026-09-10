@@ -369,3 +369,27 @@ def test_internal_contact_read_for_receipts(client):
 
     assert client.get("/v1/internal/users/usr_ghost", headers=system).status_code == 404
     assert client.get(f"/v1/internal/users/{user_id}", headers=headers).status_code == 403
+
+
+async def test_profile_of_a_user_holding_no_roles(client):
+    """The reason `get_user_with_roles` uses LEFT and not INNER.
+
+    An INNER join would return zero rows for a role-less user, making them
+    indistinguishable from one who does not exist — a 404 instead of a
+    profile with an empty role set. Not reachable through the API (register
+    always grants `customer`), so it is pinned here or it regresses."""
+    import jwt as pyjwt
+    from identity.db import user_roles
+
+    client.post("/v1/auth/register", json=REG)
+    token = client.post("/v1/auth/login", json=REG).json()["access_token"]
+    claims = pyjwt.decode(token, options={"verify_signature": False}, algorithms=["RS256"])
+
+    sessions = client.app.state.service._sessions
+    async with sessions() as s:
+        await s.execute(user_roles.delete())
+        await s.commit()
+
+    r = client.get("/v1/auth/me", headers=headers_for(context_from_claims(claims)))
+    assert r.status_code == 200
+    assert r.json()["roles"] == []  # found, with no roles — NOT a 404

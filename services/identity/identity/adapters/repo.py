@@ -81,6 +81,28 @@ class IdentityRepo:
         ).scalars()
         return frozenset(rows)
 
+    async def get_user_with_roles(self, user_id: str) -> tuple[Row[Any], frozenset[str]] | None:
+        """The user AND their role set in one round trip.
+
+        LEFT, not INNER: a user holding no roles must still be found (one row,
+        NULL role) so callers can tell "no such user" (None) from "user with
+        no roles" (empty set). The join is 1:N on one side only, so rows grow
+        with the role count and nothing multiplies.
+
+        A join belongs here because this read shapes no decision — contrast
+        the grant paths, which ask three separate questions and would need a
+        use-case-shaped query to fuse."""
+        rows = (
+            await self._s.execute(
+                sa.select(users, user_roles.c.role)
+                .select_from(users.outerjoin(user_roles, user_roles.c.user_id == users.c.id))
+                .where(users.c.id == user_id)
+            )
+        ).all()
+        if not rows:
+            return None
+        return rows[0], frozenset(row.role for row in rows if row.role is not None)
+
     async def add_role(self, user_id: str, role: str, now: datetime) -> None:
         """Idempotent: re-granting a held role is a no-op, which is what the
         seed and the grant-convergence consumer both rely on."""

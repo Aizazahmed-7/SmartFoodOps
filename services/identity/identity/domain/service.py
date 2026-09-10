@@ -243,11 +243,10 @@ class IdentityService:
 
     async def get_profile(self, user_id: str) -> Profile:
         async with self._sessions() as session:
-            repo = IdentityRepo(session)
-            user = await repo.get_user_by_id(user_id)
-            if user is None:
+            found = await IdentityRepo(session).get_user_with_roles(user_id)
+            if found is None:
                 raise UnknownUser
-            roles = await repo.get_roles(user_id)
+            user, roles = found
             return Profile(
                 id=user.id,
                 email=user.email,
