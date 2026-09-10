@@ -4,7 +4,7 @@ owner, repairable after a failed grant."""
 from catalog.domain.ports import GrantRejected, GrantUnavailable
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_owner", role="customer"))
+CUSTOMER = headers_for(AuthContext(sub="usr_owner", roles=frozenset({"customer"})))
 
 BODY = {"name": "Biryani House", "city": "Springfield", "cuisines": ["pakistani"]}
 
@@ -29,7 +29,9 @@ def test_promoted_owner_can_replay_onboarding(client, grants):
     must return the existing restaurant, not a 403 (found by the seed test)."""
     first = client.post("/v1/restaurants", json=BODY, headers=CUSTOMER)
     rid = first.json()["id"]
-    promoted = headers_for(AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=rid))
+    promoted = headers_for(
+        AuthContext(sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=rid)
+    )
     replay = client.post("/v1/restaurants", json=BODY, headers=promoted)
     assert replay.status_code == 200
     assert replay.json()["id"] == rid
@@ -63,13 +65,15 @@ def test_rejected_grant_is_409(client, grants):
 
 
 def test_onboarding_role_gates(client, grants):
-    rider = headers_for(AuthContext(sub="usr_r", role="rider", rider_id="rid_1"))
+    rider = headers_for(AuthContext(sub="usr_r", roles=frozenset({"rider"}), rider_id="rid_1"))
     assert client.post("/v1/restaurants", json=BODY, headers=rider).status_code == 403
     assert client.post("/v1/restaurants", json=BODY).status_code == 401
     # A foreign admin passes the ROLE gate (replays must — see above) but
     # Identity refuses the grant: one restaurant per user.
     foreign_admin = headers_for(
-        AuthContext(sub="usr_other", role="restaurant_admin", restaurant_id="rst_other")
+        AuthContext(
+            sub="usr_other", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_other"
+        )
     )
     grants.fail_with = GrantRejected("already scoped to another restaurant")
     r = client.post("/v1/restaurants", json=BODY | {"name": "Second"}, headers=foreign_admin)

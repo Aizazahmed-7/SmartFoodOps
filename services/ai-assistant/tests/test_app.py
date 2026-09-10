@@ -18,7 +18,7 @@ def test_metrics_exposes_the_ai_instruments(client: TestClient):
     client.post(
         "/v1/internal/assistant/echo",
         json={"prompt": "x"},
-        headers={"X-Auth-Sub": "svc:test", "X-Auth-Role": "system"},
+        headers={"X-Auth-Sub": "svc:test", "X-Auth-Roles": "system"},
     )
     body = client.get("/metrics").text
     assert "assistant_response_seconds" in body

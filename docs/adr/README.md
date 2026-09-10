@@ -25,7 +25,7 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0019](0019-search-postgres-fts-first-opensearch-behind-port.md) | Search: Postgres FTS + trigram first, OpenSearch behind a port later | Accepted |
 | [0020](0020-onboarding-consistency-outbox-convergence-not-temporal.md) | Onboarding consistency: sync grant + outbox convergence, not Temporal | Accepted |
 | [0021](0021-consumer-failure-policy-bounded-retry-then-dlq.md) | Consumer failure policy: supervised loop, bounded retry, then DLQ | Accepted |
-| [0022](0022-roles-as-seeded-lookup-table.md) | Roles as a seeded lookup table, pinned to the enum | Accepted |
+| [0022](0022-roles-as-seeded-lookup-table.md) | Roles as a seeded lookup table, pinned to the enum | Accepted — amended by 0034 |
 | [0023](0023-placement-runs-inside-the-order-workflow.md) | Placement runs inside the order workflow (update-with-start), sweeper retired | Accepted |
 | [0024](0024-orders-row-is-placements-idempotency-record.md) | The orders row is placement's idempotency record; the key table retired | Accepted |
 | [0025](0025-side-effects-ride-a-task-queue.md) | Side effects ride a task queue; projections ride the log | Accepted |
@@ -35,5 +35,6 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0029](0029-genai-plane-is-a-separate-service.md) | The GenAI plane is a separate service; the ordering path never awaits an LLM | Accepted |
 | [0030](0030-llm-providers-behind-a-port.md) | LLM providers behind a port: task routing, failover, budget breaker | Accepted |
 | [0031](0031-orchestration-split-langgraph-temporal-celery.md) | Orchestration split: LangGraph owns the turn, Temporal owns sagas, Celery owns batch | Accepted |
+| [0034](0034-multi-role-identity-and-per-login-sessions.md) | Multi-role identity, role-specific tables, and one session row per login | Accepted |
 
 **Conventions**: files are `NNNN-kebab-title.md`; numbers are never reused. Superseding an ADR = new ADR + status change here, never editing the old decision.

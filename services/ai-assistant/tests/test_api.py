@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from .conftest import FakeBudgetStore, FakeLlm, frames, settings
 
-SYSTEM = {"X-Auth-Sub": "svc:test", "X-Auth-Role": "system"}
+SYSTEM = {"X-Auth-Sub": "svc:test", "X-Auth-Roles": "system"}
 ECHO = "/v1/internal/assistant/echo"
 STREAM = "/v1/internal/assistant/echo/stream"
 
@@ -60,7 +60,7 @@ def test_echo_is_system_only(client: TestClient):
     assert client.post(ECHO, json={"prompt": "x"}).status_code == 401
     assert (
         client.post(
-            ECHO, json={"prompt": "x"}, headers={"X-Auth-Sub": "usr_1", "X-Auth-Role": "customer"}
+            ECHO, json={"prompt": "x"}, headers={"X-Auth-Sub": "usr_1", "X-Auth-Roles": "customer"}
         ).status_code
         == 403
     )

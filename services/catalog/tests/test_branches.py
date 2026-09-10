@@ -23,9 +23,11 @@ BODY = {
 
 def _onboard(client, sub="usr_owner"):
     """Mint brand + first branch; return (brand_id, branch_id, owner headers)."""
-    customer = headers_for(AuthContext(sub=sub, role="customer"))
+    customer = headers_for(AuthContext(sub=sub, roles=frozenset({"customer"})))
     body = client.post("/v1/restaurants", json=BODY, headers=customer).json()
-    owner = headers_for(AuthContext(sub=sub, role="restaurant_admin", restaurant_id=body["id"]))
+    owner = headers_for(
+        AuthContext(sub=sub, roles=frozenset({"restaurant_admin"}), restaurant_id=body["id"])
+    )
     return body["id"], body["branches"][0]["id"], owner
 
 
@@ -46,7 +48,7 @@ def _seed_base_item(client, brand_id, owner):
 
 def test_onboarding_replay_returns_the_brand_with_its_branches(client):
     brand_id, branch_id, _ = _onboard(client)
-    customer = headers_for(AuthContext(sub="usr_owner", role="customer"))
+    customer = headers_for(AuthContext(sub="usr_owner", roles=frozenset({"customer"})))
     replay = client.post("/v1/restaurants", json=BODY, headers=customer)
     assert replay.status_code == 200
     assert replay.json()["id"] == brand_id
@@ -107,7 +109,7 @@ def test_own_matrix_brand_branch_stranger_unknown(client):
     assert ok.status_code == 200
     # old-token equality arm: a branch-scoped claim still runs its own shop
     branch_token = headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=branch_id)
+        AuthContext(sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=branch_id)
     )
     assert (
         client.patch(

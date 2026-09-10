@@ -3,8 +3,8 @@ walking, bounds."""
 
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
-OTHER = headers_for(AuthContext(sub="usr_2", role="customer"))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
+OTHER = headers_for(AuthContext(sub="usr_2", roles=frozenset({"customer"})))
 
 
 def test_detail_returns_snapshots_not_live_menu(client, catalog, make_snapshot, place_order):

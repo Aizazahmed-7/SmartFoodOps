@@ -8,13 +8,15 @@ from smartfood_auth import AuthContext, headers_for
 
 
 def onboard(client, sub="usr_owner", name="Biryani House", cuisines=("pakistani",)):
-    customer = headers_for(AuthContext(sub=sub, role="customer"))
+    customer = headers_for(AuthContext(sub=sub, roles=frozenset({"customer"})))
     rid = client.post(
         "/v1/restaurants",
         json={"name": name, "city": "springfield", "cuisines": list(cuisines)},
         headers=customer,
     ).json()["id"]
-    return rid, headers_for(AuthContext(sub=sub, role="restaurant_admin", restaurant_id=rid))
+    return rid, headers_for(
+        AuthContext(sub=sub, roles=frozenset({"restaurant_admin"}), restaurant_id=rid)
+    )
 
 
 def seed_menu(

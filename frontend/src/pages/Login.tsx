@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { login } from "../api/client";
-import { useAuth } from "../state/auth";
+import { useAuth, hasRole } from "../state/auth";
 import { ErrorNote } from "../components/ui";
 
 export default function Login() {
@@ -22,7 +22,7 @@ export default function Login() {
       // checkout, not Browse); "/" only when the user came here directly.
       const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
       // Riders live on their console — browsing menus is not their job.
-      const home = useAuth.getState().claims?.role === "rider" ? "/rider" : "/";
+      const home = hasRole(useAuth.getState().claims, "rider") ? "/rider" : "/";
       navigate(from ?? home);
     } catch (err) {
       setError(err);

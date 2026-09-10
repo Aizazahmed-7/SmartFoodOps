@@ -32,13 +32,15 @@ ITEM = {
 
 
 def onboard(client, sub="usr_owner", name="Biryani House"):
-    customer = headers_for(AuthContext(sub=sub, role="customer"))
+    customer = headers_for(AuthContext(sub=sub, roles=frozenset({"customer"})))
     rid = client.post(
         "/v1/restaurants",
         json={"name": name, "city": "springfield", "cuisines": ["pakistani"]},
         headers=customer,
     ).json()["id"]
-    admin = headers_for(AuthContext(sub=sub, role="restaurant_admin", restaurant_id=rid))
+    admin = headers_for(
+        AuthContext(sub=sub, roles=frozenset({"restaurant_admin"}), restaurant_id=rid)
+    )
     return rid, admin
 
 
@@ -66,9 +68,9 @@ def test_add_category(client):
 
 def test_add_category_auth_branches(client):
     rid, admin = onboard(client)
-    customer = headers_for(AuthContext(sub="usr_owner", role="customer"))
+    customer = headers_for(AuthContext(sub="usr_owner", roles=frozenset({"customer"})))
     other = headers_for(
-        AuthContext(sub="usr_x", role="restaurant_admin", restaurant_id="rst_other")
+        AuthContext(sub="usr_x", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_other")
     )
     body = {"name": "Mains"}
     assert client.post(f"/v1/restaurants/{rid}/categories", json=body).status_code == 401
@@ -82,7 +84,7 @@ def test_add_category_auth_branches(client):
 
 def test_add_category_unknown_restaurant_is_404(client):
     ghost_admin = headers_for(
-        AuthContext(sub="usr_g", role="restaurant_admin", restaurant_id="rst_ghost")
+        AuthContext(sub="usr_g", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_ghost")
     )
     r = client.post(
         "/v1/restaurants/rst_ghost/categories", json={"name": "Mains"}, headers=ghost_admin

@@ -4,7 +4,7 @@
 def _system_headers():
     from smartfood_auth import AuthContext, headers_for
 
-    return headers_for(AuthContext(sub="svc:dispatch", role="system"))
+    return headers_for(AuthContext(sub="svc:dispatch", roles=frozenset({"system"})))
 
 
 def test_courier_events_relay_to_the_child(client, saga):
@@ -53,7 +53,7 @@ def test_courier_events_map_saga_outcomes(client, saga):
 def test_courier_events_are_system_only(client):
     from smartfood_auth import AuthContext, headers_for
 
-    rider = headers_for(AuthContext(sub="r_1", role="rider", rider_id="r_1"))
+    rider = headers_for(AuthContext(sub="r_1", roles=frozenset({"rider"}), rider_id="r_1"))
     r = client.post(
         "/v1/internal/orders/ord_1/courier",
         json={"event": "delivered", "rider_id": "r_1"},

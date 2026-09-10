@@ -192,7 +192,7 @@ async def _own(ctx: AuthContext, restaurant_id: str, request: Request) -> None:
     naming one of its branches passes via the row's brand_id. Old
     branch-scoped tokens keep passing via equality through the repoint
     window. Unknown ids and other people's rows share the one 404."""
-    if ctx.role in _SCOPE_EXEMPT or ctx.restaurant_id == restaurant_id:
+    if ctx.roles & _SCOPE_EXEMPT or ctx.restaurant_id == restaurant_id:
         return
     try:
         row = await _svc(request).get_restaurant(restaurant_id)

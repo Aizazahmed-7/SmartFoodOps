@@ -48,7 +48,7 @@ async def test_offer_fetches_the_pin_once_and_posts_the_cascade_step():
     assert len(catalog_calls) == 1  # the pin is cached per restaurant
     offer_calls = [r for r in seen if r.url.path == "/v1/internal/dispatch/offers"]
     assert len(offer_calls) == 2
-    assert offer_calls[0].headers["x-auth-role"] == "system"
+    assert offer_calls[0].headers["x-auth-roles"] == "system"
     import json
 
     body = json.loads(offer_calls[1].content)

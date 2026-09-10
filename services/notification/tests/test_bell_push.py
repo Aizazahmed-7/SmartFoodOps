@@ -13,8 +13,17 @@ from notification.config import Settings
 from notification.main import create_app
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
-OWNER = headers_for(AuthContext(sub="usr_o", role="restaurant_admin", restaurant_id="rst_1"))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
+OWNER = headers_for(
+    AuthContext(sub="usr_o", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_1")
+)
+# A promoted owner KEEPS customer (review 2026-09-10) — the state the old
+# single users.role column could not represent at all.
+OWNER_AND_CUSTOMER = headers_for(
+    AuthContext(
+        sub="usr_o", roles=frozenset({"customer", "restaurant_admin"}), restaurant_id="rst_1"
+    )
+)
 
 
 class FakeRealtime:
@@ -69,6 +78,16 @@ def test_ticket_names_the_callers_own_channel_only():
         assert claim["channel"] == "sfo:notify:customer:usr_1"
         owner_body = c.post("/v1/notifications/ticket", headers=OWNER).json()
         assert fake.tickets[owner_body["ticket"]]["channel"] == "sfo:notify:restaurant:rst_1"
+
+
+def test_owner_who_is_also_a_customer_gets_the_RESTAURANT_bell():
+    """Owner-wins under multi-role: holding both roles must route to the
+    kitchen inbox, exactly as the single-role model did — an owner whose
+    bell silently became their personal one would stop seeing new orders."""
+    fake = FakeRealtime()
+    with TestClient(make_app(fake)) as c:
+        body = c.post("/v1/notifications/ticket", headers=OWNER_AND_CUSTOMER).json()
+        assert fake.tickets[body["ticket"]]["channel"] == "sfo:notify:restaurant:rst_1"
 
 
 def test_ticket_503s_when_push_is_off():

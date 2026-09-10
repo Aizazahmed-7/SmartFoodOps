@@ -12,7 +12,7 @@ from order.values import PlacementAck
 from smartfood_auth import AuthContext, headers_for
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-_CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
+_CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
 
 
 class FakeCatalog:

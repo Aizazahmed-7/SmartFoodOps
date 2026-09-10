@@ -17,11 +17,13 @@ from sqlalchemy.pool import StaticPool
 
 def admin(restaurant_id: str) -> dict[str, str]:
     return headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=restaurant_id)
+        AuthContext(
+            sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=restaurant_id
+        )
     )
 
 
-SYSTEM = headers_for(AuthContext(sub="svc:order-worker", role="system"))
+SYSTEM = headers_for(AuthContext(sub="svc:order-worker", roles=frozenset({"system"})))
 
 
 async def _service(**kwargs) -> tuple[InventoryService, async_sessionmaker]:

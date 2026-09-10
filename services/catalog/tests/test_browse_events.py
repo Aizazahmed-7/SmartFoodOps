@@ -11,7 +11,7 @@ from smartfood_auth import AuthContext, headers_for
 
 from .conftest import FakeCache, FakeGrants
 
-CUSTOMER = headers_for(AuthContext(sub="usr_9", role="customer"))
+CUSTOMER = headers_for(AuthContext(sub="usr_9", roles=frozenset({"customer"})))
 
 
 class RecordingProducer:
@@ -101,13 +101,17 @@ def test_owners_own_shop_views_are_not_demand():
             headers=CUSTOMER,
         ).json()
         brand, branch = body["id"], body["branches"][0]["id"]
-        owner = headers_for(AuthContext(sub="usr_9", role="restaurant_admin", restaurant_id=brand))
+        owner = headers_for(
+            AuthContext(sub="usr_9", roles=frozenset({"restaurant_admin"}), restaurant_id=brand)
+        )
         assert c.get(f"/v1/menus/{brand}", headers=owner).status_code == 200
         assert c.get(f"/v1/menus/{branch}", headers=owner).status_code == 200
         assert producer.sent == []  # neither self-view fired
 
         rival = headers_for(
-            AuthContext(sub="usr_5", role="restaurant_admin", restaurant_id="brd_other")
+            AuthContext(
+                sub="usr_5", roles=frozenset({"restaurant_admin"}), restaurant_id="brd_other"
+            )
         )
         assert c.get(f"/v1/menus/{branch}", headers=rival).status_code == 200
     (event,) = producer.sent  # the rival's lunch scouting counts

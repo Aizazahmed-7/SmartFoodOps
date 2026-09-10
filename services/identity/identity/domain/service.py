@@ -2,16 +2,14 @@
 
 No HTTP here (no FastAPI imports, no status codes) and no SQL (that's the
 repo's). Failures are domain exceptions; the API layer translates them.
-This is also where transactions are DECIDED: the family-kill on refresh
-reuse commits before its error propagates — the bug class we hit when
-these concerns were interleaved.
+This is also where transactions are DECIDED: a grant writes the role and
+its role-specific row in ONE transaction, so the two never disagree.
 """
 
-import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from smartfood_auth import TokenIssuer
+from smartfood_auth import Role, TokenIssuer
 from smartfood_otel import get_logger
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -38,12 +36,6 @@ class InvalidCredentials(IdentityError):
 
 class InvalidRefreshToken(IdentityError):
     pass
-
-
-class RefreshTokenReused(InvalidRefreshToken):
-    """Rotated/revoked token presented again — family has been revoked.
-    Distinct so the API can return AUTH_REFRESH_REUSED: the legitimate
-    holder learns their token was stolen."""
 
 
 class UnknownUser(IdentityError):
@@ -107,13 +99,14 @@ class IdentityService:
         async with self._sessions() as session:
             repo = IdentityRepo(session)
             if await repo.get_user_by_email(email) is None:
-                await repo.insert_user(
+                now = _now()
+                user_id = await repo.insert_user(
                     email=email,
                     password_hash=password_hash,
                     full_name=full_name,
-                    role="customer",
-                    now=_now(),
+                    now=now,
                 )
+                await repo.add_role(user_id, str(Role.CUSTOMER), now)
                 await session.commit()
                 log.info("user registered")
 
@@ -124,55 +117,61 @@ class IdentityService:
             password_hash = user.password_hash if user else None
             if not verify_password(password_hash, password) or user is None:
                 raise InvalidCredentials
-            pair = await self._issue_pair(repo, user, family_id=None)
+            pair = await self._issue_pair(repo, user, session_id=None)
             await session.commit()
             return pair
 
     # ── refresh rotation ───────────────────────────────────────────
 
     async def refresh(self, refresh_token: str) -> TokenPairData:
+        """Rotation UPDATES the session row in place (review 2026-09-10), so
+        the old hash is overwritten rather than kept. A replayed stolen token
+        therefore reads as an unknown token, not as a theft signal — the
+        detection the previous append-per-token model provided is gone by
+        decision, and rotation's remaining value is that a stolen token stops
+        working at the legitimate holder's next refresh."""
         async with self._sessions() as session:
             repo = IdentityRepo(session)
             row = await repo.get_refresh_by_hash(hash_refresh_token(refresh_token))
             if row is None:
                 raise InvalidRefreshToken
 
-            if row.revoked or row.rotated_at is not None:
-                # Reuse of a rotated token = theft signal → kill the family,
-                # and COMMIT the kill before the error propagates.
-                await repo.revoke_family(row.family_id)
-                await session.commit()
-                log.warning("refresh token reuse detected — family revoked", family=row.family_id)
-                raise RefreshTokenReused
-
             if _aware(row.expires_at) < _now():
                 raise InvalidRefreshToken
 
-            await repo.mark_rotated(row.id, _now())
             user = await repo.get_user_by_id(row.user_id)
             if user is None:
                 raise InvalidRefreshToken
-            pair = await self._issue_pair(repo, user, family_id=row.family_id)
+            pair = await self._issue_pair(repo, user, session_id=row.id)
             await session.commit()
             return pair
 
     async def _issue_pair(
-        self, repo: IdentityRepo, user: Row[Any], family_id: str | None
+        self, repo: IdentityRepo, user: Row[Any], *, session_id: str | None
     ) -> TokenPairData:
+        """`session_id=None` is a LOGIN (opens a session row); a value is a
+        REFRESH (rotates that row). The claim shape is unchanged — only its
+        SOURCE moved: roles come from user_roles, restaurant_id from
+        restaurant_owners, and rider_id is derived because the old column was
+        always equal to users.id."""
+        roles = await repo.get_roles(user.id)
         access = self._issuer.issue(
             sub=user.id,
-            role=user.role,
-            restaurant_id=user.restaurant_id,
-            rider_id=user.rider_id,
+            roles=roles,
+            restaurant_id=await repo.get_owner_brand(user.id),
+            rider_id=user.id if str(Role.RIDER) in roles else None,
         )
         token, token_hash = new_refresh_token()
-        await repo.insert_refresh(
-            family_id=family_id or f"fam_{uuid.uuid4().hex}",
-            user_id=user.id,
-            token_sha256=token_hash,
-            expires_at=_now() + timedelta(days=self._refresh_ttl_days),
-            now=_now(),
-        )
+        now = _now()
+        expires_at = now + timedelta(days=self._refresh_ttl_days)
+        if session_id is None:
+            await repo.open_session(
+                user_id=user.id, token_sha256=token_hash, expires_at=expires_at, now=now
+            )
+        else:
+            await repo.rotate_session(
+                session_id=session_id, token_sha256=token_hash, expires_at=expires_at, now=now
+            )
         return TokenPairData(
             access_token=access,
             refresh_token=token,
@@ -191,48 +190,52 @@ class IdentityService:
         same convergence consumer. Last-writer-wins is safe because every
         caller is SystemOnly and catalog enforces one brand per owner —
         there is no legitimate competing writer. GrantConflict remains for
-        role-CLASS violations (riders/admins can't own restaurants)."""
+        role-CLASS violations (riders can't own restaurants) — a restriction
+        the single-role column used to impose for free, now explicit."""
         async with self._sessions() as session:
             repo = IdentityRepo(session)
             user = await repo.get_user_by_id(user_id)
             if user is None:
                 raise UnknownUser
-            if user.role == "restaurant_admin":
-                if user.restaurant_id == restaurant_id:
-                    return  # replay of an already-applied grant
-                await repo.update_user(user_id, {"restaurant_id": restaurant_id})
-                await session.commit()
+            roles = await repo.get_roles(user_id)
+            if str(Role.RIDER) in roles:
+                raise GrantConflict  # riders can't own restaurants
+            previous = await repo.get_owner_brand(user_id)
+            if previous == restaurant_id:
+                return  # replay of an already-applied grant
+            now = _now()
+            await repo.set_owner_brand(user_id, restaurant_id, now)
+            await repo.add_role(user_id, str(Role.RESTAURANT_ADMIN), now)
+            await session.commit()
+            if previous is None:
+                log.info("restaurant_admin granted", user=user_id, restaurant=restaurant_id)
+            else:
                 log.info(
                     "restaurant_admin scope repointed",
                     user=user_id,
                     restaurant=restaurant_id,
-                    previous=user.restaurant_id,
+                    previous=previous,
                 )
-                return
-            if user.role != "customer":
-                raise GrantConflict  # riders/admins can't own restaurants
-            await repo.update_user(
-                user_id, {"role": "restaurant_admin", "restaurant_id": restaurant_id}
-            )
-            await session.commit()
-            log.info("restaurant_admin granted", user=user_id, restaurant=restaurant_id)
 
     async def grant_rider(self, *, user_id: str) -> None:
-        """Dispatch onboarding (FR-1's rider role). rider_id == user id on
-        purpose: a rider IS a user with a rider claim — a separate rider
-        entity table earns its place only when riders grow rider-only
-        state (vehicle, documents), which is a named deferral. Idempotent
-        for the same reason the restaurant grant is: the seed replays."""
+        """Dispatch onboarding (FR-1's rider role). The `riders` row is the
+        home for rider-only PROFILE state (vehicle, documents) — operational
+        state stays dispatch's DynamoDB truth (ADR-0026) and is never
+        mirrored here. Idempotent for the same reason the restaurant grant
+        is: the seed replays."""
         async with self._sessions() as session:
             repo = IdentityRepo(session)
             user = await repo.get_user_by_id(user_id)
             if user is None:
                 raise UnknownUser
-            if user.role == "rider":
+            roles = await repo.get_roles(user_id)
+            if str(Role.RIDER) in roles:
                 return  # replay of an already-applied grant
-            if user.role != "customer":
-                raise GrantConflict  # owners/admins don't moonlight as couriers
-            await repo.update_user(user_id, {"role": "rider", "rider_id": user_id})
+            if str(Role.RESTAURANT_ADMIN) in roles:
+                raise GrantConflict  # owners don't moonlight as couriers
+            now = _now()
+            await repo.add_role(user_id, str(Role.RIDER), now)
+            await repo.add_rider(user_id, now)
             await session.commit()
             log.info("rider granted", user=user_id)
 
@@ -240,13 +243,15 @@ class IdentityService:
 
     async def get_profile(self, user_id: str) -> Profile:
         async with self._sessions() as session:
-            user = await IdentityRepo(session).get_user_by_id(user_id)
+            repo = IdentityRepo(session)
+            user = await repo.get_user_by_id(user_id)
             if user is None:
                 raise UnknownUser
+            roles = await repo.get_roles(user_id)
             return Profile(
                 id=user.id,
                 email=user.email,
-                role=user.role,
+                roles=tuple(sorted(roles)),
                 full_name=user.full_name,
                 phone=user.phone,
             )

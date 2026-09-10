@@ -1,6 +1,6 @@
 # 0022 — Roles as a seeded lookup table, pinned to the enum
 
-**Status**: Accepted 2026-08-14 (team review decision)
+**Status**: Accepted 2026-08-14 (team review decision) — amended by [ADR-0034](0034-multi-role-identity-and-per-login-sessions.md): a user now holds a SET of roles (`user_roles`), so `users.role` is gone. The enum-authority contract, the boot-time seeding and the pin test below are unchanged — `user_roles.role` is the FK that finally makes this table a real many-to-many target.
 
 ## Context
 

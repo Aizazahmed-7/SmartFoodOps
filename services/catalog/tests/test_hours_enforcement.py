@@ -9,14 +9,16 @@ from unittest.mock import patch
 
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_owner", role="customer"))
-SYSTEM = headers_for(AuthContext(sub="svc:order", role="system"))
+CUSTOMER = headers_for(AuthContext(sub="usr_owner", roles=frozenset({"customer"})))
+SYSTEM = headers_for(AuthContext(sub="svc:order", roles=frozenset({"system"})))
 
 BODY = {"name": "Biryani House", "city": "springfield", "cuisines": ["pakistani"]}
 
 
 def _admin(rid):
-    return headers_for(AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=rid))
+    return headers_for(
+        AuthContext(sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=rid)
+    )
 
 
 def test_new_restaurant_gets_the_configured_default_timezone(client):

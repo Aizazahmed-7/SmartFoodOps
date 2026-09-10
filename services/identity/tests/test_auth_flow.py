@@ -43,19 +43,44 @@ def test_refresh_rotates(client):
     assert r.json()["refresh_token"] != pair["refresh_token"]
 
 
-def test_refresh_reuse_kills_family(client):
+def test_rotation_kills_the_old_token_and_only_it(client):
+    """Rotation overwrites the session row's hash, so the previous token is
+    simply unknown — and the live one is NOT collateral damage.
+
+    The append-per-token model revoked the whole family on this replay,
+    because the rotated row survived as a tripwire. That detection is gone by
+    decision (review 2026-09-10): a replayed stolen token is now
+    indistinguishable from garbage. This test pins the trade so it cannot
+    regress into a silent behaviour change."""
     client.post("/v1/auth/register", json=REG)
     pair = client.post("/v1/auth/login", json=REG).json()
 
     fresh = client.post("/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]}).json()
 
-    # Attacker replays the ORIGINAL (already-rotated) token…
-    reuse = client.post("/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]})
-    assert reuse.status_code == 401
+    replay = client.post("/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]})
+    assert replay.status_code == 401
+    assert replay.json()["error"]["code"] == "AUTH_INVALID_CREDENTIALS"
 
-    # …and the legitimate NEW token is now dead too — whole family revoked.
-    after = client.post("/v1/auth/refresh", json={"refresh_token": fresh["refresh_token"]})
-    assert after.status_code == 401
+    assert (
+        client.post("/v1/auth/refresh", json={"refresh_token": fresh["refresh_token"]}).status_code
+        == 200
+    )
+
+
+def test_two_logins_are_independent_sessions(client):
+    """Multi-device (product decision, review 2026-09-10): a second login
+    opens its OWN row, and rotating one session does not touch the other."""
+    client.post("/v1/auth/register", json=REG)
+    phone = client.post("/v1/auth/login", json=REG).json()
+    laptop = client.post("/v1/auth/login", json=REG).json()
+
+    rotated = client.post("/v1/auth/refresh", json={"refresh_token": phone["refresh_token"]})
+    assert rotated.status_code == 200
+    # The laptop's token is untouched by the phone's rotation.
+    assert (
+        client.post("/v1/auth/refresh", json={"refresh_token": laptop["refresh_token"]}).status_code
+        == 200
+    )
 
 
 async def test_issued_token_verifies_against_own_jwks(client):
@@ -72,7 +97,7 @@ async def test_issued_token_verifies_against_own_jwks(client):
         ),
     )
     claims = await verifier.verify(token)
-    assert claims["role"] == "customer"
+    assert claims["roles"] == ["customer"]
     assert claims["sub"].startswith("usr_")
 
 
@@ -87,7 +112,7 @@ def test_me_via_stamped_headers(client):
     r = client.get("/v1/auth/me", headers=headers_for(context_from_claims(claims)))
     assert r.status_code == 200
     assert r.json()["email"] == REG["email"]
-    assert r.json()["role"] == "customer"
+    assert r.json()["roles"] == ["customer"]
 
 
 def _login_headers(client) -> dict:
@@ -126,7 +151,7 @@ def test_address_crud_and_ownership(client):
     # Another user cannot delete it — ownership is in the query (0 rows → 404).
     from smartfood_auth import AuthContext
 
-    other = headers_for(AuthContext(sub="usr_other", role="customer"))
+    other = headers_for(AuthContext(sub="usr_other", roles=frozenset({"customer"})))
     assert client.delete(f"/v1/me/addresses/{addr_id}", headers=other).status_code == 404
 
     assert client.delete(f"/v1/me/addresses/{addr_id}", headers=headers).status_code == 204
@@ -147,16 +172,6 @@ def test_address_creation_is_capped(client):
     address_id = client.get("/v1/me/addresses", headers=headers).json()[0]["id"]
     client.delete(f"/v1/me/addresses/{address_id}", headers=headers)
     assert client.post("/v1/me/addresses", json=body, headers=headers).status_code == 201
-
-
-def test_refresh_reuse_returns_distinct_code(client):
-    """The legitimate holder learns their token was stolen (AUTH_REFRESH_REUSED)."""
-    client.post("/v1/auth/register", json=REG)
-    pair = client.post("/v1/auth/login", json=REG).json()
-    client.post("/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]})
-    reuse = client.post("/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]})
-    assert reuse.status_code == 401
-    assert reuse.json()["error"]["code"] == "AUTH_REFRESH_REUSED"
 
 
 def test_unknown_body_field_is_422(client):
@@ -183,7 +198,7 @@ def test_refresh_with_unknown_token_is_401(client):
 def test_me_for_unknown_user_is_404(client):
     from smartfood_auth import AuthContext
 
-    ghost = headers_for(AuthContext(sub="usr_ghost", role="customer"))
+    ghost = headers_for(AuthContext(sub="usr_ghost", roles=frozenset({"customer"})))
     assert client.get("/v1/auth/me", headers=ghost).status_code == 404
 
 
@@ -197,7 +212,7 @@ def test_empty_profile_update_is_422(client):
 def test_profile_update_for_unknown_user_is_404(client):
     from smartfood_auth import AuthContext
 
-    ghost = headers_for(AuthContext(sub="usr_ghost", role="customer"))
+    ghost = headers_for(AuthContext(sub="usr_ghost", roles=frozenset({"customer"})))
     r = client.patch("/v1/auth/me", json={"full_name": "X"}, headers=ghost)
     assert r.status_code == 404
 
@@ -315,7 +330,7 @@ def test_internal_address_read_for_placement(client):
     addr_id = created.json()["id"]
     user_id = client.get("/v1/auth/me", headers=headers).json()["id"]
 
-    system = headers_for(AuthContext(sub="svc:order", role="system"))
+    system = headers_for(AuthContext(sub="svc:order", roles=frozenset({"system"})))
     r = client.get(f"/v1/internal/users/{user_id}/addresses/{addr_id}", headers=system)
     assert r.status_code == 200
     body = r.json()
@@ -347,7 +362,7 @@ def test_internal_contact_read_for_receipts(client):
     headers = _login_headers(client)
     user_id = client.get("/v1/auth/me", headers=headers).json()["id"]
 
-    system = headers_for(AuthContext(sub="svc:notification-worker", role="system"))
+    system = headers_for(AuthContext(sub="svc:notification-worker", roles=frozenset({"system"})))
     r = client.get(f"/v1/internal/users/{user_id}", headers=system)
     assert r.status_code == 200
     assert r.json() == {"id": user_id, "email": REG["email"], "full_name": None}

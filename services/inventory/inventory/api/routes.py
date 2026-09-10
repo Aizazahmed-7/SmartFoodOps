@@ -45,7 +45,7 @@ async def _own(ctx: AuthContext, restaurant_id: str, request: Request) -> None:
     is usually a branch — catalog answers whose branch it is (memoized).
     Mismatch and unknown share the one 404; catalog-down on a NEEDED lookup
     is a truthful 503, never a lying 404."""
-    if ctx.role in _SCOPE_EXEMPT or ctx.restaurant_id == restaurant_id:
+    if ctx.roles & _SCOPE_EXEMPT or ctx.restaurant_id == restaurant_id:
         return
     try:
         brand_id = await _parents(request).brand_of(restaurant_id)

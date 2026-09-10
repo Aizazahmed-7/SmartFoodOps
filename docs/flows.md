@@ -58,7 +58,7 @@ sequenceDiagram
     participant DB as order_db
 
     FE->>E: [HTTP] POST /v1/orders + Bearer JWT<br/>Idempotency-Key K = uuid per body-hash, from localStorage
-    Note over E: verify JWT once via JWKS<br/>STRIP client identity headers<br/>STAMP X-Auth-Sub usr_1, X-Auth-Role customer
+    Note over E: verify JWT once via JWKS<br/>STRIP client identity headers<br/>STAMP X-Auth-Sub usr_1, X-Auth-Roles customer
     E->>O: [HTTP] forward with stamped headers
     O->>DB: [DB] SELECT orders WHERE order_id = derived id<br/>row + hash match → 202 replay, current status — STOP<br/>row + hash differs → 422 reuse — STOP<br/>no row → continue (fresh placement)
     O->>I: [HTTP] GET internal address adr_1 for usr_1<br/>system headers sub=svc:order + traceparent

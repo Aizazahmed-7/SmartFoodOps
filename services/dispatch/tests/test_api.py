@@ -10,9 +10,9 @@ from smartfood_auth import AuthContext, headers_for
 
 from .test_service import FakeBus, FakeCourier, FakeGeo, RecordingEvents
 
-SYSTEM = headers_for(AuthContext(sub="svc:order-worker", role="system"))
-RIDER = headers_for(AuthContext(sub="r1", role="rider", rider_id="r1"))
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
+SYSTEM = headers_for(AuthContext(sub="svc:order-worker", roles=frozenset({"system"})))
+RIDER = headers_for(AuthContext(sub="r1", roles=frozenset({"rider"}), rider_id="r1"))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
 
 PICKUP = {"lat": 39.7912, "lon": -89.6644}
 DROPOFF = {"lat": 39.8025, "lon": -89.6478}
@@ -121,7 +121,7 @@ def test_foreign_taps_map_to_409(client):
     client.post(
         f"/v1/rider/offers/{offer['offer_id']}/accept", json={"order_id": "ord_1"}, headers=RIDER
     )
-    intruder = headers_for(AuthContext(sub="r9", role="rider", rider_id="r9"))
+    intruder = headers_for(AuthContext(sub="r9", roles=frozenset({"rider"}), rider_id="r9"))
     assert client.post("/v1/rider/deliveries/ord_1/pickup", headers=intruder).status_code == 409
     assert (
         client.post("/v1/rider/deliveries/ord_1/deliver", headers=RIDER).status_code == 409
@@ -152,7 +152,7 @@ def test_courier_dot_is_ownership_scoped(client):
     )
     mine = client.get("/v1/deliveries/ord_1/courier", headers=CUSTOMER)
     assert mine.status_code == 200 and mine.json()["state"] == "ASSIGNED"
-    intruder = headers_for(AuthContext(sub="usr_2", role="customer"))
+    intruder = headers_for(AuthContext(sub="usr_2", roles=frozenset({"customer"})))
     assert client.get("/v1/deliveries/ord_1/courier", headers=intruder).status_code == 404
     assert client.get("/v1/deliveries/ord_ghost/courier", headers=CUSTOMER).status_code == 404
 

@@ -14,10 +14,14 @@ from order.domain.ports import SagaGone, SagaUnavailable
 from order.main import create_app
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
-OWNER = headers_for(AuthContext(sub="usr_9", role="restaurant_admin", restaurant_id="rst_1"))
-OTHER = headers_for(AuthContext(sub="usr_8", role="restaurant_admin", restaurant_id="rst_other"))
-NO_CLAIM = headers_for(AuthContext(sub="usr_7", role="restaurant_admin"))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
+OWNER = headers_for(
+    AuthContext(sub="usr_9", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_1")
+)
+OTHER = headers_for(
+    AuthContext(sub="usr_8", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_other")
+)
+NO_CLAIM = headers_for(AuthContext(sub="usr_7", roles=frozenset({"restaurant_admin"})))
 
 TO_CONFIRMED = [
     ("PLACED", "VALIDATED"),

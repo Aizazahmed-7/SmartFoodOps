@@ -5,11 +5,13 @@ from smartfood_auth import AuthContext, headers_for
 
 def admin(restaurant_id: str) -> dict[str, str]:
     return headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=restaurant_id)
+        AuthContext(
+            sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=restaurant_id
+        )
     )
 
 
-SYSTEM = headers_for(AuthContext(sub="svc:order-worker", role="system"))
+SYSTEM = headers_for(AuthContext(sub="svc:order-worker", roles=frozenset({"system"})))
 
 
 def test_set_stock_creates_then_updates(client):
@@ -90,7 +92,7 @@ def test_stock_bounds_and_role_gate(client):
         ).status_code
         == 422
     )
-    customer = {"X-Auth-Sub": "usr_c", "X-Auth-Role": "customer"}
+    customer = {"X-Auth-Sub": "usr_c", "X-Auth-Roles": "customer"}
     assert (
         client.put(
             "/v1/inventory/restaurants/rst_1/stock/itm_a",

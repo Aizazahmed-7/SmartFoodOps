@@ -3,11 +3,12 @@ this handler is smartfood_kafka.EventConsumer, tested in its own lib."""
 
 import asyncio
 import json
+from datetime import UTC, datetime
 
 import sqlalchemy as sa
 from identity.config import Settings
 from identity.consumers import GrantConvergenceHandler
-from identity.db import metadata, processed_events, users
+from identity.db import metadata, processed_events, restaurant_owners, user_roles, users
 from identity.domain.service import IdentityService
 from identity.keys import load_or_generate
 from smartfood_auth import TokenIssuer
@@ -66,6 +67,16 @@ async def _user_row(sessions):
         return (await s.execute(sa.select(users))).one()
 
 
+async def _roles_held(sessions) -> set[str]:
+    async with sessions() as s:
+        return set((await s.execute(sa.select(user_roles.c.role))).scalars())
+
+
+async def _owner_brand(sessions) -> str | None:
+    async with sessions() as s:
+        return (await s.execute(sa.select(restaurant_owners.c.brand_id))).scalar_one_or_none()
+
+
 async def _processed_count(sessions) -> int:
     async with sessions() as s:
         return (
@@ -76,8 +87,10 @@ async def _processed_count(sessions) -> int:
 async def test_event_promotes_owner_and_marks_processed(tmp_path):
     handler, sessions, user_id = await _harness(tmp_path)
     await handler.handle(_event(user_id))
-    user = await _user_row(sessions)
-    assert (user.role, user.restaurant_id) == ("restaurant_admin", "rst_9")
+    # The role SET is what authorization reads — and `customer` survives
+    # promotion, which the old single column destroyed.
+    assert await _roles_held(sessions) == {"customer", "restaurant_admin"}
+    assert await _owner_brand(sessions) == "rst_9"
     assert await _processed_count(sessions) == 1
 
 
@@ -105,8 +118,7 @@ async def test_any_surviving_event_converges_the_grant(tmp_path):
     from whatever event survives, because every payload carries the owner."""
     handler, sessions, user_id = await _harness(tmp_path)
     await handler.handle(_event(user_id, event_type="ItemAdded"))  # the survivor
-    user = await _user_row(sessions)
-    assert (user.role, user.restaurant_id) == ("restaurant_admin", "rst_9")
+    assert await _owner_brand(sessions) == "rst_9"
     assert await _processed_count(sessions) == 1
 
 
@@ -119,17 +131,21 @@ async def test_non_restaurant_or_ownerless_events_are_ignored(tmp_path):
     ownerless["payload"] = json.dumps({"name": "Biryani House"})
     await handler.handle(ownerless)
     assert await _processed_count(sessions) == 0  # not even marked
-    assert (await _user_row(sessions)).role == "customer"
+    assert await _roles_held(sessions) == {"customer"}  # never promoted
 
 
 async def test_unappliable_grant_is_marked_not_poisonous(tmp_path):
     handler, sessions, user_id = await _harness(tmp_path)
     async with sessions() as s:  # a rider can't own restaurants → GrantConflict
-        await s.execute(users.update().values(role="rider"))
+        await s.execute(
+            user_roles.insert().values(user_id=user_id, role="rider", granted_at=datetime.now(UTC))
+        )
         await s.commit()
     await handler.handle(_event(user_id))
     assert await _processed_count(sessions) == 1  # marked → can't loop forever
-    assert (await _user_row(sessions)).role == "rider"  # untouched
+    # Refused, and nothing half-applied: no owner role, no owner row.
+    assert await _roles_held(sessions) == {"customer", "rider"}
+    assert await _owner_brand(sessions) is None
 
 
 async def test_unknown_owner_is_marked_not_poisonous(tmp_path):
@@ -177,8 +193,7 @@ async def test_brand_id_in_payload_wins_over_the_aggregate(tmp_path):
         {"owner_user_id": user_id, "name": "Biryani House", "brand_id": "brd_9"}
     )
     await handler.handle(branded)
-    user = await _user_row(sessions)
-    assert (user.role, user.restaurant_id) == ("restaurant_admin", "brd_9")
+    assert await _owner_brand(sessions) == "brd_9"
     assert await _processed_count(sessions) == 2
 
 
@@ -191,5 +206,4 @@ async def test_null_brand_id_falls_back_to_the_aggregate(tmp_path):
         {"owner_user_id": user_id, "name": "Biryani House", "brand_id": None}
     )
     await handler.handle(event)
-    user = await _user_row(sessions)
-    assert (user.role, user.restaurant_id) == ("restaurant_admin", "rst_9")
+    assert await _owner_brand(sessions) == "rst_9"

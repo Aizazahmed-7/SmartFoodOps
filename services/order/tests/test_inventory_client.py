@@ -36,7 +36,7 @@ async def test_reserve_created_and_replayed_are_ok():
 
         sent = json.loads(calls["requests"][0].content)
         assert sent["lines"] == [{"item_id": "itm_a", "qty": 2}]
-        assert calls["requests"][0].headers["x-auth-role"] == "system"
+        assert calls["requests"][0].headers["x-auth-roles"] == "system"
 
 
 async def test_reserve_business_outcomes_are_values():

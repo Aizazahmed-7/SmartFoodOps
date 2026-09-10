@@ -36,7 +36,7 @@ async def test_success_stamps_system_identity():
     request = calls["requests"][0]
     assert request.url.path == "/v1/internal/grants"
     assert request.headers["x-auth-sub"] == "svc:catalog"
-    assert request.headers["x-auth-role"] == "system"
+    assert request.headers["x-auth-roles"] == "system"
     assert request.headers["x-internal-caller"] == "catalog"
     assert json.loads(request.content) == {
         "user_id": "usr_1",

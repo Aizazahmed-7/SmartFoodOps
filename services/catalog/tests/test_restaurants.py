@@ -1,6 +1,6 @@
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_owner", role="customer"))
+CUSTOMER = headers_for(AuthContext(sub="usr_owner", roles=frozenset({"customer"})))
 
 BODY = {
     "name": "Biryani House",
@@ -11,7 +11,9 @@ BODY = {
 
 def _admin(restaurant_id: str) -> dict:
     return headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=restaurant_id)
+        AuthContext(
+            sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=restaurant_id
+        )
     )
 
 
@@ -123,6 +125,6 @@ def test_pause_vanished_restaurant_is_404(client):
 
 def test_system_admin_bypasses_scoping(client):
     restaurant_id = _create(client)["id"]
-    ops = headers_for(AuthContext(sub="usr_ops", role="system_admin"))
+    ops = headers_for(AuthContext(sub="usr_ops", roles=frozenset({"system_admin"})))
     r = client.patch(f"/v1/restaurants/{restaurant_id}", json={"name": "Renamed"}, headers=ops)
     assert r.status_code == 200

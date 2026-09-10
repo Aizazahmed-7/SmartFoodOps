@@ -37,7 +37,7 @@ async def test_success_stamps_system_identity_and_params():
     assert request.url.path == "/v1/internal/restaurants/rst_1/snapshot"
     assert request.url.params.get_list("item_ids") == ["itm_a", "itm_b"]
     assert request.headers["x-auth-sub"] == "svc:order"
-    assert request.headers["x-auth-role"] == "system"
+    assert request.headers["x-auth-roles"] == "system"
     assert request.headers["x-internal-caller"] == "order"
 
 

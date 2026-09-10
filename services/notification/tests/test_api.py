@@ -20,14 +20,14 @@ from notification.main import create_app
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-CUSTOMER = {"X-Auth-Sub": "usr_1", "X-Auth-Role": "customer"}
-OTHER_CUSTOMER = {"X-Auth-Sub": "usr_2", "X-Auth-Role": "customer"}
+CUSTOMER = {"X-Auth-Sub": "usr_1", "X-Auth-Roles": "customer"}
+OTHER_CUSTOMER = {"X-Auth-Sub": "usr_2", "X-Auth-Roles": "customer"}
 PARTNER = {
     "X-Auth-Sub": "usr_owner",
-    "X-Auth-Role": "restaurant_admin",
+    "X-Auth-Roles": "restaurant_admin",
     "X-Auth-Restaurant-Id": "rst_1",
 }
-RIDER = {"X-Auth-Sub": "usr_r", "X-Auth-Role": "rider"}
+RIDER = {"X-Auth-Sub": "usr_r", "X-Auth-Roles": "rider"}
 
 BASE = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
 

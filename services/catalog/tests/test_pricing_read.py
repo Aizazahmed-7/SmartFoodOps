@@ -3,17 +3,19 @@ missing ids, 86/paused reporting, bounds, cache bypass, torn reads."""
 
 from smartfood_auth import AuthContext, headers_for
 
-SYSTEM = headers_for(AuthContext(sub="svc:order-worker", role="system"))
+SYSTEM = headers_for(AuthContext(sub="svc:order-worker", roles=frozenset({"system"})))
 
 
 def _seed(client):
-    customer = headers_for(AuthContext(sub="usr_owner", role="customer"))
+    customer = headers_for(AuthContext(sub="usr_owner", roles=frozenset({"customer"})))
     rid = client.post(
         "/v1/restaurants",
         json={"name": "Biryani House", "city": "springfield", "cuisines": ["pakistani"]},
         headers=customer,
     ).json()["id"]
-    admin = headers_for(AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=rid))
+    admin = headers_for(
+        AuthContext(sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=rid)
+    )
     cat = client.post(
         f"/v1/restaurants/{rid}/categories", json={"name": "Mains"}, headers=admin
     ).json()
@@ -83,7 +85,7 @@ def test_pricing_read_cross_tenant_ids_are_missing(client):
     """Money-path ownership: another restaurant's item id must come back as
     missing, never priced — the WHERE clause is the guard."""
     rid_a, _, biryani, _ = _seed(client)
-    customer_b = headers_for(AuthContext(sub="usr_b", role="customer"))
+    customer_b = headers_for(AuthContext(sub="usr_b", roles=frozenset({"customer"})))
     rid_b = client.post(
         "/v1/restaurants",
         json={"name": "Burger Barn", "city": "springfield", "cuisines": ["burgers"]},
@@ -97,7 +99,7 @@ def test_pricing_read_cross_tenant_ids_are_missing(client):
 def test_pricing_read_auth_branches(client):
     rid, admin, biryani, _ = _seed(client)
     assert _read(client, rid, [biryani], headers={}).status_code == 401
-    customer = headers_for(AuthContext(sub="usr_owner", role="customer"))
+    customer = headers_for(AuthContext(sub="usr_owner", roles=frozenset({"customer"})))
     assert _read(client, rid, [biryani], headers=customer).status_code == 403
     assert _read(client, rid, [biryani], headers=admin).status_code == 403  # system ONLY
 

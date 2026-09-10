@@ -4,8 +4,8 @@ the full lifecycle through routes."""
 from payment.domain.ports import GatewayResult, PspUnavailable
 from smartfood_auth import AuthContext, headers_for
 
-SYSTEM = headers_for(AuthContext(sub="svc:order-worker", role="system"))
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
+SYSTEM = headers_for(AuthContext(sub="svc:order-worker", roles=frozenset({"system"})))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
 
 
 def auth_body(amount=3446):

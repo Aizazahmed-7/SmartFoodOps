@@ -6,7 +6,7 @@ import uuid
 from order.adapters.repo import OrderRepo
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
 
 
 def _headers(key=None):
@@ -169,9 +169,33 @@ def test_paused_restaurant_blocks_placement(client, catalog, make_snapshot, make
 def test_owner_can_place_orders_too(client, catalog, make_snapshot, make_order_body):
     """The Purchaser-gate lesson, applied to placement from day one."""
     catalog.snapshot = make_snapshot()
-    owner = headers_for(AuthContext(sub="usr_1", role="restaurant_admin", restaurant_id="rst_9"))
+    owner = headers_for(
+        AuthContext(sub="usr_1", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_9")
+    )
     r = client.post(
         "/v1/orders", json=make_order_body(), headers={**owner, "Idempotency-Key": "k-own"}
+    )
+    assert r.status_code == 202
+
+
+def test_owner_who_kept_customer_can_place_orders(client, catalog, make_snapshot, make_order_body):
+    """The same lesson under multi-role, on the money path.
+
+    Before this change `users.role` OVERWROTE customer on promotion, so the
+    Purchaser gate had to name restaurant_admin explicitly at every
+    customer-facing endpoint — a bug CLAUDE.md records as recurring. A
+    promoted owner now genuinely HOLDS customer, and this pins that the gate
+    accepts the set rather than one privileged member of it."""
+    catalog.snapshot = make_snapshot()
+    owner = headers_for(
+        AuthContext(
+            sub="usr_1",
+            roles=frozenset({"customer", "restaurant_admin"}),
+            restaurant_id="rst_9",
+        )
+    )
+    r = client.post(
+        "/v1/orders", json=make_order_body(), headers={**owner, "Idempotency-Key": "k-own-multi"}
     )
     assert r.status_code == 202
 

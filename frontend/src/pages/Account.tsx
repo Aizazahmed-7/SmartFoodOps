@@ -46,7 +46,7 @@ export default function Account() {
     <div className="mx-auto max-w-2xl space-y-8">
       <Section title="Profile">
         <div className="card space-y-3">
-          <p className="text-sm text-slate-400">{profile.data?.email} · {profile.data?.role}</p>
+          <p className="text-sm text-slate-400">{profile.data?.email} · {profile.data?.roles?.join(" · ")}</p>
           <input className="input" placeholder="Full name"
             value={name ?? profile.data?.full_name ?? ""}
             onChange={(e) => setName(e.target.value)} />

@@ -19,7 +19,7 @@ class TokenPairData:
 class Profile:
     id: str
     email: str
-    role: str
+    roles: tuple[str, ...]
     full_name: str | None
     phone: str | None
 

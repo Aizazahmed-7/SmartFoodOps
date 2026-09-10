@@ -90,7 +90,7 @@ def make_client(fake: FakeRedis, clock: Clock) -> TestClient:
 
 
 def bearer(sub="usr_1") -> dict:
-    return {"Authorization": f"Bearer {ISSUER.issue(sub=sub, role='customer')}"}
+    return {"Authorization": f"Bearer {ISSUER.issue(sub=sub, roles=['customer'])}"}
 
 
 def _denials(route_class: str) -> float:

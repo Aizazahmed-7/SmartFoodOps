@@ -62,8 +62,8 @@ def client(upstream):
         yield c
 
 
-def bearer(role="customer", **kw) -> dict:
-    return {"Authorization": f"Bearer {ISSUER.issue(sub='usr_1', role=role, **kw)}"}
+def bearer(roles=frozenset({"customer"}), **kw) -> dict:
+    return {"Authorization": f"Bearer {ISSUER.issue(sub='usr_1', roles=roles, **kw)}"}
 
 
 def test_public_route_forwards_without_token(client, upstream):
@@ -76,10 +76,17 @@ def test_spoofed_identity_headers_are_stripped(client, upstream):
     client.post(
         "/v1/auth/login",
         json={},
-        headers={"X-Auth-Sub": "usr_evil", "X-Auth-Role": "system_admin"},
+        headers={
+            "X-Auth-Sub": "usr_evil",
+            "X-Auth-Role": "system_admin",
+            "X-Auth-Roles": "system,system_admin",
+        },
     )
     assert "x-auth-sub" not in upstream.last.headers
     assert "x-auth-role" not in upstream.last.headers
+    # The multi-role header is trusted downstream too, so a client copy of it
+    # would be self-service privilege escalation.
+    assert "x-auth-roles" not in upstream.last.headers
 
 
 def test_auth_route_without_token_is_401(client):
@@ -97,22 +104,31 @@ def test_valid_token_becomes_stamped_headers(client, upstream):
     assert r.status_code == 201
     fwd = upstream.last.headers
     assert fwd["x-auth-sub"] == "usr_1"
-    assert fwd["x-auth-role"] == "customer"
+    assert fwd["x-auth-roles"] == "customer"
     assert "authorization" not in fwd  # token is not the services' business
 
 
 def test_scoping_claims_forwarded(client, upstream):
-    client.get("/v1/auth/me", headers=bearer(role="restaurant_admin", restaurant_id="rest_7"))
+    client.get(
+        "/v1/auth/me", headers=bearer(roles=frozenset({"restaurant_admin"}), restaurant_id="rest_7")
+    )
     assert upstream.last.headers["x-auth-restaurant-id"] == "rest_7"
 
 
 def test_spoof_plus_valid_token_still_uses_claims(client, upstream):
     client.get(
         "/v1/auth/me",
-        headers={**bearer(), "X-Auth-Sub": "usr_evil", "X-Auth-Role": "system_admin"},
+        headers={
+            **bearer(),
+            "X-Auth-Sub": "usr_evil",
+            "X-Auth-Role": "system_admin",
+            "X-Auth-Roles": "system,system_admin",
+        },
     )
     assert upstream.last.headers["x-auth-sub"] == "usr_1"
-    assert upstream.last.headers["x-auth-role"] == "customer"
+    assert upstream.last.headers["x-auth-roles"] == "customer"
+    # Re-stamped from the VERIFIED claims, not from what the client sent.
+    assert upstream.last.headers["x-auth-roles"] == "customer"
 
 
 def test_public_read_get_is_anonymous_but_write_needs_token(client, upstream):
@@ -136,7 +152,7 @@ def test_unknown_path_is_404(client):
 
 def test_expired_token_gets_distinct_code(client):
     expired = TokenIssuer(KEY, issuer=ISS, audience=AUD, ttl_seconds=-10).issue(
-        sub="u1", role="customer"
+        sub="u1", roles=["customer"]
     )
     r = client.get("/v1/auth/me", headers={"Authorization": f"Bearer {expired}"})
     assert r.status_code == 401
@@ -176,7 +192,7 @@ def test_public_read_write_needs_token(client, upstream):
     assert upstream.requests == []
     with_token = client.post("/v1/restaurants", json={"name": "X"}, headers=bearer())
     assert with_token.status_code == 201  # forwarded
-    assert upstream.last.headers["x-auth-role"] == "customer"
+    assert upstream.last.headers["x-auth-roles"] == "customer"
 
 
 def test_internal_paths_are_unroutable(client, upstream):
@@ -199,7 +215,9 @@ def test_restaurant_singular_routes_to_order_not_catalog(client, upstream):
     """/v1/restaurant (the kitchen surface, S6) is an ORDER route behind
     auth; /v1/restaurants (catalog browse) stays anonymous — the prefix
     matcher requires a '/' boundary, so the names never collide."""
-    r = client.post("/v1/restaurant/orders/ord_1/accept", headers=bearer(role="restaurant_admin"))
+    r = client.post(
+        "/v1/restaurant/orders/ord_1/accept", headers=bearer(roles=frozenset({"restaurant_admin"}))
+    )
     assert r.status_code == 503  # reached the ORDER upstream (down.test in this fixture)
 
     r = client.get("/v1/restaurants/rst_1")
@@ -228,7 +246,9 @@ def test_notifications_forward_to_notification_service(client, upstream):
 def test_restaurant_analytics_outranks_the_kitchen_prefix(client, upstream):
     """Longest-prefix routing: /v1/restaurant/analytics must reach the
     analytics service while /v1/restaurant/orders stays with order."""
-    r = client.get("/v1/restaurant/analytics", headers=bearer(role="restaurant_admin"))
+    r = client.get(
+        "/v1/restaurant/analytics", headers=bearer(roles=frozenset({"restaurant_admin"}))
+    )
     assert r.status_code == 201
     assert upstream.last.url.host == "analytics.svc"
 

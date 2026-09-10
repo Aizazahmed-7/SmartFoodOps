@@ -17,7 +17,9 @@ from .test_consumer import StockProvisioningHandler, _catalog_event, _service
 
 def _admin(restaurant_id: str) -> dict[str, str]:
     return headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=restaurant_id)
+        AuthContext(
+            sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=restaurant_id
+        )
     )
 
 

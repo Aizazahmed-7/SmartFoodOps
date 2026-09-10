@@ -7,9 +7,14 @@ export interface TokenPair {
   expires_in: number;
 }
 
+export type Role = "customer" | "restaurant_admin" | "rider" | "system_admin";
+
 export interface Claims {
   sub: string;
-  role: "customer" | "restaurant_admin" | "rider" | "system_admin";
+  // A SET since multi-role: a promoted owner keeps `customer`. Optional
+  // because zustand persists claims — a returning user may still hold a
+  // token minted before this claim existed, until their next refresh.
+  roles?: Role[];
   restaurant_id?: string;
   rider_id?: string;
   exp: number;
@@ -18,7 +23,7 @@ export interface Claims {
 export interface Profile {
   id: string;
   email: string;
-  role: string;
+  roles: string[];
   full_name: string | null;
   phone: string | null;
 }

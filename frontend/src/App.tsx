@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Link, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { onboardRestaurant } from "./api/client";
-import { useAuth } from "./state/auth";
+import { useAuth, hasRole } from "./state/auth";
 import { useCart } from "./state/cart";
 import NotificationBell from "./components/NotificationBell";
 import Account from "./pages/Account";
@@ -37,9 +37,9 @@ function Header() {
           <NavLink to="/" end className={tab}>Browse</NavLink>
           <NavLink to="/search" className={tab}>Search</NavLink>
           <NavLink to="/orders" className={tab}>Orders</NavLink>
-          {claims?.role === "restaurant_admin" ? (
+          {hasRole(claims, "restaurant_admin") ? (
             <NavLink to="/partner/dashboard" className={tab}>My restaurant</NavLink>
-          ) : claims?.role === "rider" ? (
+          ) : hasRole(claims, "rider") ? (
             <NavLink to="/rider" className={tab}>Deliver</NavLink>
           ) : (
             <NavLink to="/partner" className={tab}>Become a partner</NavLink>

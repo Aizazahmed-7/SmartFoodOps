@@ -40,7 +40,6 @@ Seed catalog (grows only via PR):
 | `IDEMPOTENCY_IN_PROGRESS` | 409 | Concurrent duplicate while first attempt runs; `Retry-After: 1` (§4) |
 | `AUTH_INVALID_CREDENTIALS` | 401 | Login failed (never says which field was wrong) |
 | `AUTH_TOKEN_EXPIRED` | 401 | Access token expired — refresh |
-| `AUTH_REFRESH_REUSED` | 401 | Refresh-token reuse detected — family revoked |
 | `FORBIDDEN_ROLE` | 403 | Authenticated, wrong role for the route |
 | `NOT_FOUND` | 404 | Doesn't exist *or* isn't yours |
 | `GRANT_CONFLICT` | 409 | Role/scoping grant refused: user already scoped elsewhere or role ineligible (onboarding) |

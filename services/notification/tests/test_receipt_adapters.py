@@ -120,7 +120,7 @@ def test_contact_lookup_speaks_system_identity():
     assert request.url.path == "/v1/internal/users/usr_1"
     # The whole point of the internal surface: the worker authenticates as
     # a SYSTEM caller, stamped by the shared helper — never a user token.
-    assert request.headers["x-auth-role"] == "system"
+    assert request.headers["x-auth-roles"] == "system"
     assert request.headers["x-internal-caller"] == "notification-worker"
 
 

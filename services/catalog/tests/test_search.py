@@ -5,7 +5,7 @@ from smartfood_auth import AuthContext, headers_for
 
 
 def _seed_restaurant(client, sub="usr_owner", name="Biryani House"):
-    customer = headers_for(AuthContext(sub=sub, role="customer"))
+    customer = headers_for(AuthContext(sub=sub, roles=frozenset({"customer"})))
     return client.post(
         "/v1/restaurants",
         json={"name": name, "city": "springfield", "cuisines": ["pakistani", "bbq"]},

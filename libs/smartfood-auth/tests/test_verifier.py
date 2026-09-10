@@ -28,16 +28,17 @@ def make_verifier(jwks_docs: list[dict], min_refetch_interval: float = 5.0) -> J
 
 async def test_round_trip():
     key = generate_rsa_key()
-    token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(sub="u1", role="customer")
+    token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(sub="u1", roles=["customer"])
     claims = await make_verifier([jwks([key])]).verify(token)
     assert claims["sub"] == "u1"
-    assert claims["role"] == "customer"
+    assert claims["roles"] == ["customer"]
+    assert "role" not in claims  # the legacy single-role claim is retired
 
 
 async def test_scoping_claims_survive():
     key = generate_rsa_key()
     token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(
-        sub="u2", role="restaurant_admin", restaurant_id="rest_9"
+        sub="u2", roles=["customer", "restaurant_admin"], restaurant_id="rest_9"
     )
     claims = await make_verifier([jwks([key])]).verify(token)
     assert claims["restaurant_id"] == "rest_9"
@@ -46,7 +47,7 @@ async def test_scoping_claims_survive():
 async def test_expired_token_rejected():
     key = generate_rsa_key()
     token = TokenIssuer(key, issuer=ISS, audience=AUD, ttl_seconds=-10).issue(
-        sub="u1", role="customer"
+        sub="u1", roles=["customer"]
     )
     with pytest.raises(jwt.ExpiredSignatureError):
         await make_verifier([jwks([key])]).verify(token)
@@ -54,7 +55,9 @@ async def test_expired_token_rejected():
 
 async def test_wrong_audience_rejected():
     key = generate_rsa_key()
-    token = TokenIssuer(key, issuer=ISS, audience="someone-else").issue(sub="u1", role="customer")
+    token = TokenIssuer(key, issuer=ISS, audience="someone-else").issue(
+        sub="u1", roles=["customer"]
+    )
     with pytest.raises(jwt.InvalidAudienceError):
         await make_verifier([jwks([key])]).verify(token)
 
@@ -66,17 +69,17 @@ async def test_unknown_kid_triggers_refetch():
     # a rotation token arriving within the ~5s clamp gets one retriable 401.
     verifier = make_verifier([jwks([old]), jwks([old, new])], min_refetch_interval=0.0)
 
-    old_token = TokenIssuer(old, issuer=ISS, audience=AUD).issue(sub="u1", role="customer")
+    old_token = TokenIssuer(old, issuer=ISS, audience=AUD).issue(sub="u1", roles=["customer"])
     assert (await verifier.verify(old_token))["sub"] == "u1"  # primes cache with old only
 
-    new_token = TokenIssuer(new, issuer=ISS, audience=AUD).issue(sub="u2", role="customer")
+    new_token = TokenIssuer(new, issuer=ISS, audience=AUD).issue(sub="u2", roles=["customer"])
     assert (await verifier.verify(new_token))["sub"] == "u2"  # unknown kid → refetch → ok
 
 
 async def test_rider_scoping_claims_survive():
     key = generate_rsa_key()
     token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(
-        sub="u3", role="rider", rider_id="rid_7"
+        sub="u3", roles=["customer", "rider"], rider_id="rid_7"
     )
     claims = await make_verifier([jwks([key])]).verify(token)
     assert claims["rider_id"] == "rid_7"
@@ -108,7 +111,7 @@ async def test_stale_cache_refetches_on_next_verify():
         min_refetch_interval=0.0,
         http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(sub="u1", role="customer")
+    token = TokenIssuer(key, issuer=ISS, audience=AUD).issue(sub="u1", roles=["customer"])
     await verifier.verify(token)
     await verifier.verify(token)  # kid is cached, but stale → refetch
     assert calls["n"] == 2
@@ -117,7 +120,7 @@ async def test_stale_cache_refetches_on_next_verify():
 async def test_forged_token_rejected():
     """A token signed by a key NOT in the JWKS must fail signature verification."""
     trusted, attacker = generate_rsa_key(), generate_rsa_key()
-    forged = TokenIssuer(attacker, issuer=ISS, audience=AUD).issue(sub="u1", role="system_admin")
+    forged = TokenIssuer(attacker, issuer=ISS, audience=AUD).issue(sub="u1", roles=["system_admin"])
     with pytest.raises(jwt.InvalidTokenError):
         await make_verifier([jwks([trusted])]).verify(forged)
 
@@ -148,11 +151,11 @@ async def test_unknown_kid_spam_does_not_refetch_within_clamp():
         audience=AUD,
         http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
-    good = TokenIssuer(key, issuer=ISS, audience=AUD).issue(sub="u1", role="customer")
+    good = TokenIssuer(key, issuer=ISS, audience=AUD).issue(sub="u1", roles=["customer"])
     await verifier.verify(good)  # primes the cache: fetch #1
 
     attacker = generate_rsa_key()
-    forged = TokenIssuer(attacker, issuer=ISS, audience=AUD).issue(sub="u1", role="system_admin")
+    forged = TokenIssuer(attacker, issuer=ISS, audience=AUD).issue(sub="u1", roles=["system_admin"])
     for _ in range(20):
         with pytest.raises(jwt.InvalidTokenError):
             await verifier.verify(forged)

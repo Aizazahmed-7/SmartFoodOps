@@ -12,8 +12,8 @@ from order.config import Settings
 from order.main import create_app
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
-STRANGER = headers_for(AuthContext(sub="usr_2", role="customer"))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
+STRANGER = headers_for(AuthContext(sub="usr_2", roles=frozenset({"customer"})))
 
 
 class FakeTracking:

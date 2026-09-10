@@ -4,8 +4,8 @@ role gates, and the id-dedupe contract with catalog."""
 from order.domain.ports import RestaurantNotFound, SnapshotUnavailable
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
-RIDER = headers_for(AuthContext(sub="usr_2", role="rider"))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
+RIDER = headers_for(AuthContext(sub="usr_2", roles=frozenset({"rider"})))
 
 
 def _menu_items():
@@ -142,10 +142,12 @@ def test_catalog_down_maps_to_503_with_retry_after(client, catalog):
 def test_role_gates(client, catalog, make_snapshot):
     catalog.snapshot = make_snapshot(items=_menu_items())
     assert client.post("/v1/quote", json=body(), headers=RIDER).status_code == 403
-    system = headers_for(AuthContext(sub="svc:x", role="system"))
+    system = headers_for(AuthContext(sub="svc:x", roles=frozenset({"system"})))
     assert client.post("/v1/quote", json=body(), headers=system).status_code == 200
     # A promoted owner still orders dinner (found live: demo owner 403'd).
-    owner = headers_for(AuthContext(sub="usr_3", role="restaurant_admin", restaurant_id="rst_9"))
+    owner = headers_for(
+        AuthContext(sub="usr_3", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_9")
+    )
     assert client.post("/v1/quote", json=body(), headers=owner).status_code == 200
 
 
