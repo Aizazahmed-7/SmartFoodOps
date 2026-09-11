@@ -32,7 +32,7 @@ Temporal-owned order saga. Past design phase; W1/W2/W3 largely built and live-pr
 - `services/` — edge-bff, identity, catalog, inventory, order, payment, notification, analytics, dispatch, rider-gateway
 - `libs/` — smartfood-{api,auth,idempotency,kafka,otel,outbox,pricing,realtime} (shared, py.typed, strict)
 - `tools/` — mock-psp, mock-mailer, seed, demo, rider-sim, canary
-- `docs/adr/` — **34 ADRs, authoritative for architecture decisions.** `docs/reviews/*-walkthrough.md` = milestone build records.
+- `docs/adr/` — **39 ADRs, authoritative for architecture decisions.** `docs/reviews/*-walkthrough.md` = milestone build records.
 - `docs/local-dev.md` — **full port map + troubleshooting; read it before touching ports/compose.**
 
 ## Non-obvious invariants (violating these breaks things silently)
@@ -54,8 +54,20 @@ Temporal-owned order saga. Past design phase; W1/W2/W3 largely built and live-pr
   growth is per-login but still unbounded. A logout should `DELETE` the row, never flag it.
 - **Idempotency**: `complete()` joins the CALLER's tx so the stored response commits with the business write;
   deterministic refusals `release()` the key (no TTL squatting).
+- **Outbox event ids are random uuid4** (ADR-0035) and dedupe nothing. What makes a replayed emit safe is
+  that every staging site writes its aggregate row FIRST in the same tx and loses to that row's own PK or
+  guarded transition — a new `stage_event` call site without that guard is a correctness bug.
 - **Menu cache is cache-aside, 5-min TTL** (ADR-0027) — the versioned blob+pointer scheme is retired. Checkout
   prices from the snapshot endpoint, which bypasses cache by design.
+- **No table carries a `version` column** (ADR-0039). Every guarded write keys on the state it protects
+  (`status = :expected`, `available >= :qty`, `active < capacity`, a composite PK) — if you add a version
+  back, make it a real CAS in the WHERE clause, never a counter in a SET list.
+- **Catalog's multi-query reads open a REPEATABLE READ snapshot FIRST** (ADR-0037, `repo.begin_snapshot()`).
+  Postgres cannot change the level after the first statement, so a query added above that call silently
+  downgrades the read — the ordering tests are the only guard.
+- **Placement consents to `expected_total_cents`, not a menu version** (ADR-0036). It is consent, never an
+  asserted price: the server reprices and 409s `PRICE_CHANGED` on mismatch. The FE sends the total off the
+  quote object it is rendering, so shown-price vs placed-price cannot diverge.
 - **Brands are rows in `restaurants`** (ADR-0028, `kind=brand|branch`); the claim carries the BRAND id
   (wire name `X-Auth-Restaurant-Id` unchanged). Base menu edits fan out to every branch in one all-or-nothing tx.
 

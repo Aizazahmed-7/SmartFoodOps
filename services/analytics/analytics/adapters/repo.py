@@ -76,7 +76,6 @@ def event_values(event_type: str, payload: dict[str, Any]) -> dict[str, Any] | N
         "restaurant_id": payload["restaurant_id"],
         "user_id": payload.get("user_id", ""),
         "status": payload["status"],
-        "aggregate_version": int(payload.get("aggregate_version", 0)),
         "total_cents": _total_cents(payload),
         "updated_at": occurred,
         milestone: occurred,

@@ -95,7 +95,6 @@ class InventoryService:
                 item_id=r.item_id,
                 restaurant_id=r.restaurant_id,
                 available=r.available,
-                version=r.version,
             )
             for r in rows
         ]
@@ -106,8 +105,7 @@ class InventoryService:
         now = _now()
         async with self._sessions() as session:
             repo = InventoryRepo(session)
-            updated = await repo.update_stock(restaurant_id, item_id, available, now)
-            if updated is None:
+            if await repo.update_stock(restaurant_id, item_id, available, now) is None:
                 if not await repo.insert_stock(restaurant_id, item_id, available, now):
                     # Lost an insert race for THIS exact (branch, item) pair —
                     # under the composite key that is the only way to conflict
@@ -115,32 +113,23 @@ class InventoryService:
                     # ADR-0028) — so the row exists now: take the update path.
                     raced = await repo.update_stock(restaurant_id, item_id, available, now)
                     assert raced is not None  # the conflicting row is ours by key
-                    version = raced.version
-                else:
-                    version = 0
-            else:
-                version = updated.version
             await repo.stage_event(
                 aggregate_type="stock",
                 # One stock ledger per (branch, item): a shared base item has
-                # an independent count — and version — at every branch, so the
-                # aggregate must carry both or two branches' bumps would mint
-                # colliding deterministic event ids (ADR-0028).
+                # an independent count at every branch, so the aggregate must
+                # carry both (ADR-0028). It is also the Kafka partition key,
+                # which is what keeps one branch's adjustments in order.
                 aggregate_id=f"{restaurant_id}:{item_id}",
-                version=version,
                 event_type=EventType.STOCK_ADJUSTED,
                 payload={
                     "item_id": item_id,
                     "restaurant_id": restaurant_id,
                     "available": available,
-                    "version": version,
                 },
                 now=now,
             )
             await session.commit()
-        return StockRow(
-            item_id=item_id, restaurant_id=restaurant_id, available=available, version=version
-        )
+        return StockRow(item_id=item_id, restaurant_id=restaurant_id, available=available)
 
     async def set_capacity(self, restaurant_id: str, capacity: int) -> tuple[int, int]:
         """Returns (capacity, active). Lowering below current active is legal:
@@ -199,7 +188,6 @@ class InventoryService:
             await repo.stage_event(
                 aggregate_type="reservation",
                 aggregate_id=order_id,
-                version=0,
                 event_type=EventType.STOCK_RESERVED,
                 payload={
                     "order_id": order_id,
@@ -239,7 +227,6 @@ class InventoryService:
             await repo.stage_event(
                 aggregate_type="reservation",
                 aggregate_id=order_id,
-                version=finished.version,
                 event_type=EventType.RESERVATION_RELEASED,
                 payload={
                     "order_id": order_id,
@@ -266,7 +253,6 @@ class InventoryService:
             await repo.stage_event(
                 aggregate_type="reservation",
                 aggregate_id=order_id,
-                version=finished.version,
                 event_type=EventType.RESERVATION_CONSUMED,
                 payload={
                     "order_id": order_id,

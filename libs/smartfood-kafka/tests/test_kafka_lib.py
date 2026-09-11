@@ -24,7 +24,6 @@ EVENT = {
     "event_type": "RestaurantCreated",
     "aggregate_type": "restaurant",
     "aggregate_id": "rst_1",
-    "aggregate_version": 1,
     "occurred_at": datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
     "cell_id": "c1",
     "payload": json.dumps({"owner_user_id": "usr_1"}),

@@ -31,7 +31,6 @@ payments = sa.Table(
     sa.Column("payment_intent_id", sa.Text, nullable=True),  # the PSP's ref
     sa.Column("capture_before", sa.TIMESTAMP(timezone=True), nullable=True),
     # Outbox event-id determinism: bumped on every state change.
-    sa.Column("version", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.CheckConstraint(f"status IN {PAYMENT_STATUSES!r}", name="ck_payments_status"),

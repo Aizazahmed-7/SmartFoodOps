@@ -107,7 +107,6 @@ class OrderActivities:
                     restaurant_name=placement.restaurant_name,
                     card_token=placement.card_token,
                     request_hash=placement.request_hash,
-                    menu_version=placement.menu_version,
                     pricing_snapshot=placement.pricing_snapshot,
                     address_snapshot=placement.address_snapshot,
                     lines=lines,
@@ -115,7 +114,6 @@ class OrderActivities:
                 )
                 await repo.stage_event(
                     order_id=placement.order_id,
-                    version=0,
                     event_type=EventType.ORDER_PLACED,
                     payload={
                         "order_id": placement.order_id,
@@ -124,7 +122,6 @@ class OrderActivities:
                         "brand_id": placement.brand_id,
                         "restaurant_name": placement.restaurant_name,
                         "status": "PLACED",
-                        "menu_version": placement.menu_version,
                         "items": lines,
                         "totals": placement.pricing_snapshot,
                         "delivery_address": placement.address_snapshot,

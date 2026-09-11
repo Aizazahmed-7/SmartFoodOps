@@ -12,7 +12,7 @@ function ModifierDialog({
   item, restaurant, onClose,
 }: {
   item: MenuItem;
-  restaurant: { id: string; name: string; version: number };
+  restaurant: { id: string; name: string };
   onClose: () => void;
 }) {
   const add = useCart((c) => c.add);
@@ -120,7 +120,6 @@ export default function RestaurantPage() {
   const restaurant = {
     id: menu.restaurant_id,
     name: menu.display_name ?? menu.name,
-    version: menu.version,
   };
 
   return (

@@ -71,7 +71,7 @@ $ make up-obs        # otel-collector, Jaeger, Prometheus, Grafana (W3)
 
 Jaeger (http://localhost:16686) → search tag `order_id={order_id}`. The trace stitches edge-bff → order → Temporal activities → Kafka consumers, because outbox rows carry `traceparent` and the publisher lifts it into Kafka headers.
 
-**6. Inspect the raw event.** `make up-ui` starts Redpanda Console (http://localhost:8085). Browse `orders.events` and open the Avro-decoded `OrderPlaced` fact — note `event_id`, `aggregate_version`, `cell_id: c1`.
+**6. Inspect the raw event.** `make up-ui` starts Redpanda Console (http://localhost:8085). Browse `orders.events` and open the Avro-decoded `OrderPlaced` fact — note `event_id`, `aggregate_type`, `cell_id: c1`.
 
 **7. Start fake riders and watch dispatch** *(W3 — dispatch and `rider-sim` are not built yet)*.
 

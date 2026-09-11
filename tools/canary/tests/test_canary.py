@@ -46,10 +46,17 @@ def _world(overrides=None, confirm_after=1):
                     ],
                 },
             )
+        if path == "/v1/quote" and request.method == "POST":
+            assert json.loads(request.content)["lines"] == [{"item_id": "itm_a", "qty": 1}]
+            return httpx.Response(200, json={"totals": {"total_cents": 1499}})
         if path == "/v1/orders" and request.method == "POST":
             assert request.headers["Idempotency-Key"].startswith("canary-")
             body = json.loads(request.content)
             assert body["lines"] == [{"item_id": "itm_a", "qty": 1}]
+            # The canary must consent to the total it was QUOTED (ADR-0036),
+            # not to a number it made up — that is the client contract this
+            # probe exists to exercise.
+            assert body["expected_total_cents"] == 1499
             return httpx.Response(202, json={"order_id": "ord_c", "status": "PLACED"})
         if path == "/v1/orders/ord_c":
             polls["n"] += 1

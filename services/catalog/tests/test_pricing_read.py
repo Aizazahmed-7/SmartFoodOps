@@ -7,12 +7,17 @@ SYSTEM = headers_for(AuthContext(sub="svc:order-worker", roles=frozenset({"syste
 
 
 def _seed(client):
+    """Menu goes on the BRAND (it is the base menu); the snapshot is read
+    from the BRANCH, because that is what a customer orders from and the
+    only thing with a status the pricing engine can gate on (0009). The
+    branch inherits every base item, so the item ids are the same."""
     customer = headers_for(AuthContext(sub="usr_owner", roles=frozenset({"customer"})))
-    rid = client.post(
+    body = client.post(
         "/v1/restaurants",
         json={"name": "Biryani House", "city": "springfield", "cuisines": ["pakistani"]},
         headers=customer,
-    ).json()["id"]
+    ).json()
+    rid, branch = body["id"], body["branches"][0]["id"]
     admin = headers_for(
         AuthContext(sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=rid)
     )
@@ -44,7 +49,7 @@ def _seed(client):
         json={"category_id": cat["id"], "name": "Karahi", "price_cents": 1800},
         headers=admin,
     ).json()
-    return rid, admin, biryani["id"], karahi["id"]
+    return branch, admin, biryani["id"], karahi["id"]
 
 
 def _read(client, rid, item_ids, headers=SYSTEM):
@@ -62,7 +67,6 @@ def test_pricing_read_shape(client, cache):
     assert r.status_code == 200
     body = r.json()
     assert body["restaurant"]["status"] == "open"
-    assert body["restaurant"]["version"] == 4  # onboard + category + 2 items
     # Request order preserved, found only; ghost reported explicitly:
     assert [i["name"] for i in body["items"]] == ["Karahi", "Biryani"]
     assert body["missing_item_ids"] == ["itm_ghost"]
@@ -72,9 +76,17 @@ def test_pricing_read_shape(client, cache):
 
 
 def test_pricing_read_reports_86_and_paused(client):
+    """86 goes through the BASE-ITEM endpoint: the item belongs to the brand
+    (it is a base item), so a branch cannot PATCH it directly — a branch 86
+    is an override row, and the snapshot must render it as unavailable."""
     rid, admin, biryani, _ = _seed(client)
-    client.patch(f"/v1/restaurants/{rid}/items/{biryani}", json={"available": False}, headers=admin)
-    client.post(f"/v1/restaurants/{rid}/pause", headers=admin)
+    off = client.put(
+        f"/v1/restaurants/{rid}/base-items/{biryani}/availability",
+        json={"available": False},
+        headers=admin,
+    )
+    assert off.status_code == 200
+    assert client.post(f"/v1/restaurants/{rid}/pause", headers=admin).status_code == 200
     body = _read(client, rid, [biryani]).json()
     # The read reports truth; the pricing library decides the rejection.
     assert body["items"][0]["available"] is False

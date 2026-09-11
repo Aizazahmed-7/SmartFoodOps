@@ -63,7 +63,6 @@ def test_add_category(client):
     created = add_category(client, rid, admin)
     assert created["id"].startswith("cat_")
     assert created["name"] == "Mains"
-    assert created["version"] == 2  # onboard=1, category=2
 
 
 def test_add_category_auth_branches(client):
@@ -112,7 +111,6 @@ def test_update_category(client):
     )
     assert r.status_code == 200
     assert (r.json()["name"], r.json()["rank"]) == ("Starters", 3)
-    assert r.json()["version"] == 3
 
 
 def test_update_category_error_branches(client):
@@ -175,7 +173,6 @@ def test_add_item_full_shape(client):
     ]
     assert item["modifier_groups"][0]["options"][1]["price_delta_cents"] == 600
     assert item["available"] is True
-    assert item["version"] == 3  # onboard, category, item
 
 
 def test_add_item_category_branches(client):
@@ -353,8 +350,9 @@ def test_menu_nested_and_ordered(client):
     add_item(client, rid, admin, mains["id"], name="Biryani", rank=0, tags=[], modifier_groups=[])
     menu = client.get(f"/v1/menus/{rid}").json()
     assert menu["name"] == "Biryani House"
-    assert menu["status"] == "open"
-    assert menu["version"] == 5  # onboard + 2 categories + 2 items
+    # rid is the BRAND, so this is the base-menu view the partner console
+    # shows. A brand has no open/paused state (0009) — the branch does.
+    assert menu["status"] is None
     assert [c["name"] for c in menu["categories"]] == ["Starters", "Mains"]  # rank order
     assert [i["name"] for i in menu["categories"][1]["items"]] == ["Biryani", "Karahi"]
 

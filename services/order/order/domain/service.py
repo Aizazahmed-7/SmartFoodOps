@@ -161,9 +161,9 @@ class OrderService:
     # ── quote (S2) ─────────────────────────────────────────────────
 
     async def quote(self, restaurant_id: str, lines: list[Line]) -> PricedOrder:
-        """Price a cart against the CURRENT menu (expected_menu_version=None:
+        """Price a cart against the CURRENT menu (expected_total_cents=None:
         a quote self-heals across menu edits — the response carries the
-        version the client should re-pin its cart to)."""
+        total the client should re-pin its cart to)."""
         snapshot = await self._snapshot(restaurant_id, lines)
         return price_order(snapshot, lines, config=self._pricing)
 
@@ -176,7 +176,7 @@ class OrderService:
         idem_key: str,
         request_hash: str,
         restaurant_id: str,
-        menu_version: int,
+        expected_total_cents: int,
         lines: list[Line],
         address_id: str,
         card_token: str,
@@ -200,7 +200,7 @@ class OrderService:
             address = await self._identity.get_address(user_id, address_id)
             snapshot = await self._snapshot(restaurant_id, lines)
             priced = price_order(
-                snapshot, lines, expected_menu_version=menu_version, config=self._pricing
+                snapshot, lines, expected_total_cents=expected_total_cents, config=self._pricing
             )
         except (PricingError, AddressNotFound):
             # Deterministic refusal — with one carve-out. A retry can land
@@ -243,7 +243,6 @@ class OrderService:
             restaurant_name=snapshot["restaurant"].get("display_name") or priced.restaurant_name,
             brand_id=snapshot["restaurant"].get("brand_id"),
             card_token=card_token,
-            menu_version=priced.menu_version,
             currency=priced.currency,
             amount_cents=priced.totals.total_cents,
             # Stamped HERE, not in the activity: a retried activity must
@@ -351,7 +350,6 @@ class OrderService:
             "status": row.status,
             "restaurant_id": row.restaurant_id,
             "restaurant_name": row.restaurant_name_snapshot,
-            "menu_version": row.menu_version,
             "placed_at": _aware(row.placed_at).isoformat(),
             "cancel_reason": row.cancel_reason,
             "currency": currency,

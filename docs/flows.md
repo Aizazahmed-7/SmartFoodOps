@@ -37,7 +37,7 @@ untagged: they are the return leg of the tagged call above them.
 | Workflow ids          | `ord::{order_id}` / `dlv::{order_id}`                                 | `ord::ord_42`                            | Identity, not randomness → `REJECT_DUPLICATE` makes every re-start a no-op    |
 | Consumer dedupe       | `(consumer_group, event_id)` row, or the deterministic PK itself      | —                                        | "Have I seen this fact?" answerable only because facts have stable names      |
 
-`aggregate_version` bumps on **every** guarded transition, but only some transitions stage events — so published versions are monotone **with gaps** (this order publishes at 0, 3, 8, 9).
+Only some transitions stage events, so the published stream is sparser than the status history — an order moves through more states than it announces. Versions used to number those moves (this order published at 0, 3, 8, 9); no table carries one now (ADR-0039), and per-aggregate ordering comes from the Kafka topic key.
 
 ---
 
@@ -64,16 +64,16 @@ sequenceDiagram
     O->>I: [HTTP] GET internal address adr_1 for usr_1<br/>system headers sub=svc:order + traceparent
     I-->>O: address → delivery_address_snapshot
     O->>C: [HTTP] GET internal pricing snapshot for rst_9
-    C-->>O: menu snapshot at menu_version 7
-    Note over O: price_order with expected version 7<br/>version moved → 409 PRICE_CHANGED, synchronously<br/>ok → PricedOrder total_cents 3446
+    C-->>O: menu snapshot — prices, availability, open_now
+    Note over O: price_order with expected_total_cents 3446 — the total the<br/>customer was SHOWN (ADR-0036) — server reprices and compares<br/>total moved → 409 PRICE_CHANGED, synchronously<br/>ok → PricedOrder total_cents 3446
     Note over O: order_id = ord_ + uuid5 of "usr_1:K" → ord_42<br/>DERIVED, not random — a retry re-derives THIS id
     O->>T: [TEMPORAL] execute_update_with_start_workflow — ONE RPC<br/>start ord::ord_42, USE_EXISTING + REJECT_DUPLICATE<br/>update await_placement
     T->>W: [TEMPORAL] workflow task → activity create_order
     rect rgb(0,0,0)
         Note over W,DB: ONE TRANSACTION — the three writes
-        W->>DB: [DB] INSERT orders: status PLACED, aggregate_version 0,<br/>menu_version 7, request_hash, pricing/address/name snapshots
+        W->>DB: [DB] INSERT orders: status PLACED,<br/>request_hash, pricing/address/name snapshots
         W->>DB: [DB] INSERT order_items: name, unit_price 1200,<br/>option Family +600, line_total 3600
-        W->>DB: [DB] INSERT outbox: OrderPlaced<br/>id = uuid5 of "order:ord_42:0:OrderPlaced"
+        W->>DB: [DB] INSERT outbox: OrderPlaced<br/>id = random uuid4 (ADR-0035) — the orders PK above is<br/>what makes a retried activity idempotent, not the event id
         W->>DB: [DB] COMMIT
     end
     W-->>T: PlacementAck ord_42 PLACED — the update resolves
@@ -510,7 +510,7 @@ sequenceDiagram
     KF->>OD: [KAFKA] brand_id in every branch payload heals legacy rows<br/>(orders, order_facts, menu_views: SET brand_id WHERE IS NULL)<br/>— the cutover storm was exactly this, replayed for 22 brands
 ```
 
-Why the pinned `menu_version` never learned about brands: a cart pins the BRANCH's version; any base edit moves that same number through the fan-out, so placement's `MenuVersionChanged` → 409 `PRICE_CHANGED` re-confirm fires exactly as it always did.
+Why brands needed no placement change: a cart never pinned a version at all after ADR-0036 — it consents to the total from its live quote, and a base edit only refuses the cart if it moved *that cart's* total. (Before 0036 the cart pinned the BRANCH's version, and any base edit moved that number through the fan-out, so every in-flight cart at every branch was refused.)
 
 The read side of the same inheritance — how `base ∪ local − overrides` is actually computed — is diagram 13.
 

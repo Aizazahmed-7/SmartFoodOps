@@ -292,7 +292,7 @@ stateDiagram-v2
 
 **Payment waits are sub-states, not states.** A 3DS-analog `requires_action` or a PSP-outage queue-and-retry is recorded as a `payment_wait_reason` column on `VALIDATED` — never a new machine state. The state machine stays method-agnostic; read models surface the wait.
 
-Every transition is written by the workflow via the `transition()` helper wrapping the guarded `UPDATE` (`… SET status=:new, aggregate_version=aggregate_version+1 WHERE order_id=:id AND status=:expected`). **0 rows is ambiguous, so the helper re-reads**: already at the target status → idempotent-replay no-op (success); anything else → `IllegalTransition` (non-retryable), incrementing `illegal_transition_total` (§14), which should sit at ~0 — a spike means an idempotency bug. Raw `UPDATE … SET status` outside the helper is grep-banned in CI. *(As built, W2: the single-writer rule softened to single-WRITER-HELPER — restaurant-driven PREPARING/READY and the customer-cancel CANCELLING move also go through the same guarded helpers (`transition()` / set-guarded `begin_cancel_from()`), so the invariant is "every status write uses the guarded writer", whoever initiates it.)*
+Every transition is written by the workflow via the `transition()` helper wrapping the guarded `UPDATE` (`… SET status=:new, updated_at=:now WHERE order_id=:id AND status=:expected` — the `status` predicate IS the guard; the version that used to ride along was never part of it, ADR-0039). **0 rows is ambiguous, so the helper re-reads**: already at the target status → idempotent-replay no-op (success); anything else → `IllegalTransition` (non-retryable), incrementing `illegal_transition_total` (§14), which should sit at ~0 — a spike means an idempotency bug. Raw `UPDATE … SET status` outside the helper is grep-banned in CI. *(As built, W2: the single-writer rule softened to single-WRITER-HELPER — restaurant-driven PREPARING/READY and the customer-cancel CANCELLING move also go through the same guarded helpers (`transition()` / set-guarded `begin_cancel_from()`), so the invariant is "every status write uses the guarded writer", whoever initiates it.)*
 
 ---
 
@@ -422,7 +422,7 @@ Every datastore is named for its owner, so a name answers "whose is this?" witho
 | Orders + `pricing_snapshot` + `order_items` + `delivery_address_snapshot` | Order snapshots (below); hour-partitioned outbox; partitions **dropped** only when the publish-confirmed gate passes (§11) — never row-deletes at 20k rows/s |
 | Payment double-entry ledger | Append-only, 7-year retention; idempotency table alongside |
 | Inventory | `UPDATE stock SET available=available-q WHERE available>=q` + reservation ledger with expiry reaper; `restaurant_load` capacity counter (`UPDATE … SET active=active+1 WHERE active<capacity` — kitchen slots as stock), released by the same compensation/settlement paths |
-| Catalog | `menu_categories` → items → modifiers structure; `restaurants.version` bumped in the same transaction as menu rows (category edits included) |
+| Catalog | `menu_categories` → items → modifiers structure; the event stages in the same transaction as menu rows (category edits included), stamping `restaurants.updated_at` |
 | Analytics aggregates | 5s micro-batch upserts from Kafka consumers |
 | Identity | Users, roles, addresses (**soft-delete** — `deleted_at`, never row-deleted), refresh-token families |
 | Restaurant order feed | PG index `(restaurant_id, status, placed_at)` — deliberately **not** DDB (see key rule below) |
@@ -524,10 +524,9 @@ Avro, Confluent Schema Registry, `BACKWARD_TRANSITIVE` compatibility, CI compati
 
 | Field | Purpose |
 |---|---|
-| `event_id` — deterministic **UUIDv5** of `aggregate:{id}:{version}:{type}` | Dedupe key. Identity is derived, not minted: even a bug that double-emits produces an *identical* id that every dedupe layer collapses; random `uuid4()` event ids are banned |
+| `event_id` — random **uuid4**, unique per emitted row (ADR-0035) | Dedupe key for RE-DELIVERY of one row: consumers read the id stored on the outbox row, so a re-published or re-polled row repeats it. It is *not* derived, and it does not collapse a genuine double-emit — what prevents one is that every staging site writes its aggregate row first in the same transaction and loses to that row's own PK or guarded transition. Was UUIDv5 of `aggregate:{id}:{version}:{type}` (ADR-0018); that never deduplicated anything, and because the id is the outbox PK a real double-stage would have aborted the business transaction rather than dedupe |
 | `event_type` | e.g. `OrderConfirmed` |
 | `aggregate_id` | Partition key |
-| `aggregate_version` | Projectors apply only if `version > stored` — a late `OrderConfirmed` after `OrderCancelled` no-ops |
 | `occurred_at` | Event time |
 | `cell_id` | `c1` today; multi-cell routing later |
 | header: `traceparent` | W3C trace context — async hop stays stitched (§14) |
@@ -546,7 +545,7 @@ Consumer groups are named `<service>.<purpose>.v<n>` (e.g. `projectors.order-his
 
 *(As built, W3 — ADR-0021: the shipped mechanism is `EventConsumer` in `libs/smartfood-kafka` (`smartfood_kafka/consumer.py`), the shared at-least-once loop — decode → handle → commit-after-handle, aiokafka auto-commit hardcoded off, `auto_offset_reset="earliest"`, traceparent extraction + structlog trace_id rebinding — now running the identity, inventory, and notification consumers. Failure policy: (a) a SUPERVISED loop — a crashed pass logs and rejoins after `restart_seconds` (default 5s), mirroring `OutboxPoller.run`, eliminating silent task death; (b) bounded in-process retries on handler exceptions — `max_attempts` (default 5), exponential backoff from 0.5s (0.5/1/2/4s ≈ 7.5s horizon); (c) on exhaustion — or immediately for an undecodable message — the ORIGINAL raw bytes are parked on `<source-topic>.dlq` (key + original headers preserved) with headers `dlq.error.type`, `dlq.error.message` (truncated 500), `dlq.source.topic`/`partition`/`offset`, `dlq.attempts`, `dlq.failed_at`; then the offset is committed and the partition keeps moving — a poison message costs seconds, not a partition. A failed DLQ publish leaves the offset uncommitted → supervised restart → redelivery; at-least-once holds. Replay is manual: re-produce the raw DLQ value to the source topic — byte-identical, and consumer dedupe absorbs anything already handled. The tiered retry topics and per-group `.dlq.<group>` naming above remain the design target, gated on ADR-0021's revisit trigger; today's DLQ topics are per source topic, `<topic>.dlq`.)*
 
-Effectively-once per sink: every consumer **declares its dedupe mode** to the mandatory `smartfood-kafka` library — `PG_TX` (a `processed_events` row + offsets in the same PG transaction; only for consumers whose effect lands in PG), `VERSION_GUARD` (DDB projectors — the `aggregate_version` conditional write *is* the dedupe), `NATURAL_KEY` (ledger `txn_id` uniqueness; workflow-start `REJECT_DUPLICATE`), deterministic file naming (S3). `processed_events` is one mode, not the mechanism — a universal `processed_events` write would be ~100k needless inserts/s at the ceiling. Chaos-tested in CI by double-delivering every event.
+Effectively-once per sink: every consumer **declares its dedupe mode** to the mandatory `smartfood-kafka` library — `PG_TX` (a `processed_events` row + offsets in the same PG transaction; only for consumers whose effect lands in PG), `VERSION_GUARD` (DDB projectors — a conditional write on the item's own state *is* the dedupe; it never read the envelope's version, which no longer exists — ADR-0038), `NATURAL_KEY` (ledger `txn_id` uniqueness; workflow-start `REJECT_DUPLICATE`), deterministic file naming (S3). `processed_events` is one mode, not the mechanism — a universal `processed_events` write would be ~100k needless inserts/s at the ceiling. Chaos-tested in CI by double-delivering every event.
 
 ### Analytics pipeline
 
@@ -654,7 +653,7 @@ Reading the saga path on this diagram: `edge-bff → Order (in DOM) → Temporal
 | Workload | Verdict | Rationale |
 |---|---|---|
 | Notification senders | **Lambda** | Canonical fit: bursty, loss-tolerant, request-shaped |
-| Menu-cache version bumps, webhook receivers, admin reports, presigned uploads, Firehose transforms, DDB Streams forwarder, Part B triggers | **Lambda** | Same profile |
+| Menu-cache invalidation, webhook receivers, admin reports, presigned uploads, Firehose transforms, DDB Streams forwarder, Part B triggers | **Lambda** | Same profile |
 | Placement saga's synchronous path | **Not Lambda** | Sustained rate makes per-invoke pricing and PG pooling lose even with RDS Proxy; p99 can't eat cold starts |
 | Hot Kafka consumers, Temporal workers | **Not Lambda** | Stream-shaped, sustained-hot |
 | WS/SSE termination | **Not Lambda / not API GW** | API GW WebSocket pricing prohibitive at this volume — ALB for both |

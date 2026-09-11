@@ -17,7 +17,7 @@ from smartfood_pricing import (
     InvalidSelection,
     ItemUnavailable,
     Line,
-    MenuVersionChanged,
+    PriceChanged,
     RestaurantClosed,
     Selection,
 )
@@ -93,12 +93,14 @@ def _map_pricing_errors(exc: Exception) -> ApiError:
     quote and placement)."""
     if isinstance(exc, RestaurantNotFound):
         return ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404)
-    if isinstance(exc, MenuVersionChanged):
+    if isinstance(exc, PriceChanged):
         return ApiError(
             ErrorCode.PRICE_CHANGED,
-            "menu changed — re-quote and confirm the new total",
+            "the total changed — re-quote and confirm the new total",
             409,
-            details=[{"field": "menu_version", "issue": f"menu is now at version {exc.current}"}],
+            details=[
+                {"field": "expected_total_cents", "issue": f"total is now {exc.current} cents"}
+            ],
         )
     if isinstance(exc, RestaurantClosed):
         return ApiError(ErrorCode.RESTAURANT_CLOSED, "restaurant is not taking orders", 409)
@@ -124,7 +126,7 @@ def _map_pricing_errors(exc: Exception) -> ApiError:
 
 _PRICING_ERRORS = (
     RestaurantNotFound,
-    MenuVersionChanged,
+    PriceChanged,
     RestaurantClosed,
     ItemUnavailable,
     InvalidSelection,
@@ -146,10 +148,15 @@ async def quote(body: QuoteIn, ctx: Purchaser, request: Request) -> dict[str, An
 
 
 class PlaceOrderIn(QuoteIn):
-    """The quote body + the placement pins: version consent, address by ID,
-    card by token. Never prices, never address content (api-standards §3)."""
+    """The quote body + the placement pins: price consent, address by ID,
+    card by token. Never prices, never address content (api-standards §3).
 
-    menu_version: int = Field(ge=0)
+    `expected_total_cents` is the total the customer was SHOWN and is
+    consenting to — not a price the client gets to assert. The server
+    reprices from its own snapshot and refuses on mismatch (ADR-0036); a
+    client sending a wrong number gets a 409, never a discount."""
+
+    expected_total_cents: int = Field(ge=0)
     address_id: str = Field(min_length=1, max_length=64)
     card_token: str = Field(pattern=r"^tok_[a-z0-9_]{2,32}$")
 
@@ -179,7 +186,7 @@ async def place_order(
             idem_key=idempotency_key,
             request_hash=body_hash(await request.body()),
             restaurant_id=body.restaurant_id,
-            menu_version=body.menu_version,
+            expected_total_cents=body.expected_total_cents,
             lines=_to_lines(body.lines),
             address_id=body.address_id,
             card_token=body.card_token,

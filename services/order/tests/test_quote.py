@@ -73,7 +73,6 @@ def test_quote_happy_path(client, catalog, make_snapshot):
             priced["totals"]["tax_cents"],
         )
     )
-    assert priced["menu_version"] == 3
     assert priced["lines"][0]["options"][0]["name"] == "Large"
 
 

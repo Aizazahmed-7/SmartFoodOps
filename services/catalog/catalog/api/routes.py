@@ -19,6 +19,8 @@ from ..domain.models import Restaurant
 from ..domain.ports import GrantRejected, GrantUnavailable
 from ..domain.service import (
     BranchLimitReached,
+    BranchOnlyAction,
+    BranchOwnedField,
     BrandOwnedField,
     CatalogService,
     CategoryNotEmpty,
@@ -106,14 +108,16 @@ class RestaurantUpdate(StrictModel):
 class RestaurantOut(StrictModel):
     id: str
     name: str
-    city: str
     cuisines: list[str]
-    status: str
     lat: float | None
     lon: float | None
     hours: dict[str, list[str]] | None
-    timezone: str
-    version: int
+    # NULL for a BRAND since 0009 — a menu template has no address, no
+    # schedule and no open/paused state. Always set for a branch, which is
+    # what BranchOut (below) and every customer-facing card return.
+    city: str | None
+    status: str | None
+    timezone: str | None
     # Brands (ADR-0028) — additive; legacy rows read kind='branch', rest None.
     kind: str
     brand_id: str | None
@@ -133,7 +137,11 @@ class BranchOut(StrictModel):
     status: str
     lat: float | None
     lon: float | None
-    version: int
+    # Added with 0009: a branch is now the ONLY holder of a schedule, so a
+    # branch listing that omitted these left the zone unobservable except
+    # through the internal snapshot.
+    hours: dict[str, list[str]] | None
+    timezone: str
 
 
 class BranchCreate(StrictModel):
@@ -279,6 +287,13 @@ async def update_restaurant(
             422,
             details=[{"field": exc.field, "issue": "brand-owned"}],
         ) from None
+    except BranchOwnedField as exc:
+        raise ApiError(
+            ErrorCode.VALIDATION_FAILED,
+            "branch-owned field — a brand has no address or schedule",
+            422,
+            details=[{"field": exc.field, "issue": "branch-owned"}],
+        ) from None
     except RestaurantNotFound:
         raise _unknown_restaurant() from None
     return _out(restaurant)
@@ -290,6 +305,12 @@ async def _set_status(
     await _own(ctx, restaurant_id, request)
     try:
         restaurant = await _svc(request).set_status(restaurant_id, status)
+    except BranchOnlyAction:
+        raise ApiError(
+            ErrorCode.VALIDATION_FAILED,
+            "a brand has no open/paused state — pause its branches",
+            409,
+        ) from None
     except RestaurantNotFound:
         raise _unknown_restaurant() from None
     return _out(restaurant)

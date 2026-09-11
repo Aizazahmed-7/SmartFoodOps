@@ -40,7 +40,6 @@ def seed_menu(
 def test_menu_renders_once_then_serves_from_cache(client, cache):
     rid, _, _ = seed_menu(client)
     first = client.get(f"/v1/menus/{rid}")
-    assert first.json()["version"] == 3  # onboard + category + item
     assert first.headers["Cache-Control"] == "public, max-age=5"  # never long-lived
     sets = [op for op in cache.ops if op[0] == "set"]
     assert sets == [("set", _menu_key(rid))]  # one mutable key, filled on miss
@@ -62,7 +61,6 @@ def test_mutation_deletes_menu_key_next_read_rerenders(client, cache):
     assert _menu_key(rid) not in cache.data  # invalidated on commit
 
     fresh = client.get(f"/v1/menus/{rid}").json()
-    assert fresh["version"] == 4
     assert fresh["categories"][0]["items"][0]["price_cents"] == 1500
     assert _menu_key(rid) in cache.data  # refilled by the read
 
@@ -88,7 +86,7 @@ def test_render_cost_is_logged_only_on_miss(client, cache, capsys):
     rid, _, _ = seed_menu(client)  # last mutation deleted the menu key
     capsys.readouterr()  # discard seeding noise
 
-    version = client.get(f"/v1/menus/{rid}").json()["version"]  # cold read
+    client.get(f"/v1/menus/{rid}")  # cold read
     client.get(f"/v1/menus/{rid}")  # warm read — must log nothing
 
     rendered = [
@@ -98,7 +96,7 @@ def test_render_cost_is_logged_only_on_miss(client, cache, capsys):
         if parsed.get("event") == "menu rendered"
     ]
     assert len(rendered) == 1  # the hit was silent
-    assert rendered[0]["version"] == version
+    assert rendered[0]["restaurant_id"] == rid
     assert isinstance(rendered[0]["duration_ms"], float)
 
 

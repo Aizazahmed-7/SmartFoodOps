@@ -40,12 +40,15 @@ export interface Address {
 export interface RestaurantCard {
   id: string;
   name: string;
-  city: string;
   cuisines: string[];
-  status: "open" | "paused";
-  version: number;
   lat?: number | null;
   lon?: number | null;
+  // NULL only on a BRAND: place-shaped fields live on the branch since
+  // catalog migration 0009. Browse and Search cards are always branches,
+  // so they always carry these — the partner console's base-menu scope is
+  // the one place a brand reaches this type.
+  city: string | null;
+  status: "open" | "paused" | null;
   // Brands (ADR-0028): cards are branches; title by display_name.
   brand_id?: string | null;
   branch_label?: string | null;
@@ -62,13 +65,16 @@ export interface Branch {
   status: "open" | "paused";
   lat: number | null;
   lon: number | null;
-  version: number;
+  // A branch is the only holder of a schedule (catalog 0009).
+  hours: Record<string, string[]> | null;
+  timezone: string;
 }
 
 export interface Restaurant extends RestaurantCard {
   lat: number | null;
   lon: number | null;
   hours: Record<string, string[]> | null;
+  timezone: string | null;
 }
 
 export interface ModifierOption {
@@ -116,7 +122,6 @@ export interface Menu {
   display_name?: string;
   brand_id?: string | null;
   status: string;
-  version: number;
   categories: MenuCategory[];
 }
 
@@ -200,7 +205,6 @@ export interface QuoteLine {
 /** POST /v1/quote — the server is the only pricer (FR-16). */
 export interface Quote {
   restaurant_name: string;
-  menu_version: number;
   currency: string;
   lines: QuoteLine[];
   totals: Totals;
@@ -229,7 +233,6 @@ export interface OrderDetail {
   status: OrderStatus;
   restaurant_id: string;
   restaurant_name: string;
-  menu_version: number;
   placed_at: string;
   cancel_reason: string | null;
   currency: string;
@@ -278,7 +281,6 @@ export interface DecisionResult {
 export interface StockRow {
   item_id: string;
   available: number;
-  version: number;
 }
 
 // ── notifications ──────────────────────────────────────────────────

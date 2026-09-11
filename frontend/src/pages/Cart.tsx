@@ -30,7 +30,7 @@ export default function Cart() {
   const navigate = useNavigate();
   const estimate = cart.lines.reduce((sum, l) => sum + lineTotalCents(l), 0);
 
-  // Quoting + menu_version re-pin live in useQuote, shared with Checkout.
+  // Quoting lives in useQuote, shared with Checkout.
   const quote = useQuote();
 
   if (cart.lines.length === 0) {
@@ -89,7 +89,7 @@ export default function Cart() {
           <div className="mt-1 flex justify-between border-t border-slate-800 pt-2 text-base font-bold">
             <span>Total</span><Money cents={totals.total_cents} />
           </div>
-          <p className="text-xs text-slate-500">Priced by the server just now · menu v{quote.data!.menu_version}</p>
+          <p className="text-xs text-slate-500">Priced by the server just now</p>
         </div>
       ) : (
         <div className="card flex items-center justify-between">

@@ -36,9 +36,11 @@ _SET_THRESHOLD = f"SET pg_trgm.word_similarity_threshold = {WORD_SIMILARITY_THRE
 
 
 def _filters(city: str | None, cuisine: str | None, tag: str | None) -> str:
+    """`bm` is branch_metadata, joined by every leg — city and brand_id moved
+    there in the branch/brand column split (review 2026-09-09)."""
     clauses = []
     if city is not None:
-        clauses.append("AND r.city = :city")
+        clauses.append("AND bm.city = :city")
     if cuisine is not None:
         clauses.append(
             "AND EXISTS (SELECT 1 FROM restaurant_cuisines rc "
@@ -48,14 +50,16 @@ def _filters(city: str | None, cuisine: str | None, tag: str | None) -> str:
         clauses.append(
             "AND EXISTS (SELECT 1 FROM menu_items mi "
             "JOIN item_tags it ON it.item_id = mi.id "
-            "WHERE (mi.restaurant_id = r.id OR mi.restaurant_id = r.brand_id) "
+            "WHERE (mi.restaurant_id = r.id OR mi.restaurant_id = bm.brand_id) "
             "AND it.tag = :tag AND mi.available)"
         )
     return " ".join(clauses)
 
 
 def build_queries(city: str | None, cuisine: str | None, tag: str | None) -> dict[str, str]:
-    # Every leg resolves to BRANCH cards (r.kind filter): brand rows are menu
+    # Every leg resolves to BRANCH cards: the branch_metadata join now
+    # carries that structurally (only branches have a row) and the r.kind
+    # filter stays as the belt to those braces. Brand rows are menu
     # templates, never search results. Item/tag legs join through ownership
     # OR inheritance, so a base item surfaces every branch that serves it —
     # one row per branch is the point, not a bug (ADR-0028). Per-branch 86
@@ -70,12 +74,14 @@ def build_queries(city: str | None, cuisine: str | None, tag: str | None) -> dic
                    GREATEST(ts_rank({rest_fts}, websearch_to_tsquery('simple', :q)),
                             word_similarity(:q, r.name)) AS score
             FROM restaurants r
+            JOIN branch_metadata bm ON bm.restaurant_id = r.id
             WHERE ({rest_fts} @@ websearch_to_tsquery('simple', :q) OR :q <% r.name)
               AND r.kind = 'branch'
             {f} ORDER BY score DESC LIMIT {_CAP}""",
         "cuisines": f"""
             SELECT r.id AS restaurant_id, word_similarity(:q, rc2.cuisine) AS score
             FROM restaurants r
+            JOIN branch_metadata bm ON bm.restaurant_id = r.id
             JOIN restaurant_cuisines rc2 ON rc2.restaurant_id = r.id
             WHERE :q <% rc2.cuisine
               AND r.kind = 'branch'
@@ -85,7 +91,9 @@ def build_queries(city: str | None, cuisine: str | None, tag: str | None) -> dic
                    GREATEST(ts_rank({item_fts}, websearch_to_tsquery('simple', :q)),
                             word_similarity(:q, i.name)) AS score
             FROM menu_items i
-            JOIN restaurants r ON (r.id = i.restaurant_id OR r.brand_id = i.restaurant_id)
+            JOIN branch_metadata bm
+              ON (bm.restaurant_id = i.restaurant_id OR bm.brand_id = i.restaurant_id)
+            JOIN restaurants r ON r.id = bm.restaurant_id
             WHERE ({item_fts} @@ websearch_to_tsquery('simple', :q) OR :q <% i.name)
               AND i.available AND r.kind = 'branch'
             {f} ORDER BY score DESC LIMIT {_CAP}""",
@@ -94,7 +102,9 @@ def build_queries(city: str | None, cuisine: str | None, tag: str | None) -> dic
                    word_similarity(:q, it2.tag) AS score
             FROM item_tags it2
             JOIN menu_items i ON i.id = it2.item_id
-            JOIN restaurants r ON (r.id = i.restaurant_id OR r.brand_id = i.restaurant_id)
+            JOIN branch_metadata bm
+              ON (bm.restaurant_id = i.restaurant_id OR bm.brand_id = i.restaurant_id)
+            JOIN restaurants r ON r.id = bm.restaurant_id
             WHERE :q <% it2.tag AND i.available AND r.kind = 'branch'
             {f} ORDER BY score DESC LIMIT {_CAP}""",
     }

@@ -3,9 +3,10 @@ brand + first branch, branch CRUD, the parent-aware _own, brand-owned
 field policing, base-item 86 over the API, fan-out atomicity, and the
 boot-time cutover storm."""
 
+import pytest
 import sqlalchemy as sa
 from catalog.adapters.repo import CatalogRepo
-from catalog.db import outbox, restaurants
+from catalog.db import branch_metadata, outbox, restaurants
 from catalog.domain import service as service_module
 from smartfood_auth import AuthContext, headers_for
 
@@ -214,8 +215,10 @@ def test_branch_files_local_items_into_base_categories(client):
 
 
 async def test_fanout_failure_rolls_back_every_write(grants, cache, monkeypatch):
-    """stage_event dying on the SECOND aggregate must leave no version bump,
-    no event, no data write — the fan-out is one transaction or nothing."""
+    """stage_event dying on the SECOND aggregate must leave no touched
+    timestamp, no event, no data write — the fan-out is one transaction or
+    nothing. (Asserted on `updated_at` since the version bump it used to
+    check was retired with the column.)"""
     svc, sessions = await _service(grants, cache)
     brand, _ = await _create(svc)
 
@@ -230,6 +233,10 @@ async def test_fanout_failure_rolls_back_every_write(grants, cache, monkeypatch)
 
     async with sessions() as s:
         before = (await s.execute(sa.select(sa.func.count()).select_from(outbox))).scalar_one()
+        stamps_before = dict(
+            (r.id, r.updated_at)
+            for r in (await s.execute(sa.select(restaurants.c.id, restaurants.c.updated_at))).all()
+        )
     calls["n"] = 0
     monkeypatch.setattr(CatalogRepo, "stage_event", failing)
     try:
@@ -240,15 +247,18 @@ async def test_fanout_failure_rolls_back_every_write(grants, cache, monkeypatch)
     monkeypatch.setattr(CatalogRepo, "stage_event", real)
     async with sessions() as s:
         after = (await s.execute(sa.select(sa.func.count()).select_from(outbox))).scalar_one()
-        versions = (await s.execute(sa.select(restaurants.c.id, restaurants.c.version))).all()
+        stamps_after = dict(
+            (r.id, r.updated_at)
+            for r in (await s.execute(sa.select(restaurants.c.id, restaurants.c.updated_at))).all()
+        )
     assert after == before  # no partial fan-out ever visible
     fresh = await svc.get_menu(brand.id)
     assert fresh["categories"] == []  # the data write rolled back too
-    assert all(v == 1 for _, v in versions)  # only the mint's bumps remain
+    assert stamps_after == stamps_before  # the touch rolled back with the rest
 
 
 async def test_boot_storm_publishes_each_pending_brand_once(grants, cache):
-    """Migration 0007 leaves brands at version 0; the boot converge
+    """Migration 0007 leaves brands with no staged event; the boot converge
     publishes brand + branches exactly once and is a no-op thereafter."""
     svc, sessions = await _service(grants, cache)
     await _insert_row(sessions, rid="brd_m", owner="usr_m", kind="brand")
@@ -266,7 +276,7 @@ async def test_boot_storm_publishes_each_pending_brand_once(grants, cache):
     assert by_aggregate == {"brd_m", "rst_m1", "rst_m2"}
     assert all(e.payload["brand_id"] == "brd_m" for e in rows)  # the healing signal
 
-    assert await svc.converge_brand_events() == 0  # version guard: never twice
+    assert await svc.converge_brand_events() == 0  # outbox guard: never twice
     async with sessions() as s:
         count = (await s.execute(sa.select(sa.func.count()).select_from(outbox))).scalar_one()
     assert count == 3
@@ -318,3 +328,125 @@ def test_base_availability_on_a_brand_is_the_same_404(client):
         headers=owner,
     )
     assert r.status_code == 404
+
+
+# ── the branch/brand column split (review 2026-09-09) ──────────────
+
+
+async def test_branch_metadata_is_written_with_its_branch_and_brands_get_none(grants, cache):
+    """The additive half of the split: every branch-owned value lands on
+    BOTH rows, so neither is a stale copy while the read path migrates.
+    Asserted field-by-field on purpose — statement coverage would call the
+    dual write 'covered' if it inserted an empty row."""
+    svc, sessions = await _service(grants, cache)
+    brand, _ = await _create(svc)
+    branch, _created = await svc.create_branch(
+        brand.id,
+        branch_label="Airport",
+        city="shelbyville",
+        lat=39.87,
+        lon=-89.66,
+        hours={"mon": ["11:00", "23:00"]},
+        timezone="America/New_York",
+    )
+
+    async with sessions() as s:
+        rows = (await s.execute(sa.select(branch_metadata))).all()
+
+    # A brand has no metadata row at all — that absence is what makes
+    # city/hours/timezone unrepresentable on a brand.
+    minted = await svc.list_branches(brand.id)
+    assert {r.restaurant_id for r in rows} == {b.id for b in minted}
+    assert branch.id in {r.restaurant_id for r in rows}
+    assert brand.id not in {r.restaurant_id for r in rows}
+
+    airport = next(r for r in rows if r.restaurant_id == branch.id)
+    assert (airport.brand_id, airport.branch_label) == (brand.id, "Airport")
+    assert (airport.city, airport.lat, airport.lon) == ("shelbyville", 39.87, -89.66)
+    assert airport.hours == {"mon": ["11:00", "23:00"]}
+    assert airport.timezone == "America/New_York"
+    assert airport.status == "open"
+
+
+async def test_branch_owned_edits_land_on_the_metadata_row(grants, cache):
+    """Each change goes to the table that owns it: place-shaped fields to
+    branch_metadata, identity to restaurants. Since 0009 there is no second
+    copy to keep in step — branch_metadata is the only answer."""
+    svc, sessions = await _service(grants, cache)
+    brand, _ = await _create(svc)
+    branch_id = (await svc.list_branches(brand.id))[0].id
+
+    await svc.update_restaurant(branch_id, {"lat": 1.5, "hours": {"mon": ["9:00", "17:00"]}}, None)
+    await svc.set_status(branch_id, "paused")
+    await svc.update_restaurant(brand.id, {"name": "Biryani Palace"}, None)
+
+    async with sessions() as s:
+        meta = (
+            await s.execute(
+                sa.select(branch_metadata).where(branch_metadata.c.restaurant_id == branch_id)
+            )
+        ).one()
+        row = (await s.execute(sa.select(restaurants).where(restaurants.c.id == branch_id))).one()
+        brand_meta = (
+            await s.execute(
+                sa.select(sa.func.count())
+                .select_from(branch_metadata)
+                .where(branch_metadata.c.restaurant_id == brand.id)
+            )
+        ).scalar_one()
+
+    assert (meta.lat, meta.status) == (1.5, "paused")
+    assert meta.hours == {"mon": ["9:00", "17:00"]}
+    assert row.name == "Biryani Palace"  # the rename propagated to the branch
+    # `updated_at` is the metadata row's own clock (repo.touch moves the
+    # restaurants one on every menu edit), so it only has to have MOVED.
+    assert meta.updated_at > row.created_at
+    assert brand_meta == 0  # a brand never acquires a metadata row
+
+
+async def test_a_brand_has_no_place_shaped_fields(grants, cache):
+    """The wire-visible half of the split: NULL, not a copied lie."""
+    svc, _ = await _service(grants, cache)
+    brand, _ = await _create(svc)
+    assert (brand.city, brand.status, brand.timezone) == (None, None, None)
+    assert (brand.lat, brand.lon, brand.hours) == (None, None, None)
+    assert (brand.brand_id, brand.branch_label) == (None, None)
+
+    branch = (await svc.list_branches(brand.id))[0]
+    assert branch.city == "springfield" and branch.status == "open"
+    assert branch.timezone is not None and branch.brand_id == brand.id
+
+
+async def test_pausing_a_brand_is_refused(grants, cache):
+    """A brand has no status to set. Without the guard the UPDATE would
+    match zero rows and the owner would be told their brand does not
+    exist — or worse, get a 200 that changed nothing."""
+    svc, _ = await _service(grants, cache)
+    brand, _ = await _create(svc)
+    with pytest.raises(service_module.BranchOnlyAction):
+        await svc.set_status(brand.id, "paused")
+    branch_id = (await svc.list_branches(brand.id))[0].id
+    assert (await svc.set_status(branch_id, "paused")).status == "paused"
+
+
+async def test_metadata_less_branch_is_refused_not_rendered(grants, cache):
+    """The state no constraint forbids (db.py): a branch whose metadata row
+    is gone. It must 404, never render as a brand — brand_id would read NULL,
+    _menu_scope would drop the base menu, and the customer would get a short
+    menu with no error anywhere. Constructible here precisely because nothing
+    in the schema blocks it."""
+    svc, sessions = await _service(grants, cache)
+    brand, _ = await _create(svc)
+    branch_id = (await svc.list_branches(brand.id))[0].id
+    assert (await svc.get_restaurant(branch_id)).brand_id == brand.id  # healthy first
+
+    async with sessions() as s:
+        await s.execute(
+            branch_metadata.delete().where(branch_metadata.c.restaurant_id == branch_id)
+        )
+        await s.commit()
+
+    with pytest.raises(service_module.RestaurantNotFound):
+        await svc.get_restaurant(branch_id)
+    # The brand is unaffected: it never had a metadata row to lose.
+    assert (await svc.get_restaurant(brand.id)).kind == "brand"

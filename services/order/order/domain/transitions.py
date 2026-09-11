@@ -10,8 +10,10 @@ anything else → IllegalTransition, which is non-retryable by definition —
 retrying an illegal move can never make it legal.
 
 Event staging joins the SAME transaction (invariant 1): the announcement
-commits with the state change or not at all, and the event id is derived
-from the post-bump aggregate_version (deterministic identity).
+commits with the state change or not at all. The event id used to be derived
+from the post-bump aggregate_version; ids are random now (ADR-0035) and the
+outbox carries no version at all (ADR-0038). The bump survives here only as
+`orders.aggregate_version`, which the payload still reports.
 """
 
 from dataclasses import dataclass
@@ -37,7 +39,6 @@ class IllegalTransition(Exception):
 @dataclass(frozen=True)
 class TransitionResult:
     applied: bool  # False = idempotent replay (already at target)
-    version: int
 
 
 def _now() -> datetime:
@@ -56,45 +57,38 @@ async def transition(
     """One guarded move, one transaction, optionally one event."""
     now = _now()
     async with sessions() as session:
-        values: dict[str, Any] = {
-            "status": target,
-            "aggregate_version": orders.c.aggregate_version + 1,
-            "updated_at": now,
-        }
+        values: dict[str, Any] = {"status": target, "updated_at": now}
         if cancel_reason is not None:
             values["cancel_reason"] = cancel_reason
         result = await session.execute(
             orders.update()
             .where((orders.c.order_id == order_id) & (orders.c.status == expected))
             .values(**values)
-            .returning(orders.c.aggregate_version)
+            .returning(orders.c.order_id)
         )
         row = result.one_or_none()
         if row is None:
             # 0 rows is ambiguous — re-read to disambiguate.
             current = (
                 await session.execute(
-                    sa.select(orders.c.status, orders.c.aggregate_version).where(
-                        orders.c.order_id == order_id
-                    )
+                    sa.select(orders.c.status).where(orders.c.order_id == order_id)
                 )
             ).one_or_none()
             if current is not None and current.status == target:
-                return TransitionResult(applied=False, version=current.aggregate_version)
+                return TransitionResult(applied=False)
             actual = current.status if current is not None else "absent"
             raise IllegalTransition(order_id, expected, target, actual)
 
-        version = cast(int, row.aggregate_version)
         if event is not None:
-            payload = await _full_state(session, order_id, target, version, now, cancel_reason)
+            payload = await _full_state(session, order_id, target, now, cancel_reason)
             await OrderRepo(session).stage_event(
-                order_id=order_id, version=version, event_type=event, payload=payload, now=now
+                order_id=order_id, event_type=event, payload=payload, now=now
             )
         await session.commit()
     # Post-commit on purpose: the stream hint must never describe a write
     # that rolled back, and its failure must never undo one that landed.
     await tracking.publish_status(order_id, target)
-    return TransitionResult(applied=True, version=version)
+    return TransitionResult(applied=True)
 
 
 async def record_rider(
@@ -150,10 +144,9 @@ async def begin_cancel_from(
             .values(
                 status="CANCELLING",
                 cancel_reason=reason,
-                aggregate_version=orders.c.aggregate_version + 1,
                 updated_at=_now(),
             )
-            .returning(orders.c.aggregate_version)
+            .returning(orders.c.order_id)
         )
         applied = result.one_or_none() is not None
         await session.commit()
@@ -170,7 +163,6 @@ async def _full_state(
     session: AsyncSession,
     order_id: str,
     status: OrderStatus,
-    version: int,
     now: datetime,
     cancel_reason: str | None,
 ) -> dict[str, Any]:
@@ -191,8 +183,6 @@ async def _full_state(
         "brand_id": order.brand_id,
         "restaurant_name": order.restaurant_name_snapshot,
         "status": status,
-        "aggregate_version": version,
-        "menu_version": order.menu_version,
         "items": [
             {
                 "menu_item_id": item.menu_item_id,

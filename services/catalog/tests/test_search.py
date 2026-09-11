@@ -5,12 +5,16 @@ from smartfood_auth import AuthContext, headers_for
 
 
 def _seed_restaurant(client, sub="usr_owner", name="Biryani House"):
+    """Returns the BRANCH id, not the brand's. Every search leg filters
+    kind='branch' (brand rows are menu templates, never results), so a brand
+    id here would exercise hydration with an input the real port cannot
+    produce — which is what it used to do."""
     customer = headers_for(AuthContext(sub=sub, roles=frozenset({"customer"})))
     return client.post(
         "/v1/restaurants",
         json={"name": name, "city": "springfield", "cuisines": ["pakistani", "bbq"]},
         headers=customer,
-    ).json()["id"]
+    ).json()["branches"][0]["id"]
 
 
 def test_search_assembles_cards_and_normalizes_params(client, search_port):
@@ -58,6 +62,11 @@ def test_search_assembles_cards_and_normalizes_params(client, search_port):
     card = body["results"][0]
     assert card["restaurant"]["name"] == "Biryani House"
     assert card["restaurant"]["cuisines"] == ["bbq", "pakistani"]  # read from DB
+    # Branch-owned fields now hydrate from branch_metadata, not restaurants.
+    assert card["restaurant"]["city"] == "springfield"
+    assert card["restaurant"]["branch_label"] == "Main"
+    assert card["restaurant"]["display_name"] == "Biryani House — Main"
+    assert card["restaurant"]["brand_id"] is not None
     assert card["score"] == 0.92
     assert card["matched_items"][0]["name"] == "Chicken Biryani"
 

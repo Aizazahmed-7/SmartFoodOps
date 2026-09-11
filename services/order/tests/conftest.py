@@ -10,6 +10,7 @@ from order.domain.transitions import transition
 from order.main import create_app
 from order.values import PlacementAck
 from smartfood_auth import AuthContext, headers_for
+from smartfood_pricing import Line, price_order
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 _CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
@@ -223,10 +224,29 @@ def make_order_body():
     """Builder for the canonical placement payload; keyword overrides
     replace whole fields (`lines=...` wins over `qty`)."""
 
-    def _body(*, menu_version=3, qty=2, **overrides):
+    def _body(*, qty=2, expected_total_cents=None, **overrides):
+        if expected_total_cents is None:
+            # Priced with the REAL engine, exactly as a client would from
+            # its quote. A hardcoded total would silently drift the day the
+            # fee or tax default changes; a suite that overrides those knobs
+            # must pass `expected_total_cents` itself.
+            expected_total_cents = price_order(
+                {
+                    "restaurant": {
+                        "id": "rst_1",
+                        "name": "Biryani House",
+                        "city": "springfield",
+                        "status": "open",
+                        "version": 3,
+                    },
+                    "items": _default_items(),
+                    "missing_item_ids": [],
+                },
+                [Line(item_id="itm_a", qty=qty)],
+            ).totals.total_cents
         payload = {
             "restaurant_id": "rst_1",
-            "menu_version": menu_version,
+            "expected_total_cents": expected_total_cents,
             "address_id": "adr_1",
             "card_token": "tok_ok",
             "lines": [{"item_id": "itm_a", "qty": qty}],

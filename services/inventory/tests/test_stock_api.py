@@ -21,15 +21,15 @@ def test_set_stock_creates_then_updates(client):
         headers=admin("rst_1"),
     )
     assert r.status_code == 200
-    assert r.json() == {"item_id": "itm_a", "available": 40, "version": 0}
+    assert r.json() == {"item_id": "itm_a", "available": 40}
 
     r = client.put(
         "/v1/inventory/restaurants/rst_1/stock/itm_a",
         json={"available": 15},
         headers=admin("rst_1"),
     )
-    assert r.json()["available"] == 15
-    assert r.json()["version"] == 1  # update path bumps
+    # The update path, not a second insert: same row, new count.
+    assert r.json() == {"item_id": "itm_a", "available": 15}
 
 
 def test_list_stock_scoped_and_ordered(client):
@@ -77,7 +77,7 @@ def test_same_item_id_keeps_independent_rows_per_branch(client):
         headers=SYSTEM,
     )
     assert r.status_code == 200
-    assert r.json() == {"item_id": "itm_a", "available": 1, "version": 0}
+    assert r.json() == {"item_id": "itm_a", "available": 1}
     # and the original branch's row is untouched
     rows = client.get("/v1/inventory/restaurants/rst_1/stock", headers=admin("rst_1")).json()
     assert rows["items"][0]["available"] == 9

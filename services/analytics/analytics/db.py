@@ -27,7 +27,6 @@ order_facts = sa.Table(
     # the topic key (= order_id → one partition), so last-write-wins here
     # is genuinely last-event-wins.
     sa.Column("status", sa.Text, nullable=False),
-    sa.Column("aggregate_version", sa.Integer, nullable=False, server_default="0"),
     sa.Column("total_cents", sa.Integer, nullable=False, server_default="0"),
     # One timestamp per milestone the metrics need. NULL = not reached.
     sa.Column("placed_at", sa.TIMESTAMP(timezone=True), nullable=True, index=True),

@@ -147,7 +147,6 @@ class PaymentService:
             if result.approved:
                 await repo.stage_event(
                     order_id=order_id,
-                    version=0,
                     event_type=EventType.PAYMENT_AUTHORIZED,
                     payload={
                         "order_id": order_id,
@@ -263,10 +262,10 @@ class PaymentService:
         body = {"order_id": order_id, "status": target}
         async with self._sessions() as session:
             repo = PaymentRepo(session)
-            version = await repo.transition_payment(
+            applied = await repo.transition_payment(
                 order_id, expected=expected, target=target, now=now
             )
-            if version is None:
+            if not applied:
                 # Raced by another instance between our read and this write;
                 # converge on whatever the winner wrote.
                 existing = await repo.get_payment(order_id)
@@ -289,7 +288,6 @@ class PaymentService:
             if event_type is not None:
                 await repo.stage_event(
                     order_id=order_id,
-                    version=version,
                     event_type=event_type,
                     payload={
                         "order_id": order_id,

@@ -108,9 +108,7 @@ async def list_stock(restaurant_id: str, ctx: RestaurantAdmin, request: Request)
     # other branch's screen. None = never provisioned (fresh location).
     capacity = await _svc(request).get_capacity(restaurant_id)
     return {
-        "items": [
-            {"item_id": r.item_id, "available": r.available, "version": r.version} for r in rows
-        ],
+        "items": [{"item_id": r.item_id, "available": r.available} for r in rows],
         "capacity": capacity,
     }
 
@@ -121,7 +119,7 @@ async def set_stock(
 ) -> dict:
     await _own(ctx, restaurant_id, request)
     row = await _svc(request).set_stock(restaurant_id, item_id, body.available)
-    return {"item_id": row.item_id, "available": row.available, "version": row.version}
+    return {"item_id": row.item_id, "available": row.available}
 
 
 @router.put("/v1/inventory/restaurants/{restaurant_id}/capacity")

@@ -15,8 +15,7 @@ from order.domain.service import (
 )
 from order.values import PlacementAck
 from smartfood_idempotency import body_hash
-from smartfood_outbox import event_id
-from smartfood_pricing import Line, MenuVersionChanged, PricingConfig
+from smartfood_pricing import Line, PriceChanged, PricingConfig
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -99,13 +98,23 @@ def _lines():
     ]
 
 
-async def _place(service, key="k1", body=b"the-body", menu_version=3):
+# The canonical cart's real total; _place pins it so the happy path passes
+# the drift guard, and the drift tests pin a wrong one on purpose.
+_STALE_TOTAL = 1  # never the real total — the cheapest way to force drift
+
+
+async def _place(service, key="k1", body=b"the-body", expected_total_cents=None):
+    if expected_total_cents is None:
+        # Quote, then place with what the quote said — the real client
+        # sequence, and it keeps the pin correct as the cart or the money
+        # knobs change (ADR-0036).
+        expected_total_cents = (await service.quote("rst_1", _lines())).totals.total_cents
     return await service.place(
         user_id="usr_1",
         idem_key=key,
         request_hash=body_hash(body),
         restaurant_id="rst_1",
-        menu_version=menu_version,
+        expected_total_cents=expected_total_cents,
         lines=_lines(),
         address_id="adr_1",
         card_token="tok_ok",
@@ -127,7 +136,6 @@ async def test_placement_writes_row_lines_and_event_in_one_commit(make_snapshot,
 
     # 1. the order, with every snapshot placement promised (FR-14/16)
     assert order.status == "PLACED"
-    assert order.menu_version == 3
     assert order.card_token == "tok_ok"
     # (1200 + 300) * 2 = 3000; tax = 3000*825//10000 = 247
     assert order.pricing_snapshot == {
@@ -148,8 +156,9 @@ async def test_placement_writes_row_lines_and_event_in_one_commit(make_snapshot,
     assert line.options_snapshot[0]["name"] == "Large"
     assert line.line_total_cents == 3000
 
-    # 3. the OrderPlaced event, deterministic identity, full-state payload
-    assert event.id == event_id("order", order.order_id, 0, "OrderPlaced")
+    # 3. the OrderPlaced event, staged against the order, full-state payload
+    assert (event.aggregate_type, event.aggregate_id) == ("order", order.order_id)
+    assert event.event_type == "OrderPlaced"
     assert event.payload["totals"]["total_cents"] == 3446
     assert event.payload["delivery_address"]["city"] == "Springfield"
 
@@ -265,8 +274,8 @@ async def test_refusal_loses_to_a_workflow_already_making_the_order(make_snapsho
     order_id = order_id_for("usr_1", "k1")
     saga.attach_ack = PlacementAck(order_id=order_id, status="PLACED")
 
-    # menu_version=99 vs snapshot version 3 → MenuVersionChanged, refused…
-    outcome = await _place(service, menu_version=99)
+    # A wrong pinned total → PriceChanged, refused…
+    outcome = await _place(service, expected_total_cents=_STALE_TOTAL)
     # …but the attach probe found the in-flight placement: its ack wins.
     assert outcome == Placed(order_id=order_id, status="PLACED")
     assert saga.attaches == [order_id]
@@ -280,7 +289,7 @@ async def test_refusal_during_pending_window_can_answer_pending(make_snapshot, s
     order_id = order_id_for("usr_1", "k1")
     saga.attach_ack = PlacementPending(order_id)
 
-    assert await _place(service, menu_version=99) == PlacementPending(order_id)
+    assert await _place(service, expected_total_cents=_STALE_TOTAL) == PlacementPending(order_id)
 
 
 async def test_refusal_stands_when_no_workflow_is_running(make_snapshot, saga):
@@ -289,8 +298,8 @@ async def test_refusal_stands_when_no_workflow_is_running(make_snapshot, saga):
     the honest answer (re-quote, re-confirm)."""
     service, _, saga = await _service(make_snapshot, saga)
 
-    with pytest.raises(MenuVersionChanged):
-        await _place(service, menu_version=99)
+    with pytest.raises(PriceChanged):
+        await _place(service, expected_total_cents=_STALE_TOTAL)
     assert saga.attaches == [order_id_for("usr_1", "k1")]  # probed, found nothing
 
 

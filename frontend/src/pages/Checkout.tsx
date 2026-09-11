@@ -32,8 +32,9 @@ export default function Checkout() {
     queryFn: listAddresses,
     enabled: !!claims,
   });
-  // Quoting + menu_version re-pin live in useQuote, shared with Cart — the
-  // shown price and the version placement consents to can never diverge.
+  // Quoting lives in useQuote, shared with Cart. The total below comes from
+  // this same quote object, so the price shown and the price consented to
+  // cannot diverge (ADR-0036).
   const quote = useQuote();
 
   const chosenAddress = addressId ?? addresses.data?.[0]?.id ?? null;
@@ -42,7 +43,9 @@ export default function Checkout() {
     mutationFn: () =>
       placeOrder({
         restaurant_id: cart.restaurantId!,
-        menu_version: cart.menuVersion!, // consent to THIS menu — drift → PRICE_CHANGED
+        // Consent to THIS total — if the server reprices differently it
+        // refuses with PRICE_CHANGED rather than charging the difference.
+        expected_total_cents: quote.data!.totals.total_cents,
         address_id: chosenAddress!,
         card_token: cardToken,
         lines: toOrderLines(cart.lines),
@@ -54,8 +57,8 @@ export default function Checkout() {
     },
     onError: (error) => {
       if (hasCode(error, "PRICE_CHANGED")) {
-        // Re-quote (fresh totals + version) and ask for one tap of consent;
-        // useQuote re-pins the cart's menu_version when the fresh quote lands.
+        // Re-quote and ask for one tap of consent; the next placement sends
+        // the fresh total because it reads it straight off the quote.
         setPriceChanged(true);
         quote.refetch();
       }

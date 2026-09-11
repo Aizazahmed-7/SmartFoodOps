@@ -7,7 +7,7 @@ from smartfood_pricing import (
     InvalidSelection,
     ItemUnavailable,
     Line,
-    MenuVersionChanged,
+    PriceChanged,
     PricingConfig,
     RestaurantClosed,
     Selection,
@@ -76,7 +76,6 @@ def test_happy_single_line_no_options():
     assert priced.totals.tax_cents == 2000 * 825 // 10_000  # 165
     assert priced.totals.total_cents == 2000 + 199 + 165
     assert priced.totals.discount_cents == 0
-    assert priced.menu_version == 3
     assert priced.restaurant_name == "Biryani House"
     assert priced.currency == "USD"
 
@@ -131,17 +130,38 @@ def test_currency_taken_from_items():
 # ── drift & state ──────────────────────────────────────────────────
 
 
-def test_version_pin_match_passes_and_mismatch_raises():
-    snapshot = snap(version=7, items=[item()])
-    assert price_order(snapshot, [Line(item_id="itm_a", qty=1)], expected_menu_version=7)
-    with pytest.raises(MenuVersionChanged) as exc:
-        price_order(snapshot, [Line(item_id="itm_a", qty=1)], expected_menu_version=6)
-    assert exc.value.current == 7
+def test_total_pin_match_passes_and_mismatch_raises():
+    snapshot = snap(items=[item()])
+    lines = [Line(item_id="itm_a", qty=1)]
+    shown = price_order(snapshot, lines).totals.total_cents  # what the customer saw
+    assert price_order(snapshot, lines, expected_total_cents=shown)
+    with pytest.raises(PriceChanged) as exc:
+        price_order(snapshot, lines, expected_total_cents=shown - 1)
+    assert exc.value.current == shown  # the caller learns the real total
 
 
 def test_no_pin_means_self_healing():
-    priced = price_order(snap(version=99, items=[item()]), [Line(item_id="itm_a", qty=1)])
-    assert priced.menu_version == 99  # caller learns the current version
+    priced = price_order(snap(items=[item(price=1000)]), [Line(item_id="itm_a", qty=1)])
+    assert priced.totals.total_cents > 0  # caller learns the current total
+
+
+def test_an_unrelated_menu_edit_no_longer_invalidates_the_cart():
+    """The reason for the change (ADR-0036). The old guard compared
+    `restaurants.version`, so ANY edit anywhere — a new category, another
+    item's price — rejected EVERY in-flight cart. Same item, same price,
+    later menu version: this cart's total never moved, so it must place."""
+    lines = [Line(item_id="itm_a", qty=1)]
+    shown = price_order(snap(version=7, items=[item(price=1000)]), lines).totals.total_cents
+    after_edit = snap(version=8, items=[item(price=1000)])
+    assert price_order(after_edit, lines, expected_total_cents=shown)
+
+
+def test_a_price_move_on_the_carted_item_is_still_caught():
+    """The half that must NOT be lost: the customer's own item repriced."""
+    lines = [Line(item_id="itm_a", qty=1)]
+    shown = price_order(snap(items=[item(price=1000)]), lines).totals.total_cents
+    with pytest.raises(PriceChanged):
+        price_order(snap(items=[item(price=1200)]), lines, expected_total_cents=shown)
 
 
 def test_paused_restaurant_is_closed():
@@ -149,12 +169,17 @@ def test_paused_restaurant_is_closed():
         price_order(snap(status="paused", items=[item()]), [Line(item_id="itm_a", qty=1)])
 
 
-def test_version_drift_outranks_closed():
-    with pytest.raises(MenuVersionChanged):
+def test_closed_now_outranks_a_price_change():
+    """Inverted deliberately (ADR-0036). The version guard ran BEFORE
+    pricing, so drift beat everything; a total cannot be compared until it
+    is computed, so an unfulfillable cart is now refused first. That is the
+    better order — "closed" is actionable, "re-confirm the price" is not if
+    the order cannot be placed at any price."""
+    with pytest.raises(RestaurantClosed):
         price_order(
-            snap(status="paused", version=5),
+            snap(status="paused", items=[item()]),
             [Line(item_id="itm_a", qty=1)],
-            expected_menu_version=4,
+            expected_total_cents=1,  # would also have been a PriceChanged
         )
 
 

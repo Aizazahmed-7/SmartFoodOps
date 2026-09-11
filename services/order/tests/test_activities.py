@@ -79,7 +79,6 @@ async def _setup():
             restaurant_name="Biryani House",
             card_token="tok_ok",
             request_hash="hash-of-K-1",
-            menu_version=3,
             pricing_snapshot={
                 "subtotal_cents": 3000,
                 "discount_cents": 0,
@@ -130,7 +129,6 @@ def _placement(order_id="ord_2", key="K-2"):
         restaurant_id="rst_1",
         restaurant_name="Biryani House",
         card_token="tok_ok",
-        menu_version=3,
         currency="USD",
         amount_cents=3446,
         placed_at=datetime.now(UTC).isoformat(),
@@ -163,7 +161,7 @@ async def test_create_order_writes_the_row_lines_and_event():
             await s.execute(sa.select(order_items).where(order_items.c.order_id == "ord_2"))
         ).all()
         event = (await s.execute(sa.select(outbox).where(outbox.c.aggregate_id == "ord_2"))).one()
-    assert (order.status, order.aggregate_version) == ("PLACED", 0)
+    assert order.status == "PLACED"
     assert order.restaurant_name_snapshot == "Biryani House"
     assert order.request_hash == "hash-of-K-2"  # the body this order answers for
     assert len(items) == 1 and items[0].name_snapshot == "Chicken Biryani"
@@ -194,6 +192,9 @@ async def test_create_order_run_twice_makes_exactly_one_order():
                 .where(outbox.c.aggregate_id == "ord_2")
             )
         ).scalar_one()
+    # Load-bearing since ADR-0035: event ids are random, so a second
+    # OrderPlaced would NOT collide on the outbox PK. The orders PK inside
+    # _insert_placement is the entire guard — this is what proves it.
     assert (count, events) == (1, 1)  # one order, one OrderPlaced fact
 
 

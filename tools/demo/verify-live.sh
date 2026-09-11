@@ -33,9 +33,16 @@ poll_status() { # poll_status <token> <order_id> <want> <max_seconds>
 }
 
 place_order() { # place_order → prints the new order id (tok_ok card)
+  # Quote first: placement consents to a TOTAL (ADR-0036), so each order
+  # re-quotes rather than reusing a value captured at script start — which
+  # is also what makes this correct if the menu moves mid-run.
+  TOTAL_CENTS=$(curl -s -X POST "$GATEWAY/v1/quote" -H "Authorization: Bearer $CTOK" \
+    -H 'Content-Type: application/json' \
+    -d "{\"restaurant_id\":\"$RESTAURANT_ID\",\"lines\":[{\"item_id\":\"$ITEM_ID\",\"qty\":1}]}" \
+    | json "['totals']['total_cents']")
   curl -s -X POST "$GATEWAY/v1/orders" -H "Authorization: Bearer $CTOK" \
     -H 'Content-Type: application/json' -H "Idempotency-Key: $(idem_key)" \
-    -d "{\"restaurant_id\":\"$RESTAURANT_ID\",\"menu_version\":$MENU_VERSION,\"address_id\":\"$ADDRESS_ID\",\"card_token\":\"tok_ok\",\"lines\":[{\"item_id\":\"$ITEM_ID\",\"qty\":1}]}" \
+    -d "{\"restaurant_id\":\"$RESTAURANT_ID\",\"expected_total_cents\":$TOTAL_CENTS,\"address_id\":\"$ADDRESS_ID\",\"card_token\":\"tok_ok\",\"lines\":[{\"item_id\":\"$ITEM_ID\",\"qty\":1}]}" \
     | json "['order_id']"
 }
 
@@ -64,7 +71,6 @@ for r in json.load(sys.stdin)['restaurants']:
 raise SystemExit('Biryani House not found — run make seed first')
 ")
 MENU=$(curl -s "$GATEWAY/v1/menus/$RESTAURANT_ID")
-MENU_VERSION=$(echo "$MENU" | json "['version']")
 ITEM_ID=$(echo "$MENU" | python3 -c "
 import sys, json
 menu = json.load(sys.stdin)
@@ -76,7 +82,7 @@ for category in menu['categories']:
             print(item['id']); raise SystemExit
 raise SystemExit('no modifier-free item — reseed?')
 ")
-echo "   restaurant=$RESTAURANT_ID item=$ITEM_ID menu_version=$MENU_VERSION"
+echo "   restaurant=$RESTAURANT_ID item=$ITEM_ID"
 
 say "order 1: place → CONFIRMED → accept → preparing → customer cancels"
 ORDER_ID=$(place_order)

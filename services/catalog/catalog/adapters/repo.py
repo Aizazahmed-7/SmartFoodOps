@@ -18,7 +18,9 @@ from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import (
+    BRANCH_OWNED_COLUMNS,
     branch_item_overrides,
+    branch_metadata,
     item_tags,
     menu_categories,
     menu_items,
@@ -44,6 +46,69 @@ class CatalogRepo:
     def __init__(self, session: AsyncSession):
         self._s = session
 
+    # ── the branch/brand column split (review 2026-09-09) ──────────
+    # Branch-owned values live on branch_metadata. Every restaurant read
+    # goes through the two helpers below, so the join is defined ONCE.
+    _BRIDGED = BRANCH_OWNED_COLUMNS
+
+    @classmethod
+    def _restaurant_cols(cls) -> list[Any]:
+        """branch_metadata is the ONLY source of the branch-owned values
+        (0009 dropped the copies on `restaurants`). A brand has no metadata
+        row, so every one of these reads NULL for a brand — which is the
+        whole point: a brand has no city, hours, timezone or status."""
+        return [
+            restaurants.c.id,
+            restaurants.c.owner_user_id,
+            restaurants.c.name,
+            restaurants.c.kind,
+            restaurants.c.created_at,
+            restaurants.c.updated_at,
+            *(branch_metadata.c[name].label(name) for name in cls._BRIDGED),
+            # NULL on a kind='branch' row means the metadata row is missing —
+            # the state no constraint forbids. Callers must not render it
+            # (see IdentityRepo's note on riders/user_roles).
+            branch_metadata.c.restaurant_id.label("metadata_id"),
+        ]
+
+    @property
+    def _dialect(self) -> str:
+        return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
+
+    async def begin_snapshot(self) -> None:
+        """Pin every subsequent read in this transaction to ONE snapshot.
+
+        A menu render is nine queries; under READ COMMITTED they can straddle
+        a commit and build a doc whose rows came from two different menus.
+        REPEATABLE READ makes that unrepresentable instead of merely unlikely
+        — it replaced a bounded re-read loop that compared
+        `restaurants.version` and gave up after three tries (ADR-0037).
+        Read-only, so Postgres raises no serialization failures.
+
+        Must be the FIRST thing in the transaction: the level cannot change
+        once a statement has run.
+
+        sqlite has no equivalent level and needs none — the unit suite drives
+        one connection through StaticPool, so its reads cannot interleave
+        with another writer in the first place.
+        """
+        if self._dialect == "postgresql":
+            await self._s.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+
+    @staticmethod
+    def _joined(*, inner: bool) -> Any:
+        """`inner=True` for reads that are branch-only anyway: the join then
+        doubles as the kind filter, and a metadata-less branch disappears
+        from listings instead of appearing with half its fields."""
+        onclause = branch_metadata.c.restaurant_id == restaurants.c.id
+        # Explicit onclause is required: branch_metadata has a SECOND FK to
+        # restaurants (brand_id), so the join is otherwise ambiguous.
+        return (
+            restaurants.join(branch_metadata, onclause)
+            if inner
+            else restaurants.outerjoin(branch_metadata, onclause)
+        )
+
     # ── restaurants ────────────────────────────────────────────────
 
     async def insert_restaurant(
@@ -67,18 +132,28 @@ class CatalogRepo:
                 id=restaurant_id,
                 owner_user_id=owner_user_id,
                 name=name,
-                city=city,
-                lat=lat,
-                lon=lon,
-                hours=hours,
-                timezone=timezone,
                 kind=kind,
-                brand_id=brand_id,
-                branch_label=branch_label,
                 created_at=now,
                 updated_at=now,
             )
         )
+        if kind == "branch":
+            # Same transaction as the row above, so a branch is never visible
+            # without its metadata. This is the ONLY place a branch is
+            # created — the grep-ban test keeps that true (review 2026-09-09).
+            await self._s.execute(
+                branch_metadata.insert().values(
+                    restaurant_id=restaurant_id,
+                    brand_id=brand_id,
+                    branch_label=branch_label,
+                    city=city,
+                    lat=lat,
+                    lon=lon,
+                    hours=hours,
+                    timezone=timezone,
+                    updated_at=now,
+                )
+            )
         return restaurant_id
 
     async def get_restaurant_by_owner(self, owner_user_id: str) -> Row[Any] | None:
@@ -96,29 +171,46 @@ class CatalogRepo:
         return list(
             (
                 await self._s.execute(
-                    sa.select(restaurants)
-                    .where(restaurants.c.brand_id == brand_id)
-                    .order_by(restaurants.c.branch_label, restaurants.c.id)
+                    sa.select(*self._restaurant_cols())
+                    .select_from(self._joined(inner=True))
+                    .where(branch_metadata.c.brand_id == brand_id)
+                    .order_by(branch_metadata.c.branch_label, restaurants.c.id)
                 )
             ).all()
         )
 
     async def get_branch_by_label(self, brand_id: str, branch_label: str) -> Row[Any] | None:
-        """The branch-create idempotency read (unique per brand)."""
+        """The branch-create idempotency read. Both lookup keys moved to
+        branch_metadata, which is also where uq_branch_metadata_label now
+        makes the pair unique."""
         return (
             await self._s.execute(
-                sa.select(restaurants).where(
-                    (restaurants.c.brand_id == brand_id)
-                    & (restaurants.c.branch_label == branch_label)
+                sa.select(*self._restaurant_cols())
+                .select_from(self._joined(inner=True))
+                .where(
+                    (branch_metadata.c.brand_id == brand_id)
+                    & (branch_metadata.c.branch_label == branch_label)
                 )
             )
         ).one_or_none()
 
     async def copy_profile_to_branches(self, brand_id: str, changes: dict[str, Any]) -> None:
         """Brand-owned fields (name) propagate to the branches' denormalized
-        copies in the SAME tx as the brand edit — browse reads branch rows."""
+        copies in the SAME tx as the brand edit — browse reads branch rows.
+
+        The membership test reads branch_metadata, not restaurants.brand_id:
+        an UPDATE cannot join, so it goes through a subquery. `changes` only
+        ever names restaurants-owned columns (name), so nothing is mirrored."""
         await self._s.execute(
-            restaurants.update().where(restaurants.c.brand_id == brand_id).values(**changes)
+            restaurants.update()
+            .where(
+                restaurants.c.id.in_(
+                    sa.select(branch_metadata.c.restaurant_id).where(
+                        branch_metadata.c.brand_id == brand_id
+                    )
+                )
+            )
+            .values(**changes)
         )
 
     async def upsert_override(self, branch_id: str, item_id: str) -> None:
@@ -141,28 +233,70 @@ class CatalogRepo:
         )
 
     async def get_unpublished_brands(self) -> list[Row[Any]]:
-        """Brands that have never staged an event (version 0) — the boot
-        backfill's worklist; a crash mid-storm resumes here."""
+        """Brands that have never staged an event — the boot backfill's
+        worklist; a crash mid-storm resumes here.
+
+        Asked of the OUTBOX rather than a version column (ADR-0037), and
+        exactly equivalent: `_stage_one` bumps the version and stages the
+        event in one transaction, so "never bumped" and "has no outbox row"
+        were always the same set. Outbox rows are never deleted — the poller
+        only stamps `published_at` — so the answer stays durable. If an
+        operator ever did prune them, a converged brand would re-publish its
+        storm once; every consumer of it is idempotent by design, so that is
+        absorbed rather than harmful.
+        """
         return list(
             (
                 await self._s.execute(
                     sa.select(restaurants).where(
-                        (restaurants.c.kind == "brand") & (restaurants.c.version == 0)
+                        (restaurants.c.kind == "brand")
+                        & ~sa.exists(
+                            sa.select(sa.literal(1)).where(
+                                outbox.c.aggregate_id == restaurants.c.id
+                            )
+                        )
                     )
                 )
             ).all()
         )
 
     async def get_restaurant(self, restaurant_id: str) -> Row[Any] | None:
+        """LEFT, not INNER: a BRAND legitimately has no metadata row, and
+        this is the one read that serves both kinds. The caller checks
+        `metadata_id` to tell "brand" from "branch with a missing row"."""
         return (
-            await self._s.execute(sa.select(restaurants).where(restaurants.c.id == restaurant_id))
+            await self._s.execute(
+                sa.select(*self._restaurant_cols())
+                .select_from(self._joined(inner=False))
+                .where(restaurants.c.id == restaurant_id)
+            )
         ).one_or_none()
 
-    async def update_restaurant(self, restaurant_id: str, changes: dict[str, Any]) -> int:
-        result = await self._s.execute(
-            restaurants.update().where(restaurants.c.id == restaurant_id).values(**changes)
-        )
-        return cast(CursorResult[Any], result).rowcount
+    async def update_restaurant(
+        self, restaurant_id: str, changes: dict[str, Any], now: datetime
+    ) -> int:
+        """Routes each change to the table that owns it. Returns the rows
+        matched — 0 means the target does not exist, or (for a branch-owned
+        change against a BRAND) that there is no metadata row to change."""
+        owned = {k: v for k, v in changes.items() if k not in self._BRIDGED}
+        branch = {k: v for k, v in changes.items() if k in self._BRIDGED}
+        counts: list[int] = []
+        if owned:
+            result = await self._s.execute(
+                restaurants.update().where(restaurants.c.id == restaurant_id).values(**owned)
+            )
+            counts.append(cast(CursorResult[Any], result).rowcount)
+        if branch:
+            # `branch_metadata.updated_at` means "this branch's metadata last
+            # changed" — narrower than `restaurants.updated_at`, which
+            # bump_version moves on every menu edit too.
+            result = await self._s.execute(
+                branch_metadata.update()
+                .where(branch_metadata.c.restaurant_id == restaurant_id)
+                .values(**branch, updated_at=now)
+            )
+            counts.append(cast(CursorResult[Any], result).rowcount)
+        return min(counts) if counts else 0
 
     # ── cuisines ───────────────────────────────────────────────────
 
@@ -334,9 +468,13 @@ class CatalogRepo:
         offset: int,
     ) -> list[Row[Any]]:
         # Brand rows are menu templates, not places — customers browse
-        # branches only (ADR-0028). Legacy rows default to kind='branch'.
-        query = sa.select(restaurants).where(
-            (restaurants.c.city == city) & (restaurants.c.kind == "branch")
+        # branches only (ADR-0028). The INNER join now carries that filter
+        # structurally (only branches have a metadata row); the explicit
+        # kind test stays as the belt to that braces.
+        query = (
+            sa.select(*self._restaurant_cols())
+            .select_from(self._joined(inner=True))
+            .where((branch_metadata.c.city == city) & (restaurants.c.kind == "branch"))
         )
         if cuisine is not None:
             query = query.where(
@@ -359,7 +497,7 @@ class CatalogRepo:
                     .where(
                         (
                             (menu_items.c.restaurant_id == restaurants.c.id)
-                            | (menu_items.c.restaurant_id == restaurants.c.brand_id)
+                            | (menu_items.c.restaurant_id == branch_metadata.c.brand_id)
                         )
                         & (item_tags.c.tag == tag)
                         & (menu_items.c.available == sa.true())
@@ -378,12 +516,17 @@ class CatalogRepo:
         return list((await self._s.execute(query)).all())
 
     async def get_restaurants_by_ids(self, restaurant_ids: list[str]) -> list[Row[Any]]:
+        """Search-result hydration. INNER: every search leg resolves to
+        branch cards, and the caller already drops ids that come back empty
+        ("vanished between index and read")."""
         if not restaurant_ids:
             return []
         return list(
             (
                 await self._s.execute(
-                    sa.select(restaurants).where(restaurants.c.id.in_(restaurant_ids))
+                    sa.select(*self._restaurant_cols())
+                    .select_from(self._joined(inner=True))
+                    .where(restaurants.c.id.in_(restaurant_ids))
                 )
             ).all()
         )
@@ -539,21 +682,21 @@ class CatalogRepo:
 
     # ── the version/audit/outbox writes (_publish uses these) ──────
 
-    async def bump_version(self, restaurant_id: str, now: datetime) -> int:
-        """Callers guarantee the row exists (scalar_one raises otherwise)."""
-        result = await self._s.execute(
-            restaurants.update()
-            .where(restaurants.c.id == restaurant_id)
-            .values(version=restaurants.c.version + 1, updated_at=now)
-            .returning(restaurants.c.version)
+    async def touch(self, restaurant_id: str, now: datetime) -> None:
+        """Stamp `updated_at` for the mutation that is staging an event.
+
+        Was `bump_version`, which incremented a counter nothing guarded on:
+        the version fed event identity (ADR-0035), the placement price guard
+        (ADR-0036) and the torn-read re-check (ADR-0037), and all three are
+        gone. What is left is the audit stamp, which is worth keeping."""
+        await self._s.execute(
+            restaurants.update().where(restaurants.c.id == restaurant_id).values(updated_at=now)
         )
-        return int(result.scalar_one())
 
     async def stage_event(
         self,
         *,
         restaurant_id: str,
-        version: int,
         event_type: str,
         payload: dict[str, Any],
         now: datetime,
@@ -563,7 +706,6 @@ class CatalogRepo:
             outbox,
             aggregate_type="restaurant",
             aggregate_id=restaurant_id,
-            version=version,
             event_type=event_type,
             payload=payload,
             now=now,

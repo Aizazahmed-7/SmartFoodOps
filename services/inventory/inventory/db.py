@@ -29,7 +29,6 @@ stock = sa.Table(
     sa.Column("item_id", sa.Text, primary_key=True),
     sa.Column("available", sa.Integer, nullable=False, server_default="0"),
     # Outbox event_id determinism: every mutation bumps it.
-    sa.Column("version", sa.Integer, nullable=False, server_default="0"),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.CheckConstraint("available >= 0", name="ck_stock_available_nonneg"),
 )
@@ -44,7 +43,6 @@ restaurant_load = sa.Table(
     sa.Column("restaurant_id", sa.Text, primary_key=True),
     sa.Column("active", sa.Integer, nullable=False, server_default="0"),
     sa.Column("capacity", sa.Integer, nullable=False, server_default="10"),
-    sa.Column("version", sa.Integer, nullable=False, server_default="0"),
     sa.CheckConstraint("active >= 0", name="ck_load_active_nonneg"),
 )
 
@@ -58,7 +56,6 @@ reservations = sa.Table(
     sa.Column("lines", sa.JSON, nullable=False),  # [{"item_id": ..., "qty": n}]
     # active -> released (compensation) | consumed (settle) | expired (reaper)
     sa.Column("status", sa.Text, nullable=False, server_default="active"),
-    sa.Column("version", sa.Integer, nullable=False, server_default="0"),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("expires_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.CheckConstraint(f"status IN {RESERVATION_STATUSES!r}", name="ck_reservations_status"),

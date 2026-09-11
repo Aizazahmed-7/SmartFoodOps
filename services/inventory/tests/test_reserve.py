@@ -10,7 +10,6 @@ from inventory.db import metadata, outbox, reservations, restaurant_load, stock
 from inventory.domain.models import ReservationLine
 from inventory.domain.service import AtCapacity, InsufficientStock, InventoryService
 from smartfood_auth import AuthContext, headers_for
-from smartfood_outbox import event_id
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -62,10 +61,10 @@ async def test_reserve_happy_path_decrements_and_stages():
         row = (await s.execute(sa.select(stock))).one()
         load = (await s.execute(sa.select(restaurant_load))).one()
         event = (await s.execute(sa.select(outbox))).one()
-    assert row.available == 7 and row.version == 1
+    assert row.available == 7
     assert load.active == 1  # slot occupied; load row auto-created
     assert event.event_type == "StockReserved"
-    assert event.id == event_id("reservation", "ord_1", 0, "StockReserved")
+    assert (event.aggregate_type, event.aggregate_id) == ("reservation", "ord_1")
 
 
 async def test_reserve_exact_boundary_succeeds():
@@ -163,6 +162,12 @@ async def test_reserve_replay_returns_existing_without_double_decrement():
     assert replay.status == "active"
     row = await _one(sessions, stock)
     assert row.available == 7  # exactly one decrement
+    # And exactly one EVENT. Nothing downstream would collapse a second one
+    # since ADR-0035 made ids random — the reservations PK + the pre-check
+    # above are the whole guard, so this counts what they are guarding.
+    async with sessions() as s:
+        staged = (await s.execute(sa.select(sa.func.count()).select_from(outbox))).scalar_one()
+    assert staged == 1
 
 
 async def test_release_restores_stock_and_slot_then_noops():

@@ -69,7 +69,7 @@ A **cluster** is machines; a **database** is an isolated compartment inside one.
 | Database | Owner | What lives there | Why Postgres |
 |---|---|---|---|
 | `identity_db` | Identity | users, roles, addresses, refresh-token families | Refresh-token rotation and reuse detection need transactional integrity |
-| `catalog_db` | Catalog | restaurants, menus, `menu_categories` (categories → items → modifiers), promo rules, tax tables | Menu edits — categories included — bump `restaurants.version` **in the same transaction** as the rows — the anchor of event identity and the placement-time price guard |
+| `catalog_db` | Catalog | restaurants, menus, `menu_categories` (categories → items → modifiers), promo rules, tax tables | Menu edits — categories included — stage their event **in the same transaction** as the rows. They used to bump `restaurants.version` too, as the anchor of event identity and the placement-time price guard; ids are random now (ADR-0035) and placement consents to a total (ADR-0036), so the column is gone and only `updated_at` is stamped (ADR-0039) |
 | `inventory_db` | Inventory | stock counters, `restaurant_load` capacity counter, reservation ledger | The atomic conditional decrement (`UPDATE … WHERE available >= q`) is the oversell guard; restaurant capacity uses the identical pattern (`WHERE active < capacity`) — kitchen slots as stock |
 | `order_db` | Order | orders + pricing snapshots, hour-partitioned outbox, restaurant order feed index | The state machine's guarded transitions are SQL `UPDATE … WHERE status='prev'`; the outbox must share the order's transaction |
 | `payment_db` | Payment | append-only double-entry ledger (7y), idempotency table | Money. Nothing else was ever considered |
@@ -113,7 +113,7 @@ Money, order state, and stock are **never served from Redis**. The pricing and i
 
 ### 5.4 The CDN and the lake
 
-**CloudFront** is a cache, not storage: menus are immutable per version (`/v1/menus/<rid>/v/<ver>`, 7-day TTL, never purged — a new version is a new URL), browse pages live 30 seconds and carry the current menu version, which is how clients discover new versions. Authenticated responses are `private, no-store` with caching disabled — a shared CDN caching one user's order status would serve it to the next user.
+**CloudFront** is a cache, not storage. The versioned-URL scheme it describes (`/v1/menus/<rid>/v/<ver>`, immutable, 7-day TTL) was retired with the versioned blob in ADR-0027: the menu URL is near-fresh everywhere (`public, max-age=5`) and there are no versions left to discover (ADR-0037). Browse pages live 30 seconds. Authenticated responses are `private, no-store` with caching disabled — a shared CDN caching one user's order status would serve it to the next user.
 
 **S3 lake** — every Kafka event lands as Parquet via an MSK Connect S3 sink (raw), with Firehose + Lambda producing curated transforms. This is the analytics replay source, the GDPR crypto-shredding boundary, and Part B's training/feature corpus.
 
@@ -138,7 +138,7 @@ Topics in `global-kafka` (MSK + Confluent Schema Registry, Avro, `BACKWARD_TRANS
 | `c1.catalog.changes` | restaurant-scoped, compacted | 6 | menu CDC — feeds the cache renderer and Part B embeddings |
 | `c1.inventory.events` / `c1.identity.events` | aggregate id | 12 / 6 | stock movements; account audit |
 
-Every event carries `event_id` (a deterministic UUIDv5 dedupe key derived from `aggregate:{id}:{version}:{type}` — a retried emit reproduces the same id instead of minting a new one), `aggregate_version` (projectors apply only if newer — a late `OrderConfirmed` after `OrderCancelled` no-ops), and W3C `traceparent` in headers so traces survive the async hop.
+Every event carries `event_id` (a random uuid4, unique per emitted row — ADR-0035; consumers dedupe on the value STORED on the outbox row, so a re-published row repeats it, while what stops a double-*emit* is the aggregate's own uniqueness guard in the same transaction), and W3C `traceparent` in headers so traces survive the async hop. It used to carry `aggregate_version` too, described as "projectors apply only if newer" — no projector ever compared it (ADR-0038). What actually orders a late `OrderConfirmed` after `OrderCancelled` is the Kafka topic key: one aggregate, one partition, so last-write-wins is last-event-wins.
 
 Failure handling splits by consumer class: ordering-tolerant consumers (analytics, notifications, sinks) walk retry tiers (`retry.1m` → `retry.10m`) into a per-group DLQ; ordering-sensitive projectors instead **pause the partition** and page — a retry topic would reorder a key's events. Poison pills go straight to the DLQ with the error class, offsets, and trace context attached.
 
@@ -194,7 +194,7 @@ Celery workers run on Fargate, scale on queue depth, and are the *only* consumer
 
 ### 7.4 Lambda: the burst edges
 
-Notification senders (fan-out to providers), the DDB Streams forwarder (Dispatch's outbox relay), menu-cache version bumps, PSP webhook receivers (the mock PSP's async `UNKNOWN` outcomes arrive here, exercising reconciliation), admin report generation, and Firehose transforms. All bursty, all loss-tolerant or replayable from their trigger source.
+Notification senders (fan-out to providers), the DDB Streams forwarder (Dispatch's outbox relay), menu-cache invalidation, PSP webhook receivers (the mock PSP's async `UNKNOWN` outcomes arrive here, exercising reconciliation), admin report generation, and Firehose transforms. All bursty, all loss-tolerant or replayable from their trigger source.
 
 ### 7.5 Housekeeping loops
 
@@ -227,7 +227,7 @@ SLOs: placement 99.95% availability, p95 < 3s (p99 PLACED→CONFIRMED < 6s); dis
 | Brief ask | Where it lives |
 |---|---|
 | Slow/manual ordering workflows | The saga (§4): automated validation → auth → confirm, p99 < 6s |
-| Inconsistent menu/inventory data | Versioned menus + same-tx version bumps + CDC invalidation (§5.1, §5.4); atomic stock decrements |
+| Inconsistent menu/inventory data | Same-tx event staging + CDC invalidation (§5.1, §5.4); atomic stock decrements guarded on `available >= qty`; multi-query reads take one snapshot (ADR-0037). The versioned-menu scheme this named was retired by ADR-0027 and ADR-0039 |
 | Peak-hour latency | §9: CDN, pre-scale, admission control, shed ladder |
 | Inefficient dispatch | DeliveryWorkflow + GEO candidate search + conditional-write lock (§7.1) |
 | Unreliable notifications | Decide-vs-send split with dedupe log (§7.2, §7.3) |

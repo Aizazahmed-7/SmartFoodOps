@@ -11,7 +11,6 @@ from payment.domain.service import (
     PaymentStateConflict,
 )
 from smartfood_idempotency import IdempotencyStore
-from smartfood_outbox import event_id
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -51,17 +50,24 @@ async def test_authorize_approved_writes_row_event_and_completion(gateway):
         idem = (await s.execute(sa.select(idempotency_keys))).one()
         entries = (await s.execute(sa.select(ledger))).all()
     assert (row.status, row.amount_cents, row.payment_intent_id) == ("AUTHORIZED", 3446, "psp_abc")
-    assert event.id == event_id("payment", "ord_1", 0, "PaymentAuthorized")
+    # What the recomputed-id assertion stood for, said directly (ADR-0035).
+    assert (event.aggregate_type, event.aggregate_id) == ("payment", "ord_1")
+    assert event.event_type == "PaymentAuthorized"
     assert idem.status == "COMPLETE" and idem.idem_key == "ord_1:auth"
     assert entries == []  # a hold is NOT a money movement — no ledger rows
 
 
 async def test_authorize_replay_returns_stored_no_second_psp_call(gateway):
-    service, _ = await _service(gateway)
+    service, sessions = await _service(gateway)
     first = await _authorize(service)
     replay = await _authorize(service)
     assert replay.replayed and replay.body == first.body
     assert len(gateway.authorize_calls) == 1  # the PSP saw exactly one attempt
+    # One event, too: with random ids (ADR-0035) a second staging would not
+    # collide, so the payments PK and the idempotency store are the guard.
+    async with sessions() as s:
+        staged = (await s.execute(sa.select(sa.func.count()).select_from(outbox))).scalar_one()
+    assert staged == 1
 
 
 async def test_decline_is_stored_and_replayed_as_402(gateway):
@@ -120,7 +126,7 @@ async def test_capture_moves_money_with_a_balanced_pair(gateway):
         row = (await s.execute(sa.select(payments))).one()
         entries = (await s.execute(sa.select(ledger))).all()
         event_types = [e.event_type for e in (await s.execute(sa.select(outbox))).all()]
-    assert row.status == "CAPTURED" and row.version == 1
+    assert row.status == "CAPTURED"
     assert len(entries) == 2
     assert sum(e.debit_cents for e in entries) == sum(e.credit_cents for e in entries) == 3446
     by_account = {e.account: e for e in entries}

@@ -9,7 +9,6 @@ class StockRow:
     item_id: str
     restaurant_id: str
     available: int
-    version: int
 
 
 @dataclass(frozen=True)

@@ -46,8 +46,6 @@ orders = sa.Table(
     sa.Column("brand_id", sa.Text, nullable=True),
     sa.Column("restaurant_name_snapshot", sa.Text, nullable=False),
     sa.Column("status", sa.Text, nullable=False, server_default="PLACED"),
-    # Bumped by the guarded transition helper (S5) — outbox event identity.
-    sa.Column("aggregate_version", sa.Integer, nullable=False, server_default="0"),
     sa.Column("payment_method", sa.Text, nullable=False, server_default="CARD"),
     sa.Column("card_token", sa.Text, nullable=False),
     # sha256 of the exact placement body this order was created from
@@ -56,7 +54,6 @@ orders = sa.Table(
     # 202, different hash → 422 (a client reused a key across carts).
     # Nullable: rows born before ADR-0024 skip the guard.
     sa.Column("request_hash", sa.Text, nullable=True),
-    sa.Column("menu_version", sa.Integer, nullable=False),
     # {subtotal,discount,fee,tax,total}_cents + currency — FR-16: authorization
     # and refunds are computed ONLY from this, never recomputed.
     sa.Column("pricing_snapshot", sa.JSON, nullable=False),

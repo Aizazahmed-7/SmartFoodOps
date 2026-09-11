@@ -9,7 +9,6 @@ from order.adapters.repo import OrderRepo
 from order.db import metadata, orders, outbox
 from order.domain.transitions import IllegalTransition, begin_cancel_from, transition
 from smartfood_kafka import EventType
-from smartfood_outbox import event_id
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -33,7 +32,6 @@ async def _seed_order(sessions, order_id="ord_1"):
             restaurant_name="Biryani House",
             card_token="tok_ok",
             request_hash="hash-x",
-            menu_version=3,
             pricing_snapshot={
                 "subtotal_cents": 3000,
                 "discount_cents": 0,
@@ -61,29 +59,33 @@ async def _seed_order(sessions, order_id="ord_1"):
 async def _status(sessions, order_id="ord_1"):
     async with sessions() as s:
         row = (
-            await s.execute(
-                sa.select(orders.c.status, orders.c.aggregate_version, orders.c.cancel_reason)
-            )
+            await s.execute(sa.select(orders.c.status, orders.c.updated_at, orders.c.cancel_reason))
         ).one()
     return row
 
 
-async def test_apply_bumps_version():
+async def test_apply_moves_the_status_and_stamps_it():
     sessions = await _sessions()
     await _seed_order(sessions)
+    before = (await _status(sessions)).updated_at
     result = await transition(sessions, "ord_1", expected="PLACED", target="VALIDATED")
-    assert result.applied and result.version == 1
+    assert result.applied
     row = await _status(sessions)
-    assert (row.status, row.aggregate_version) == ("VALIDATED", 1)
+    assert row.status == "VALIDATED"
+    assert row.updated_at > before
 
 
 async def test_replay_is_idempotent_noop():
+    """`applied=False` has to mean NOTHING was written, not just that a
+    counter held still — so this asserts on the stamp the UPDATE would have
+    moved. (It used to assert the version did not bump twice.)"""
     sessions = await _sessions()
     await _seed_order(sessions)
     await transition(sessions, "ord_1", expected="PLACED", target="VALIDATED")
+    after_first = (await _status(sessions)).updated_at
     replay = await transition(sessions, "ord_1", expected="PLACED", target="VALIDATED")
     assert not replay.applied  # already at target — a retried activity
-    assert replay.version == 1  # nothing bumped twice
+    assert (await _status(sessions)).updated_at == after_first  # nothing written
 
 
 async def test_illegal_transition_names_the_actual_state():
@@ -110,7 +112,6 @@ async def test_begin_cancel_from_flips_any_allowed_state():
         )
         row = await _status(sessions)
         assert (row.status, row.cancel_reason) == ("CANCELLING", "customer_cancelled")
-        assert row.aggregate_version == 2  # the set-guarded move bumps too
 
 
 async def test_begin_cancel_from_loses_to_the_courier():
@@ -124,14 +125,16 @@ async def test_begin_cancel_from_loses_to_the_courier():
     assert (row.status, row.cancel_reason) == ("PICKED_UP", None)  # untouched
 
 
-async def test_begin_cancel_from_replay_is_true_without_a_second_bump():
+async def test_begin_cancel_from_replay_is_true_without_a_second_write():
     sessions = await _sessions()
     await _seed_order(sessions)
     await transition(sessions, "ord_1", expected="PLACED", target="READY")
     assert await begin_cancel_from(sessions, "ord_1", allowed=KITCHEN, reason="customer_cancelled")
+    stamped = (await _status(sessions)).updated_at
     assert await begin_cancel_from(sessions, "ord_1", allowed=KITCHEN, reason="customer_cancelled")
     row = await _status(sessions)
-    assert (row.status, row.aggregate_version) == ("CANCELLING", 2)  # one bump, not two
+    assert row.status == "CANCELLING"
+    assert row.updated_at == stamped  # the set guard matched nothing the 2nd time
 
 
 async def test_begin_cancel_from_unknown_order_is_false():
@@ -155,7 +158,8 @@ async def test_event_stages_in_the_same_transaction_with_full_state():
     )
     async with sessions() as s:
         event = (await s.execute(sa.select(outbox))).one()
-    assert event.id == event_id("order", "ord_1", 2, EventType.ORDER_CANCELLED)
+    assert (event.aggregate_type, event.aggregate_id) == ("order", "ord_1")
+    assert event.event_type == EventType.ORDER_CANCELLED
     assert event.payload["status"] == "CANCELLED"
     assert event.payload["cancel_reason"] == "item_unavailable"
     assert event.payload["items"][0]["name"] == "Chicken Biryani"  # full state

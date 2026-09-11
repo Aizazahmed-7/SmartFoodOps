@@ -21,17 +21,27 @@ def _admin(rid):
     )
 
 
+def _onboard(client, body=None):
+    """(brand_id, branch_id). Hours, timezone and status are BRANCH facts
+    since 0009 — a brand is a menu template with no schedule — so every
+    assertion in this file reads the minted first branch."""
+    body = client.post("/v1/restaurants", json=body or BODY, headers=CUSTOMER).json()
+    return body["id"], body["branches"][0]["id"]
+
+
 def test_new_restaurant_gets_the_configured_default_timezone(client):
     """An owner who never names a zone still gets a correct schedule for the
     deployment — the default is config, not a constant in a migration."""
     r = client.post("/v1/restaurants", json=BODY, headers=CUSTOMER)
     assert r.status_code == 201
-    assert r.json()["timezone"] == "America/Chicago"
+    assert r.json()["branches"][0]["timezone"] == "America/Chicago"
+    assert r.json()["timezone"] is None  # the brand has no schedule at all
 
 
 def test_owner_can_name_their_own_timezone(client):
     r = client.post("/v1/restaurants", json={**BODY, "timezone": "Asia/Karachi"}, headers=CUSTOMER)
-    assert r.status_code == 201 and r.json()["timezone"] == "Asia/Karachi"
+    assert r.status_code == 201
+    assert r.json()["branches"][0]["timezone"] == "Asia/Karachi"
 
 
 def test_unknown_timezone_is_refused_at_the_boundary(client):
@@ -45,17 +55,29 @@ def test_unknown_timezone_is_refused_at_the_boundary(client):
 
 
 def test_timezone_is_updatable(client):
-    rid = client.post("/v1/restaurants", json=BODY, headers=CUSTOMER).json()["id"]
+    brand, branch = _onboard(client)
     r = client.patch(
-        f"/v1/restaurants/{rid}", json={"timezone": "Europe/Berlin"}, headers=_admin(rid)
+        f"/v1/restaurants/{branch}", json={"timezone": "Europe/Berlin"}, headers=_admin(brand)
     )
     assert r.status_code == 200 and r.json()["timezone"] == "Europe/Berlin"
 
 
-def test_update_rejects_an_unknown_timezone(client):
-    rid = client.post("/v1/restaurants", json=BODY, headers=CUSTOMER).json()["id"]
+def test_timezone_on_a_brand_is_refused_not_silently_dropped(client):
+    """The failure mode this guard exists for: timezone lives on
+    branch_metadata, a brand has no row there, so without the check the
+    UPDATE matches nothing and the PATCH returns 200 having done nothing."""
+    brand, _ = _onboard(client)
     r = client.patch(
-        f"/v1/restaurants/{rid}", json={"timezone": "Nowhere/Land"}, headers=_admin(rid)
+        f"/v1/restaurants/{brand}", json={"timezone": "Europe/Berlin"}, headers=_admin(brand)
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["details"] == [{"field": "timezone", "issue": "branch-owned"}]
+
+
+def test_update_rejects_an_unknown_timezone(client):
+    brand, branch = _onboard(client)
+    r = client.patch(
+        f"/v1/restaurants/{branch}", json={"timezone": "Nowhere/Land"}, headers=_admin(brand)
     )
     assert r.status_code == 422
 
@@ -74,19 +96,17 @@ def _snapshot(client, rid, item_ids=("itm_none",)):
 def test_snapshot_reports_open_now_true_without_hours(client):
     """No hours configured = never closed by schedule. This is what keeps
     every already-seeded restaurant sellable after this feature shipped."""
-    rid = client.post("/v1/restaurants", json=BODY, headers=CUSTOMER).json()["id"]
-    body = _snapshot(client, rid).json()
+    _, branch = _onboard(client)
+    body = _snapshot(client, branch).json()
     assert body["restaurant"]["open_now"] is True
 
 
 def test_snapshot_computes_open_now_from_hours_and_timezone(client):
     """The whole point: catalog owns the clock, so the snapshot carries a
     decided boolean and the pricing engine stays a pure function."""
-    rid = client.post(
-        "/v1/restaurants",
-        json={**BODY, "timezone": "America/Chicago", "hours": {"mon": ["11:00", "23:00"]}},
-        headers=CUSTOMER,
-    ).json()["id"]
+    _, rid = _onboard(
+        client, {**BODY, "timezone": "America/Chicago", "hours": {"mon": ["11:00", "23:00"]}}
+    )
 
     # A Monday, 04:00 Chicago — outside the window.
     from datetime import UTC, datetime
@@ -103,12 +123,8 @@ def test_snapshot_computes_open_now_from_hours_and_timezone(client):
 def test_status_and_schedule_are_independent(client):
     """Paused-but-in-hours is still shut. Two different questions, two
     different fields — a merged flag would lie to the customer."""
-    rid = client.post(
-        "/v1/restaurants",
-        json={**BODY, "hours": {"mon": ["11:00", "23:00"]}},
-        headers=CUSTOMER,
-    ).json()["id"]
-    client.post(f"/v1/restaurants/{rid}/pause", headers=_admin(rid))
+    brand, rid = _onboard(client, {**BODY, "hours": {"mon": ["11:00", "23:00"]}})
+    assert client.post(f"/v1/restaurants/{rid}/pause", headers=_admin(brand)).status_code == 200
 
     from datetime import UTC, datetime
 
@@ -141,7 +157,12 @@ async def test_timezone_rides_in_the_compacted_event_payload(grants, cache):
         events = (await session.execute(sa.select(outbox))).all()
 
     assert events, "onboarding must stage an event"
-    payload = events[-1].payload
-    assert payload["timezone"] == "Asia/Karachi"
-    assert payload["hours"] == {"mon": ["11:00", "23:00"]}
-    assert restaurant.timezone == "Asia/Karachi"
+    by_kind = {e.payload["kind"]: e.payload for e in events}
+    # The BRANCH's event is the one a consumer rebuilds a schedule from.
+    assert by_kind["branch"]["timezone"] == "Asia/Karachi"
+    assert by_kind["branch"]["hours"] == {"mon": ["11:00", "23:00"]}
+    # The brand's carries neither, because a menu template has no schedule.
+    # Asserted, not incidental: it is the wire-visible half of the split.
+    assert by_kind["brand"]["timezone"] is None
+    assert by_kind["brand"]["hours"] is None
+    assert restaurant.timezone is None  # create_restaurant returns the brand

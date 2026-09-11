@@ -26,15 +26,12 @@ export interface CartLine {
 interface CartState {
   restaurantId: string | null;
   restaurantName: string | null;
-  menuVersion: number | null;
   lines: CartLine[];
   add: (
-    restaurant: { id: string; name: string; version: number },
+    restaurant: { id: string; name: string },
     line: Omit<CartLine, "key" | "qty">,
   ) => "added" | "different-restaurant";
   setQty: (key: string, qty: number) => void;
-  /** Re-pin after a quote (self-heal) or a PRICE_CHANGED re-confirm. */
-  setMenuVersion: (version: number) => void;
   clear: () => void;
 }
 
@@ -48,7 +45,6 @@ export const useCart = create<CartState>()(
     (set, get) => ({
       restaurantId: null,
       restaurantName: null,
-      menuVersion: null,
       lines: [],
       add: (restaurant, line) => {
         const state = get();
@@ -61,7 +57,6 @@ export const useCart = create<CartState>()(
         set({
           restaurantId: restaurant.id,
           restaurantName: restaurant.name,
-          menuVersion: restaurant.version,
           lines: existing
             ? state.lines.map((l) => (l.key === key ? { ...l, qty: l.qty + 1 } : l))
             : [...state.lines, { ...line, key, qty: 1 }],
@@ -75,9 +70,7 @@ export const useCart = create<CartState>()(
               ? state.lines.filter((l) => l.key !== key)
               : state.lines.map((l) => (l.key === key ? { ...l, qty } : l)),
         })),
-      setMenuVersion: (version) => set({ menuVersion: version }),
-      clear: () =>
-        set({ restaurantId: null, restaurantName: null, menuVersion: null, lines: [] }),
+      clear: () => set({ restaurantId: null, restaurantName: null, lines: [] }),
     }),
     { name: "sfo-cart" },
   ),
