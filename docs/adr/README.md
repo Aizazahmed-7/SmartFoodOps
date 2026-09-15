@@ -28,7 +28,7 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0022](0022-roles-as-seeded-lookup-table.md) | Roles as a seeded lookup table, pinned to the enum | Accepted — amended by 0034 |
 | [0023](0023-placement-runs-inside-the-order-workflow.md) | Placement runs inside the order workflow (update-with-start), sweeper retired | Accepted |
 | [0024](0024-orders-row-is-placements-idempotency-record.md) | The orders row is placement's idempotency record; the key table retired | Accepted |
-| [0025](0025-side-effects-ride-a-task-queue.md) | Side effects ride a task queue; projections ride the log | Accepted |
+| [0025](0025-side-effects-ride-a-task-queue.md) | Side effects ride a task queue; projections ride the log | Accepted (the recipients-join example superseded by 0040) |
 | [0026](0026-dispatch-truth-in-dynamodb-events-as-copies.md) | Dispatch's truth lives in DynamoDB; its events are copies | Accepted |
 | [0027](0027-menu-cache-aside.md) | Menu cache is cache-aside; versioned blob + pointer retired | Accepted (its torn-read version re-check superseded by 0037) |
 | [0028](0028-brands-and-branch-menu-inheritance.md) | Brands as restaurant rows; branch menus inherit by fan-out | Accepted (its `menu_version`-pinning consequence superseded by 0036) |
@@ -41,5 +41,6 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0037](0037-one-snapshot-instead-of-a-version-recheck.md) | Consistent reads come from one snapshot, not a version re-check | Accepted |
 | [0038](0038-outbox-carries-no-aggregate-version.md) | The outbox and the event envelope carry no `aggregate_version` | Accepted |
 | [0039](0039-no-table-carries-a-version-column.md) | No table carries a version column | Accepted |
+| [0040](0040-refund-notifications-run-as-a-workflow.md) | Refund notifications run as a Temporal workflow | Accepted |
 
 **Conventions**: files are `NNNN-kebab-title.md`; numbers are never reused. Superseding an ADR = new ADR + status change here, never editing the old decision.

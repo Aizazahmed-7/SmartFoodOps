@@ -20,6 +20,14 @@ from notification.main import create_app
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+
+class _NoRefunds:
+    """The refund hand-off is exercised in test_consumers; these suites
+    only need create_app/InboxHandler to be constructible."""
+
+    async def notify_refund(self, notice) -> None: ...
+
+
 CUSTOMER = {"X-Auth-Sub": "usr_1", "X-Auth-Roles": "customer"}
 OTHER_CUSTOMER = {"X-Auth-Sub": "usr_2", "X-Auth-Roles": "customer"}
 PARTNER = {
@@ -42,7 +50,7 @@ async def harness():
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     app = create_app(Settings(database_url="sqlite+aiosqlite://", create_all=True))
     app.state.service = NotificationService(sessions)  # the test owns the DB
-    handler = InboxHandler(sessions)
+    handler = InboxHandler(sessions, _NoRefunds())
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://notification.test"
     ) as client:
@@ -209,7 +217,9 @@ async def test_the_apps_own_wiring_end_to_end():
     through the same sessionmaker the app built."""
     app = create_app(Settings(database_url="sqlite+aiosqlite://", create_all=True))
     async with app.router.lifespan_context(app):  # one loop end to end
-        await InboxHandler(app.state.service._sessions).handle(_order_event("evt-own"))
+        await InboxHandler(app.state.service._sessions, _NoRefunds()).handle(
+            _order_event("evt-own")
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://notification.test"
         ) as client:

@@ -154,14 +154,12 @@ def _receipt_data(row: sa.Row[Any]) -> ReceiptData:
 
 
 def _park(runtime: Runtime, order_id: str) -> None:
-    """Poison handling, shared by every permanent send failure: a non-null
-    failed_at pulls the row out of the sweeper and every retry loop —
-    clearing it after a fix is the human replay lever (see runbooks)."""
+    """Poison handling, shared by every permanent send failure: `parked`
+    takes the row out of the sweeper's partial index entirely — moving it
+    back to `pending` after a fix is the human replay lever (runbooks)."""
     with runtime.engine.begin() as conn:
         conn.execute(
-            receipts.update()
-            .where(receipts.c.order_id == order_id)
-            .values(failed_at=datetime.now(UTC))
+            receipts.update().where(receipts.c.order_id == order_id).values(status="parked")
         )
 
 
@@ -266,6 +264,11 @@ def send_receipt(s3_key: str, order_id: str) -> str:
         raise
 
     with runtime.engine.begin() as conn:
+        # Both writes, one transaction. delivery_log stays the PER-CHANNEL
+        # ledger (it holds the provider's id, and SMS will want its own
+        # row); `status` is the per-RECEIPT fact the sweeper indexes. They
+        # answer different questions, so neither replaces the other — and
+        # committing together is what keeps them from disagreeing.
         conn.execute(
             insert_ignoring_conflict(
                 delivery_log,
@@ -279,6 +282,7 @@ def send_receipt(s3_key: str, order_id: str) -> str:
                 conn.dialect.name,
             )
         )
+        conn.execute(receipts.update().where(receipts.c.order_id == order_id).values(status="sent"))
     RECEIPTS_SENT.labels(outcome="sent").inc()
     log.info("receipt sent", order_id=order_id, provider_message_id=message_id)
     return message_id
@@ -286,29 +290,23 @@ def send_receipt(s3_key: str, order_id: str) -> str:
 
 @celery_app.task(name="receipts.sweep")
 def sweep_unsent_receipts() -> int:
-    """The reconciler (beat, every receipt_sweep_seconds): any receipt old
-    enough to be past the grace window, not parked, and absent from the
-    delivery log gets its chain re-enqueued. This is what lets the
-    post-commit enqueue in the consumer be best-effort — a lost nudge
-    costs one sweep interval, never the receipt."""
+    """The reconciler (beat, every receipt_sweep_seconds): any receipt still
+    `pending` past the grace window gets its chain re-enqueued. This is what
+    lets the post-commit enqueue in the consumer be best-effort — a lost
+    nudge costs one sweep interval, never the receipt.
+
+    One table, one predicate, served by a partial index. It used to
+    anti-join `delivery_log`, which meant the steady state — nothing owed —
+    was the EXPENSIVE case: proving the debt was zero hash-joined both
+    tables in full, and got slower with every order the platform ever
+    settled."""
     runtime = _get_runtime()
     cutoff = datetime.now(UTC) - runtime.sweep_grace
     with runtime.engine.begin() as conn:
         owed = (
             conn.execute(
                 sa.select(receipts.c.order_id)
-                .select_from(
-                    receipts.outerjoin(
-                        delivery_log,
-                        (delivery_log.c.order_id == receipts.c.order_id)
-                        & (delivery_log.c.channel == "email"),
-                    )
-                )
-                .where(
-                    delivery_log.c.order_id.is_(None)
-                    & receipts.c.failed_at.is_(None)
-                    & (receipts.c.created_at < cutoff)
-                )
+                .where((receipts.c.status == "pending") & (receipts.c.created_at < cutoff))
                 .limit(100)  # a stampede of debt drains over several sweeps
             )
             .scalars()

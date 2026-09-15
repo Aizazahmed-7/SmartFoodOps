@@ -413,7 +413,7 @@ sequenceDiagram
     SND->>I: [HTTP] GET /v1/internal/users/usr_1 — resolve the<br/>CURRENT email at SEND time (events carry no PII) —<br/>system-authed, 404 → park (no_recipient), 5xx → retry
     I-->>SND: {email} — never logged, never stored
     SND->>M: [HTTP] POST /mailer/send {to, subject, body,<br/>attachment_key} — the reference, never the bytes
-    M-->>SND: 202 {message_id}<br/>(5xx → autoretry with backoff+jitter —<br/>4xx → PARK: failed_at set, no retries — poison)
+    M-->>SND: 202 {message_id}<br/>(5xx → autoretry with backoff+jitter —<br/>4xx → PARK: status=parked, no retries — poison)
     SND->>DB: [DB] INSERT delivery_log — existence = sent
     Note over Q,DB: BEAT (every 5m): sweep_unsent_receipts —<br/>receipts LEFT JOIN delivery_log, older than the<br/>grace window, not parked → re-enqueue the chain.<br/>A lost nudge costs one sweep interval, never the receipt.
 ```
@@ -427,7 +427,7 @@ Where the money-document guarantees live:
 | Worker killed mid-task | acks_late → RabbitMQ redelivers; render overwrites, send checks the log |
 | Mailer 5xx / unreachable | `MailerUnavailable` → autoretry, deterministic exponential backoff, max 8 |
 | Identity 5xx / unreachable | `ContactsUnavailable` → same autoretry — the lookup happens inside the retryable task on purpose |
-| Mailer 4xx (bad recipient) | `MailerRejected` → `failed_at` parks it OUT of the sweeper; clearing it is the replay lever |
+| Mailer 4xx (bad recipient) | `MailerRejected` → `status='parked'` takes it out of the sweeper's partial index; setting it back to `pending` is the replay lever |
 | Identity 404 (no such user) | `UnknownRecipient` → parked the same way (`no_recipient`) — a data bug a human must see |
 | Crash between send and record | the one residual: ONE duplicate email — chosen over claim-first, which turns the same crash into a receipt that never arrives |
 

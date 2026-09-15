@@ -19,7 +19,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import notifications, order_recipients, receipts
+from ..db import notifications, receipts
 
 # Fixed namespace for notification ids. NEVER change it: ids are the dedupe
 # key, and a new namespace would re-deliver every replayed event's inbox row.
@@ -63,23 +63,6 @@ class NotificationRepo:
     @property
     def _dialect(self) -> str:
         return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
-
-    async def upsert_recipients(self, order_id: str, user_id: str, restaurant_id: str) -> None:
-        """First order event wins; the pair never changes for an order."""
-        await self._s.execute(
-            insert_ignoring_conflict(
-                order_recipients,
-                {"order_id": order_id, "user_id": user_id, "restaurant_id": restaurant_id},
-                ["order_id"],
-                self._dialect,
-            )
-        )
-
-    async def get_recipients(self, order_id: str) -> Row[Any] | None:
-        result = await self._s.execute(
-            sa.select(order_recipients).where(order_recipients.c.order_id == order_id)
-        )
-        return result.one_or_none()
 
     async def insert_notification(
         self,

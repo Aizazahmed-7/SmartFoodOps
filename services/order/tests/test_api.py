@@ -60,3 +60,39 @@ def test_courier_events_are_system_only(client):
         headers=rider,
     )
     assert r.status_code == 403
+
+
+# ── the internal recipients read (notification → refund workflow) ──
+
+
+def test_recipients_returns_both_parties_for_a_real_order(
+    client, catalog, make_snapshot, place_order
+):
+    """Notification asks this because payment events are keyed by order and
+    carry no user_id (ADR-0040). Unscoped by design — the caller is a
+    service acting on an event, not a user reading their own order."""
+    catalog.snapshot = make_snapshot()
+    order_id = place_order(client)
+    r = client.get(f"/v1/internal/orders/{order_id}/recipients", headers=_system_headers())
+    assert r.status_code == 200
+    assert r.json() == {"user_id": "usr_1", "restaurant_id": "rst_1"}
+
+
+def test_recipients_for_an_unknown_order_is_404(client):
+    r = client.get("/v1/internal/orders/ord_ghost/recipients", headers=_system_headers())
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_recipients_requires_a_system_claim(client, catalog, make_snapshot, place_order):
+    """It leaks the customer id for any order id, so it must never be
+    reachable with a customer's own token."""
+    from smartfood_auth import AuthContext, headers_for
+
+    catalog.snapshot = make_snapshot()
+    order_id = place_order(client)
+    customer = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
+    assert (
+        client.get(f"/v1/internal/orders/{order_id}/recipients", headers=customer).status_code
+        == 403
+    )

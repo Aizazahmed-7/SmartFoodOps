@@ -17,6 +17,18 @@ metadata = sa.MetaData()
 RecipientType = Literal["customer", "restaurant"]
 RECIPIENT_TYPES: tuple[str, ...] = get_args(RecipientType)
 
+# A receipt's lifecycle, made explicit (review 2026-09-15). It used to be
+# inferred from three nullable columns and a row in another table:
+# "rendered" = s3_key set, "sent" = a delivery_log row exists, "parked" =
+# failed_at non-null. That left `s3_key` set with `rendered_at` NULL
+# representable and meaningless, and — the reason this changed — made the
+# sweeper's "still owed" predicate live in delivery_log, so no index on
+# `receipts` could serve it. Measured on 300k receipts with nothing owed,
+# the sweep hash-joined both tables in full to return zero rows; against
+# the partial index below it reads ONE page.
+ReceiptStatus = Literal["pending", "sent", "parked"]
+RECEIPT_STATUSES: tuple[str, ...] = get_args(ReceiptStatus)
+
 notifications = sa.Table(
     "notifications",
     metadata,
@@ -40,17 +52,6 @@ sa.Index(
     notifications.c.id.desc(),
 )
 
-# order_id → who to tell. Payment events carry no user_id (they are keyed
-# by order), so every ORDER event upserts this projection and payment
-# handling joins through it.
-order_recipients = sa.Table(
-    "order_recipients",
-    metadata,
-    sa.Column("order_id", sa.Text, primary_key=True),
-    sa.Column("user_id", sa.Text, nullable=False),
-    sa.Column("restaurant_id", sa.Text, nullable=False),
-)
-
 # ── receipts (S10, FR-41) ──────────────────────────────────────────
 # The CLAIM CHECK: the OrderSettled consumer copies everything the PDF
 # needs out of the full-state payload into this row, and the Celery chain
@@ -70,10 +71,22 @@ receipts = sa.Table(
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),  # sweeper grace anchor
     sa.Column("s3_key", sa.Text, nullable=True),  # set by render_receipt
     sa.Column("rendered_at", sa.TIMESTAMP(timezone=True), nullable=True),
-    # Poison marker: the mailer REJECTED this receipt (4xx — retrying can
-    # never help). A non-null failed_at parks the row out of the sweeper;
-    # clearing it after a fix is the replay lever, mirroring the DLQ story.
-    sa.Column("failed_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    # pending → sent, or → parked. `parked` is the poison marker the
+    # mailer's 4xx sets (retrying can never help); moving it back to
+    # `pending` is the human replay lever, mirroring the DLQ story.
+    sa.Column("status", sa.Text, nullable=False, server_default="pending"),
+    sa.CheckConstraint(f"status IN {RECEIPT_STATUSES!r}", name="ck_receipts_status"),
+)
+
+# The sweeper's whole worklist. PARTIAL on purpose: it indexes only the
+# rows that can ever be owed, so an empty sweep — the steady state, running
+# forever on a schedule — touches one page instead of scanning every
+# receipt the platform has ever issued.
+sa.Index(
+    "ix_receipts_owed",
+    receipts.c.created_at,
+    postgresql_where=sa.text("status = 'pending'"),
+    sqlite_where=sa.text("status = 'pending'"),
 )
 
 # Existence = sent, per channel. send_receipt checks before sending and

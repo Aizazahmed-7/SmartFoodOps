@@ -129,6 +129,7 @@ Profiles: **core** (infra — rabbitmq joined in S10), **apps** (services), **ui
 | core | mock-psp | 9080 | Failure-injection knobs, §9 |
 | core | mock-mailer | 9081 | Receipt emails land here: `GET /mailer/outbox`. Knobs: `FAIL_RATE`, `POST /admin/fail_next`, magic `*@bounce.invalid` |
 | apps | receipt-renderer / receipt-sender | 9109 / 9110 (in-network) | Celery workers (S10) — bare /metrics ports, scraped by Prometheus |
+| apps | notification-worker | — | Temporal worker for RefundNotificationWorkflow (ADR-0040). Without it the API consumes refund events and SKIPS them — the bell stays silent rather than the loop failing |
 | core | nginx gateway (emulates ALB path rules) | **8080** | The single client entrypoint |
 | cdc *(W3)* | Kafka Connect + Debezium | 8083 | Only needed for `OUTBOX_MODE=debezium` (§5) |
 | obs *(W3)* | otel-collector | 4317 | OTLP gRPC |
@@ -187,7 +188,7 @@ The full stack is ≈ 8–9 GB, so **slim mode is the default**, not the excepti
 | `make dev SVC=order` | Run one service **natively on the host**, `uvicorn --reload`, wired to compose infra | +~150 MB |
 | `make up-apps ONLY="payment inventory"` | Add just the containerized neighbors your flow needs | ~4 GB typical |
 | `make up-m2` | The W2 order-lifecycle set: core + temporal, mock-psp, identity, catalog, edge-bff, inventory, order, order-worker, payment (~6–7 GB) |
-| `make up-m3` | The `up-m2` set + notification, analytics, and the receipts pipeline (rabbitmq, localstack S3, mock-mailer, receipt-renderer, receipt-sender) |
+| `make up-m3` | The `up-m2` set + notification, notification-worker, analytics, and the receipts pipeline (rabbitmq, localstack S3, mock-mailer, receipt-renderer, receipt-sender) |
 | `make up-m4` | The `up-m3` set + dispatch and rider-gateway (DynamoDB tables self-create on LocalStack); `make riders` starts simulated couriers |
 | `make up-ai` *(B0)* | The W1 core + `ai-assistant` — deliberately **not** a superset of `up-m4`: the full m4 set plus the AI plane does not fit in a 7.7 GB VM (~5 GB) |
 | `make up-cdc` *(W3)* | Add the `cdc` profile (Kafka Connect + Debezium) — needed for `OUTBOX_MODE=debezium` (§5) | +1–1.5 GB |

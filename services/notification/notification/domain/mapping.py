@@ -25,8 +25,8 @@ class Draft:
 
 
 # The payment events that mint anything at all. The consumer checks this
-# BEFORE the recipients-projection lookup, so a no-op PaymentAuthorized/
-# PaymentCaptured can never trip a spurious ProjectionLag.
+# BEFORE starting a workflow, so a no-op PaymentAuthorized/PaymentCaptured
+# never costs a Temporal execution (ADR-0040).
 NOTIFYING_PAYMENT_EVENTS = frozenset({EventType.REFUND_PROCESSED})
 
 
@@ -130,8 +130,10 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
 
 
 def payment_drafts(event_type: str, payload: dict[str, Any], *, user_id: str) -> list[Draft]:
-    """Payment payloads have no user_id (keyed by order) — the caller joins
-    it in via the order_recipients projection."""
+    """Payment payloads have no user_id (keyed by order). The caller is
+    RefundNotificationWorkflow's write activity, which has just resolved it
+    from order (ADR-0040) — the copy still lives here with every other
+    notification's."""
     if event_type == EventType.REFUND_PROCESSED:
         total = money(payload["amount_cents"], payload["currency"])
         return [

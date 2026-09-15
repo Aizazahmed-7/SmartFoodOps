@@ -7,15 +7,16 @@ ADR-0021):
     GROUP_ORDERS    ← c1.orders.events
     GROUP_PAYMENTS  ← c1.payments.events
 
-Separate loops on purpose. Payment events carry no user_id (they are keyed
-by order), so refunds join through the order_recipients projection that
-ORDER events write. Cross-topic ordering is not guaranteed — a refund can
-beat its own order's events through the pipeline — and a projection miss
-raises ProjectionLag so the runtime's backoff retries. That healing only
-works because the orders loop keeps consuming (and arming the projection)
-WHILE the payments loop backs off; one shared loop would block the very
-event it is waiting for, guaranteeing the DLQ. A refund that still misses
-after the backoff horizon is a true orphan: parked, visible, replayable.
+Separate loops on purpose — now for failure isolation rather than for a
+projection race (ADR-0040 replaced that with a workflow): separate consumer
+groups mean separate offsets, so a poison payment event parking on the DLQ
+cannot stall order notifications, or the reverse.
+
+Payment events carry no user_id (they are keyed by order). A refund starts
+RefundNotificationWorkflow, which asks order who the customer is and lets
+Temporal own that retry — so an order outage delays the bell entry instead
+of DLQ-ing it. The handler's own job is just to start the workflow, which
+is why it returns immediately rather than awaiting the result.
 
 Dedupe mode: NATURAL_KEY — notification ids are deterministic per
 (event, recipient), so at-least-once redelivery collides on the PK and is
@@ -32,21 +33,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from . import push, receipt_queue
 from .adapters.repo import NotificationRepo, notification_id
-from .domain.mapping import (
-    NOTIFYING_PAYMENT_EVENTS,
-    Draft,
-    order_drafts,
-    payment_drafts,
-)
+from .adapters.saga_client import RefundNotifierPort
+from .domain.mapping import NOTIFYING_PAYMENT_EVENTS, Draft, order_drafts
+from .values import RefundNotice
 
 log = get_logger("notification.consumers")
 
 GROUP_ORDERS = "notification.inbox.orders"
 GROUP_PAYMENTS = "notification.inbox.payments"
-
-
-class ProjectionLag(RuntimeError):
-    """A payment event arrived before any of its order's events."""
 
 
 def _aware(value: Any) -> datetime:
@@ -57,8 +51,9 @@ def _aware(value: Any) -> datetime:
 
 
 class InboxHandler:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
+    def __init__(self, sessions: async_sessionmaker[AsyncSession], refunds: RefundNotifierPort):
         self._sessions = sessions
+        self._refunds = refunds
 
     async def handle(self, event: dict[str, Any]) -> None:
         event_type = str(event["event_type"])
@@ -74,7 +69,6 @@ class InboxHandler:
                 order_id = str(payload["order_id"])
                 # EVERY order event refreshes the projection, so whichever
                 # event arrives first arms the payment join.
-                await repo.upsert_recipients(order_id, payload["user_id"], payload["restaurant_id"])
                 drafts = order_drafts(event_type, payload)
                 if event_type == EventType.ORDER_SETTLED:
                     # The bell stays silent on settlement (mapping.py) — but
@@ -92,11 +86,18 @@ class InboxHandler:
                         created_at=datetime.now(UTC),
                     )
             elif event.get("aggregate_type") == "payment":
-                order_id = str(event["aggregate_id"])
-                recipients = await repo.get_recipients(order_id)
-                if recipients is None:
-                    raise ProjectionLag(f"no recipients projected yet for {order_id}")
-                drafts = payment_drafts(event_type, payload, user_id=recipients.user_id)
+                # Handed to Temporal, not minted here: the recipient is not
+                # in this payload and the lookup can outlive the poll loop.
+                await self._refunds.notify_refund(
+                    RefundNotice(
+                        event_id=str(event["event_id"]),
+                        order_id=str(event["aggregate_id"]),
+                        amount_cents=int(payload["amount_cents"]),
+                        currency=str(payload["currency"]),
+                        occurred_at=occurred_at.isoformat(),
+                    )
+                )
+                return
             else:
                 return  # not a topic we mint notifications from
 

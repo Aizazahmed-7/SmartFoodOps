@@ -443,6 +443,27 @@ services:
         "--no-access-log",
       ]
 
+  # The refund-notification worker (ADR-0040). Notification's THIRD process
+  # kind, and the reason is worth knowing: a refund's recipient is not in
+  # the payment event, so the workflow asks order for it — and that lookup
+  # may retry for an hour. Holding a Kafka partition open that long is what
+  # this process exists to avoid.
+  #
+  # Same venv and database as notification (the order/order-worker
+  # precedent); no Kafka consumers and no Celery here — those belong to the
+  # other two. TEMPORAL_ADDRESS and ORDER_BASE_URL both come from app-env;
+  # without the former the API process consumes refunds and SKIPS them, so
+  # this service is what actually arms the feature.
+  notification-worker:
+    <<: *app-base
+    profiles: [apps]
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      UV_PROJECT_ENVIRONMENT: /venvs/notification
+      DATABASE_URL: postgresql+asyncpg://notification_svc:notification_svc@postgres:5432/notification_db
+    command: ["uv", "run", "--package", "notification", "python", "-m", "notification.worker"]
+
   # Receipts workers (S10): ONE process per QUEUE, so the CPU half and the
   # I/O half scale (and log) independently — the queue split is the whole
   # point. Both retry the broker on boot (broker_connection_retry_on_startup)

@@ -13,6 +13,14 @@ from notification.config import Settings
 from notification.main import create_app
 from smartfood_auth import AuthContext, headers_for
 
+
+class _NoRefunds:
+    """The refund hand-off is exercised in test_consumers; these suites
+    only need create_app/InboxHandler to be constructible."""
+
+    async def notify_refund(self, notice) -> None: ...
+
+
 CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
 OWNER = headers_for(
     AuthContext(sub="usr_o", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_1")
@@ -153,7 +161,7 @@ async def test_inbox_handler_hints_each_distinct_recipient_post_commit():
     fake = FakeRealtime()
     push.set_publisher(fake)
     try:
-        await InboxHandler(sessions).handle(
+        await InboxHandler(sessions, _NoRefunds()).handle(
             {
                 "event_id": "evt_1",
                 "event_type": "OrderConfirmed",

@@ -308,6 +308,24 @@ async def list_orders(
 # ── internal (never in the edge allowlist — unreachable from outside) ──
 
 
+class RecipientsOut(StrictModel):
+    """Who to tell about an order. Deliberately the two ids and nothing
+    else: Notification asks this because payment events are keyed by order
+    and carry no user_id (ADR-0040), and a wider read would invite callers
+    to depend on order's shape for things the event already carries."""
+
+    user_id: str
+    restaurant_id: str
+
+
+@router.get("/v1/internal/orders/{order_id}/recipients")
+async def order_recipients(order_id: str, ctx: SystemOnly, request: Request) -> RecipientsOut:
+    row = await _svc(request).recipients_of(order_id)
+    if row is None:
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown order", 404)
+    return RecipientsOut(user_id=row.user_id, restaurant_id=row.restaurant_id)
+
+
 class CourierIn(StrictModel):
     """Dispatch's courier facts, bound for dlv::{order_id}. Dispatch never
     touches Temporal (the kitchen precedent): its DDB conversion happened

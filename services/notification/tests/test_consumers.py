@@ -1,14 +1,13 @@
-"""InboxHandler against real sqlite: projection upkeep, natural-key dedupe,
-and the deliberate ProjectionLag raise (the loop that feeds it is
-smartfood_kafka.EventConsumer, tested in its own lib)."""
+"""InboxHandler against real sqlite: natural-key dedupe, and the refund
+hand-off to Temporal (ADR-0040 — the workflow itself has its own suite)."""
 
 import json
 from datetime import UTC, datetime
 
-import pytest
 import sqlalchemy as sa
-from notification.consumers import GROUP_ORDERS, GROUP_PAYMENTS, InboxHandler, ProjectionLag
-from notification.db import metadata, notifications, order_recipients
+from notification.consumers import GROUP_ORDERS, GROUP_PAYMENTS, InboxHandler
+from notification.db import metadata, notifications
+from notification.values import RefundNotice
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -22,7 +21,19 @@ async def _handler():
     async with engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    return InboxHandler(sessions), sessions
+    refunds = RecordingRefunds()
+    return InboxHandler(sessions, refunds), sessions, refunds
+
+
+class RecordingRefunds:
+    """Stands in for the Temporal starter — the handler's whole job on the
+    payments topic is to hand the notice over, so that is what we assert."""
+
+    def __init__(self) -> None:
+        self.started: list[RefundNotice] = []
+
+    async def notify_refund(self, notice: RefundNotice) -> None:
+        self.started.append(notice)
 
 
 def _order_event(event_type="OrderConfirmed", *, event_id="evt-1", **payload_overrides):
@@ -70,7 +81,7 @@ async def _rows(sessions, table=notifications):
 
 
 async def test_order_event_mints_rows_and_projects_recipients():
-    handler, sessions = await _handler()
+    handler, sessions, refunds = await _handler()
     await handler.handle(_order_event())
     rows = await _rows(sessions)
     assert {(r.recipient_type, r.recipient_id) for r in rows} == {
@@ -79,92 +90,90 @@ async def test_order_event_mints_rows_and_projects_recipients():
     }
     assert all(r.order_id == "ord_1" and r.read_at is None for r in rows)
     assert all(r.created_at.replace(tzinfo=UTC) == OCCURRED for r in rows)
-    projection = await _rows(sessions, order_recipients)
-    assert [(p.order_id, p.user_id, p.restaurant_id) for p in projection] == [
-        ("ord_1", "usr_1", "rst_1")
-    ]
+    assert refunds.started == []  # order events never reach the workflow
 
 
 async def test_redelivery_is_a_noop():
     """NATURAL_KEY dedupe: the deterministic id collides on the PK and the
     conflict-ignore insert absorbs the replay — no processed_events table."""
-    handler, sessions = await _handler()
+    handler, sessions, refunds = await _handler()
     await handler.handle(_order_event())
     await handler.handle(_order_event())  # at-least-once redelivery
     assert len(await _rows(sessions)) == 2  # still one per recipient
 
 
-async def test_silent_events_still_arm_the_projection():
-    """OrderPlaced mints nothing but MUST project recipients — it is
-    usually the first order fact to arrive, and the payment join needs it."""
-    handler, sessions = await _handler()
+async def test_silent_order_events_mint_nothing():
+    """OrderPlaced produces no drafts. It no longer needs to do anything
+    else either — the recipients projection it used to arm is gone."""
+    handler, sessions, refunds = await _handler()
     await handler.handle(_order_event("OrderPlaced", status="PLACED"))
     assert await _rows(sessions) == []
-    assert len(await _rows(sessions, order_recipients)) == 1
+    assert refunds.started == []
 
 
-async def test_refund_joins_user_through_the_projection():
-    handler, sessions = await _handler()
-    await handler.handle(_order_event("OrderPlaced", status="PLACED"))
+async def test_refund_is_handed_to_the_workflow_not_minted_here():
+    """The handler does NOT write the row: the recipient is not in this
+    payload, so the workflow looks it up and Temporal owns that retry."""
+    handler, sessions, refunds = await _handler()
     await handler.handle(_refund_event())
-    (row,) = await _rows(sessions)
-    assert (row.recipient_type, row.recipient_id) == ("customer", "usr_1")
-    assert row.title == "Refund on its way"
+    assert await _rows(sessions) == []  # nothing minted synchronously
+    (notice,) = refunds.started
+    assert (notice.order_id, notice.amount_cents, notice.currency) == ("ord_1", 1200, "USD")
+    assert notice.event_id == "evt-r1"  # the notification id derives from it
 
 
-async def test_refund_before_any_order_event_raises_projection_lag():
-    """Cross-topic race: the runtime's retry absorbs it; a true orphan is
-    a DLQ row, never a silently-eaten refund notification."""
-    handler, sessions = await _handler()
-    with pytest.raises(ProjectionLag):
-        await handler.handle(_refund_event())
-    assert await _rows(sessions) == []
+async def test_refund_needs_no_prior_order_event():
+    """The point of the change: a refund that beats every order event
+    through the pipeline is handled on its own, with no projection to wait
+    for and nothing to park on the DLQ."""
+    handler, sessions, refunds = await _handler()
+    await handler.handle(_refund_event())  # nothing else has ever arrived
+    assert len(refunds.started) == 1
 
 
 async def test_foreign_aggregates_are_ignored():
-    handler, sessions = await _handler()
+    handler, sessions, refunds = await _handler()
     event = _order_event()
     event["aggregate_type"] = "stock"
     await handler.handle(event)
     assert await _rows(sessions) == []
-    assert await _rows(sessions, order_recipients) == []
+    assert refunds.started == []
 
 
-async def test_silent_payment_events_never_touch_the_projection():
-    """PaymentAuthorized/Captured mint nothing, so they must not consult
-    order_recipients — a no-op event tripping ProjectionLag would burn a
-    retry cycle and park a perfectly healthy fact on the DLQ."""
-    handler, sessions = await _handler()
+async def test_silent_payment_events_start_no_workflow():
+    """PaymentAuthorized/Captured mint nothing, so they must not start a
+    workflow either — one Temporal execution per silent payment fact would
+    be the most expensive no-op in the system."""
+    handler, sessions, refunds = await _handler()
     for event_type in ("PaymentAuthorized", "PaymentCaptured"):
         event = _refund_event(event_id=f"evt-{event_type}")
         event["event_type"] = event_type
-        await handler.handle(event)  # no ProjectionLag despite the empty projection
+        await handler.handle(event)
     assert await _rows(sessions) == []
+    assert refunds.started == []
 
 
-async def test_parked_refund_replays_clean_after_orders_catch_up():
-    """The full DLQ story through the REAL runtime: a refund beats its
-    order (parked with ProjectionLag), the orders loop arms the
-    projection, and an ops replay of the parked bytes mints the
-    notification — dedupe-safe."""
+async def test_refund_parks_when_temporal_is_unreachable_and_replays_clean():
+    """The residual coupling, stated honestly (ADR-0040): the handler still
+    has to reach Temporal to hand the work over. If that fails the event
+    parks — visible and replayable — rather than vanishing. The retry
+    horizon it buys is for ORDER being down, which is the long outage; a
+    Temporal outage is the same risk placement already accepts."""
     from smartfood_kafka import EventConsumer
     from smartfood_kafka.testing import StubDlq, StubKafkaConsumer, StubMessage, StubSerde
 
-    handler, sessions = await _handler()
+    handler, sessions, refunds = await _handler()
 
-    def _msg(event: dict) -> StubMessage:
-        wire = dict(event)
-        wire["occurred_at"] = (
-            wire["occurred_at"].isoformat()
-            if not isinstance(wire["occurred_at"], str)
-            else wire["occurred_at"]
-        )
-        return StubMessage(value=json.dumps(wire).encode(), topic="c1.payments.events")
+    class Unreachable:
+        async def notify_refund(self, notice):
+            raise ConnectionError("temporal unreachable")
 
-    refund = _msg(_refund_event())
+    handler._refunds = Unreachable()
+
+    value = json.dumps(_refund_event()).encode()  # occurred_at is already ISO
     dlq = StubDlq()
-    payments_client = StubKafkaConsumer([refund])
-    consumer = EventConsumer(
+    payments_client = StubKafkaConsumer([StubMessage(value=value, topic="c1.payments.events")])
+    await EventConsumer(
         "c1.payments.events",
         GROUP_PAYMENTS,
         handler,
@@ -173,36 +182,31 @@ async def test_parked_refund_replays_clean_after_orders_catch_up():
         dlq=dlq,
         max_attempts=2,
         backoff_seconds=0.0,
-    )
-    await consumer.consume_once()
-    (topic, value, _, headers) = dlq.parked[0]
+    ).consume_once()
+    (topic, parked, _, headers) = dlq.parked[0]
     assert topic == "c1.payments.events.dlq"
-    assert dict(headers)["dlq.error.type"] == b"ProjectionLag"
-    assert payments_client.commits == 1  # partition moved on
-    assert await _rows(sessions) == []  # nothing minted yet
+    assert dict(headers)["dlq.error.type"] == b"ConnectionError"
+    assert payments_client.commits == 1  # the partition moved on
+    assert refunds.started == []
 
-    # The orders loop catches up and arms the projection…
-    await handler.handle(_order_event("OrderPlaced", status="PLACED"))
-    # …and the ops replay (the parked bytes, verbatim) heals the inbox.
-    replay_client = StubKafkaConsumer([StubMessage(value=value, topic="c1.payments.events")])
-    consumer2 = EventConsumer(
+    # Temporal comes back; the ops replay of the parked bytes hands it over.
+    handler._refunds = refunds
+    await EventConsumer(
         "c1.payments.events",
         GROUP_PAYMENTS,
         handler,
         StubSerde(),
-        client=replay_client,
+        client=StubKafkaConsumer([StubMessage(value=parked, topic="c1.payments.events")]),
         dlq=StubDlq(),
-    )
-    await consumer2.consume_once()
-    (row,) = await _rows(sessions)
-    assert (row.recipient_type, row.title) == ("customer", "Refund on its way")
+    ).consume_once()
+    assert [n.order_id for n in refunds.started] == ["ord_1"]
 
 
 def test_group_names_are_pinned():
     """The group ids ARE the consumers' offset ledgers — renaming one
     silently replays every retained event through the inbox. And they must
-    DIFFER: a shared group across both topics would let a payments-side
-    backoff block the orders loop that arms the projection."""
+    DIFFER: separate groups mean separate offsets, so a poison event
+    parking on one topic cannot stall the other's loop."""
     assert GROUP_ORDERS == "notification.inbox.orders"
     assert GROUP_PAYMENTS == "notification.inbox.payments"
     assert GROUP_ORDERS != GROUP_PAYMENTS

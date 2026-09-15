@@ -13,6 +13,14 @@ from smartfood_otel import REGISTRY
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+
+class _NoRefunds:
+    """The refund hand-off is exercised in test_consumers; these suites
+    only need create_app/InboxHandler to be constructible."""
+
+    async def notify_refund(self, notice) -> None: ...
+
+
 OCCURRED = datetime(2026, 8, 25, 1, 30, tzinfo=UTC)
 
 
@@ -23,7 +31,7 @@ async def _handler():
     async with engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    return InboxHandler(sessions), sessions
+    return InboxHandler(sessions, _NoRefunds()), sessions
 
 
 def _settled_event(event_id="evt-s1"):
@@ -80,7 +88,7 @@ async def test_settle_mints_the_claim_check_and_nudges_once():
     (row,) = await _rows(sessions, receipts)
     assert row.order_id == "ord_1" and row.user_id == "usr_1"
     assert row.totals["total_cents"] == 3104  # the payload, verbatim
-    assert row.s3_key is None and row.failed_at is None  # the tasks' columns start empty
+    assert row.s3_key is None and row.status == "pending"  # the tasks have not run
     assert enqueued == ["ord_1"]
     # The bell's silence on settlement stands: a receipt is a document,
     # not an inbox row.

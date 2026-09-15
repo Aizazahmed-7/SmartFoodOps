@@ -161,7 +161,7 @@ Owns no data at all. Pure fan-out.
 
 | | |
 |---|---|
-| Postgres | **`notification_db`** — `notifications` (per-recipient inbox: `id ntf_<deterministic uuid5 of event_id+recipient>` — replay-safe natural-key dedupe; `recipient_type` customer\|restaurant, `recipient_id`, `order_id`, `title`, `body`, `created_at` = event `occurred_at`, `read_at` nullable) + `order_recipients` projection (`order_id` PK, `user_id`, `restaurant_id` — upserted from every order event, because payment events carry no `user_id`) |
+| Postgres | **`notification_db`** — `notifications` (per-recipient inbox: `id ntf_<deterministic uuid5 of event_id+recipient>` — replay-safe natural-key dedupe; `recipient_type` customer\|restaurant, `recipient_id`, `order_id`, `title`, `body`, `created_at` = event `occurred_at`, `read_at` nullable) |
 | Kafka | **consumes** `c1.orders.events` + `c1.payments.events` — one `EventConsumer` loop per topic, groups `notification.inbox.orders` / `notification.inbox.payments` (separate loops: a payments backoff must not block the orders loop that feeds the recipients projection); **produces** nothing |
 | Serves | `GET /v1/notifications` (keyset cursor + unread count), `POST /v1/notifications/{id}/read` (ownership-in-WHERE, not-yours = 404), `POST /v1/notifications/read-all` — via edge, auth mode |
 

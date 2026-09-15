@@ -26,6 +26,20 @@ class Settings(BaseSettings):
     schema_registry_url: str = "http://localhost:8086"
     cell_id: str = "c1"
 
+    # Refund notifications run as a Temporal workflow (ADR-0040): the
+    # payments topic carries no user_id, so the workflow asks order for it
+    # and Temporal owns the retry. Empty address = disarmed — the consumer
+    # skips refund drafts entirely rather than failing, exactly as an empty
+    # celery_broker_url disarms receipts.
+    temporal_address: str = ""
+    temporal_namespace: str = "default"
+    notification_task_queue: str = "notification-tq"
+    # How long the workflow keeps asking order before giving up. Generous
+    # on purpose: a refund notification is worth more late than never, and
+    # unlike a saga step nothing downstream is waiting on it.
+    recipients_lookup_timeout_seconds: float = 3600.0
+    order_base_url: str = "http://localhost:8006"
+
     # Bell push (S9): empty = off — the FE keeps its 15s poll. Compose's
     # app-env REDIS_URL arms it fleet-wide; channels are namespaced
     # sfo:notify:* beside tracking's sfo:track:*.

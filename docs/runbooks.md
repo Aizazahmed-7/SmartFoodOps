@@ -184,12 +184,13 @@ overlap windows and are the accepted trade (ADR-0025).
 **Signal**: `receipts_sent_total{outcome=~"rejected|no_recipient"}` moved —
 either the provider answered 4xx (`rejected`) or Identity has no such user
 for a settled order (`no_recipient`, a data bug worth investigating on its
-own). Both set `failed_at` on the receipt, pulling it out of the sweeper.
-Nothing automatic will retry it, on purpose: retrying a rejected request or
-a nonexistent user cannot change the answer.
+own). Both move the receipt to `status = 'parked'`, which takes it out of the
+sweeper's partial index entirely. Nothing automatic will retry it, on
+purpose: retrying a rejected request or a nonexistent user cannot change
+the answer.
 
-**Actions**: find it (`SELECT order_id, failed_at FROM receipts WHERE
-failed_at IS NOT NULL`), fix the cause (bad recipient mapping, oversized
-body), then clear the park — `UPDATE receipts SET failed_at = NULL WHERE
-order_id = …` — and the next sweep re-enqueues it. That UPDATE is the replay
-lever, the same shape as a DLQ replay.
+**Actions**: find it (`SELECT order_id, created_at FROM receipts WHERE
+status = 'parked'`), fix the cause (bad recipient mapping, oversized body),
+then un-park it — `UPDATE receipts SET status = 'pending' WHERE order_id =
+…` — and the next sweep re-enqueues it. That UPDATE is the replay lever,
+the same shape as a DLQ replay.

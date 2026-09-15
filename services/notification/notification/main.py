@@ -14,6 +14,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from . import push, receipt_queue
+from .adapters.saga_client import (
+    DisarmedRefundNotifier,
+    RefundNotifierPort,
+    TemporalRefundNotifier,
+)
 from .api.routes import router
 from .config import Settings
 from .db import metadata
@@ -38,6 +43,7 @@ def create_app(
     *,
     consumers: Sequence[EventConsumer] | None = None,
     realtime: "RedisRealtime | None" = None,
+    refunds: "RefundNotifierPort | None" = None,
 ) -> FastAPI:
     settings = settings or Settings()
     setup_logging("notification")
@@ -48,6 +54,18 @@ def create_app(
         engine_kwargs = {"poolclass": StaticPool, "connect_args": {"check_same_thread": False}}
     engine = create_async_engine(settings.database_url, **engine_kwargs)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    # Refund notifications (ADR-0040): armed only with a temporal_address.
+    # Disarmed, a refund event is consumed and skipped rather than failing
+    # the loop — the same shape as an unset celery_broker_url.
+    own_refunds: RefundNotifierPort = refunds or DisarmedRefundNotifier()
+    if refunds is None and settings.temporal_address:  # pragma: no cover — live wiring
+        own_refunds = TemporalRefundNotifier(
+            settings.temporal_address,
+            namespace=settings.temporal_namespace,
+            task_queue=settings.notification_task_queue,
+            lookup_timeout_seconds=settings.recipients_lookup_timeout_seconds,
+        )
 
     # Bell push (S9): armed only with a redis_url — otherwise the FE's
     # 15s poll remains the whole story, by design.
@@ -72,12 +90,11 @@ def create_app(
     if not live_consumers and settings.kafka_consumers == "on":  # pragma: no cover — live
         # Live wiring only: the loop, its aiokafka config, and the
         # retry/DLQ policy all live (tested) in smartfood-kafka. One
-        # consumer PER topic, separate groups: a payments-side
-        # ProjectionLag backoff must never block the orders loop that
-        # arms the projection it is waiting for (see consumers.py).
+        # consumer PER topic, separate groups: separate offsets keep a
+        # poison event on one topic from stalling the other (consumers.py).
         from .consumers import GROUP_ORDERS, GROUP_PAYMENTS, InboxHandler
 
-        handler = InboxHandler(sessions)
+        handler = InboxHandler(sessions, own_refunds)
         serde = AvroSerde(SchemaRegistry(settings.schema_registry_url))
         live_consumers = [
             EventConsumer(

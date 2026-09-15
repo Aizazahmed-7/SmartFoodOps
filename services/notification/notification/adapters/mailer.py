@@ -10,7 +10,7 @@ retry policy keys off it:
   right, and autoretry+backoff handles it.
 - MailerRejected → POISON. The provider looked at the request and said no
   (4xx — bad recipient, oversized body). Retrying an unchanged request can
-  never change the answer, so the task parks the receipt (failed_at)
+  never change the answer, so the task parks the receipt (status=parked)
   instead of burning retries — the DLQ philosophy, applied to email.
 
 Sync on purpose: Celery tasks are sync, so the client is sync httpx.

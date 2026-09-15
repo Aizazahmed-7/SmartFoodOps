@@ -335,6 +335,15 @@ class OrderService:
 
     # ── reads (S3) ─────────────────────────────────────────────────
 
+    async def recipients_of(self, order_id: str) -> Row[Any] | None:
+        """Who to tell about this order — the unscoped system read behind
+        `GET /v1/internal/orders/{id}/recipients` (ADR-0040). No ownership
+        clause by design: the caller is Notification acting on a payment
+        event that names only the order."""
+        assert self._sessions
+        async with self._sessions() as session:
+            return await OrderRepo(session).get_order_any(order_id)
+
     async def get_order(self, user_id: str, order_id: str) -> dict[str, Any]:
         assert self._sessions
         async with self._sessions() as session:

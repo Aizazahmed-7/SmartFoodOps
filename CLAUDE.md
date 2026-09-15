@@ -32,7 +32,7 @@ Temporal-owned order saga. Past design phase; W1/W2/W3 largely built and live-pr
 - `services/` — edge-bff, identity, catalog, inventory, order, payment, notification, analytics, dispatch, rider-gateway
 - `libs/` — smartfood-{api,auth,idempotency,kafka,otel,outbox,pricing,realtime} (shared, py.typed, strict)
 - `tools/` — mock-psp, mock-mailer, seed, demo, rider-sim, canary
-- `docs/adr/` — **39 ADRs, authoritative for architecture decisions.** `docs/reviews/*-walkthrough.md` = milestone build records.
+- `docs/adr/` — **40 ADRs, authoritative for architecture decisions.** `docs/reviews/*-walkthrough.md` = milestone build records.
 - `docs/local-dev.md` — **full port map + troubleshooting; read it before touching ports/compose.**
 
 ## Non-obvious invariants (violating these breaks things silently)

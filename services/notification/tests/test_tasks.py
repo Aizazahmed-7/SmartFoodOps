@@ -101,7 +101,7 @@ def runtime(engine):
     reset_runtime()
 
 
-def _mint(engine, order_id="ord_1", *, created_at=None, failed_at=None):
+def _mint(engine, order_id="ord_1", *, created_at=None, status="pending"):
     with engine.begin() as conn:
         conn.execute(
             receipts.insert().values(
@@ -112,7 +112,7 @@ def _mint(engine, order_id="ord_1", *, created_at=None, failed_at=None):
                 totals=TOTALS,
                 settled_at=SETTLED,
                 created_at=created_at or datetime.now(UTC),
-                failed_at=failed_at,
+                status=status,
             )
         )
 
@@ -178,6 +178,34 @@ def test_send_emails_by_reference_and_records_delivery(runtime):
     assert (row.order_id, row.channel, row.provider_message_id) == ("ord_1", "email", message_id)
 
 
+def test_send_advances_status_with_the_delivery_log_row(runtime):
+    """The two writes commit together. delivery_log is the PER-CHANNEL
+    ledger (the provider's id lives there); `status` is the per-receipt
+    fact the sweeper indexes. If they could disagree, a sent receipt would
+    stay in the sweeper's worklist forever — or worse, drop out of it
+    before the email left."""
+    _mint(runtime.engine)
+    assert _receipt_row(runtime.engine).status == "pending"
+    send_receipt("receipts/ord_1.pdf", "ord_1")
+    assert _receipt_row(runtime.engine).status == "sent"
+    assert len(_delivery_rows(runtime.engine)) == 1
+
+
+def test_a_sent_receipt_leaves_the_sweepers_worklist(runtime, monkeypatch):
+    """The whole point of the column: the sweeper's predicate is now local,
+    so sending is what removes a receipt from it."""
+    old_enough = datetime.now(UTC) - timedelta(minutes=10)
+    _mint(runtime.engine, created_at=old_enough)
+    enqueued: list[str] = []
+    monkeypatch.setattr(tasks, "enqueue_receipt_chain", enqueued.append)
+    assert sweep_unsent_receipts() == 1  # owed before the send
+
+    send_receipt("receipts/ord_1.pdf", "ord_1")
+    enqueued.clear()
+    assert sweep_unsent_receipts() == 0  # and gone after it
+    assert enqueued == []
+
+
 def test_send_is_idempotent_via_the_delivery_log(runtime):
     """The at-least-once absorber: a retry or sweeper re-enqueue finds the
     log row and does NOT email again."""
@@ -207,7 +235,7 @@ def test_rejected_send_parks_the_receipt_and_never_retries(runtime, engine):
     )
     with pytest.raises(MailerRejected):
         send_receipt("receipts/ord_1.pdf", "ord_1")
-    assert _receipt_row(engine).failed_at is not None  # parked, visible
+    assert _receipt_row(engine).status == "parked"  # out of the sweeper, visible
     assert _delivery_rows(engine) == []  # and NOT recorded as sent
 
 
@@ -225,7 +253,7 @@ def test_unavailable_mailer_leaves_no_trace_and_is_retryable(runtime, engine):
     with pytest.raises(MailerUnavailable):
         send_receipt("receipts/ord_1.pdf", "ord_1")
     row = _receipt_row(engine)
-    assert row.failed_at is None  # transient — NOT parked; retries own it
+    assert row.status == "pending"  # transient — NOT parked; retries own it
     assert _delivery_rows(engine) == []
 
 
@@ -245,7 +273,7 @@ def test_unknown_recipient_parks_the_receipt(runtime, engine):
     )
     with pytest.raises(UnknownRecipient):
         send_receipt("receipts/ord_1.pdf", "ord_1")
-    assert _receipt_row(engine).failed_at is not None  # parked, out of the sweeper
+    assert _receipt_row(engine).status == "parked"  # out of the sweeper
     assert _delivery_rows(engine) == []
 
 
@@ -263,7 +291,7 @@ def test_identity_outage_is_retryable_and_leaves_no_trace(runtime, engine):
     )
     with pytest.raises(ContactsUnavailable):
         send_receipt("receipts/ord_1.pdf", "ord_1")
-    assert _receipt_row(engine).failed_at is None  # transient — retries own it
+    assert _receipt_row(engine).status == "pending"  # transient — retries own it
     assert fake_sender.sent == []  # never reached the provider
     assert _delivery_rows(engine) == []
 
@@ -311,13 +339,14 @@ def test_chain_hands_renders_key_to_send(runtime):
 
 
 def test_sweep_re_enqueues_exactly_the_owed(runtime, monkeypatch):
-    """Four rows, one owed: old+unsent is re-enqueued; fresh (grace),
-    parked (failed_at) and already-sent are all left alone."""
+    """Four rows, one owed: old+pending is re-enqueued; fresh (grace),
+    parked and already-sent are all left alone. The sweep now reads ONE
+    table — `status` is the fact, not an anti-join against delivery_log."""
     old = datetime.now(UTC) - timedelta(minutes=10)
     _mint(runtime.engine, "ord_owed", created_at=old)
     _mint(runtime.engine, "ord_fresh")  # inside the grace window
-    _mint(runtime.engine, "ord_parked", created_at=old, failed_at=datetime.now(UTC))
-    _mint(runtime.engine, "ord_sent", created_at=old)
+    _mint(runtime.engine, "ord_parked", created_at=old, status="parked")
+    _mint(runtime.engine, "ord_sent", created_at=old, status="sent")
     with runtime.engine.begin() as conn:
         conn.execute(
             delivery_log.insert().values(

@@ -442,11 +442,6 @@ erDiagram
         timestamptz created_at "event occurred_at, replay-stable"
         timestamptz read_at "NULL = unread"
     }
-    order_recipients {
-        text order_id PK
-        text user_id "payment events carry no user_id;"
-        text restaurant_id "this projection is the join"
-    }
     receipts {
         text order_id PK "one receipt per order forever — replays conflict-ignore"
         text user_id "resolved to an address at SEND time; no PII stored here"
@@ -457,7 +452,7 @@ erDiagram
         timestamptz created_at "consume time; the sweeper's grace anchor"
         text s3_key "NULL until render_receipt stores the PDF"
         timestamptz rendered_at
-        timestamptz failed_at "non-NULL = POISON, parked out of the sweeper"
+        text status "CHECK: pending|sent|parked — the sweeper's partial index"
     }
     delivery_log {
         text order_id PK
@@ -470,17 +465,11 @@ erDiagram
 
 Index: `ix_notifications_inbox (recipient_type, recipient_id, created_at DESC, id DESC)` — one keyset walk per bell poll.
 
-The two halves of this database answer different questions and never join. `notifications` + `order_recipients` are the **bell** (in-app, minted from every notifying event). `receipts` + `delivery_log` are the **receipt pipeline** (S10, FR-41): `OrderSettled` writes the `receipts` row in the same transaction as the inbox rows — that row is a **claim check**, holding everything the PDF needs so the Celery chain can be handed only an `order_id` and never call another service for data. `delivery_log` is the send ledger: a row exists ⇔ that channel was accepted by the provider, which is what makes `receipts.send` re-runnable and the beat sweeper (`receipts.sweep`) safe to be dumb. Neither table has a FK — even inside one database these are id conventions, because the writers are independent tasks.
+The two halves of this database answer different questions and never join. `notifications` is the **bell** (in-app, minted from every notifying event — except the refund, which ADR-0040 mints from a Temporal workflow because payment events carry no `user_id`). `receipts` + `delivery_log` are the **receipt pipeline** (S10, FR-41): `OrderSettled` writes the `receipts` row in the same transaction as the inbox rows — that row is a **claim check**, holding everything the PDF needs so the Celery chain can be handed only an `order_id` and never call another service for data. `delivery_log` is the send ledger: a row exists ⇔ that channel was accepted by the provider, which is what makes `receipts.send` re-runnable and the beat sweeper (`receipts.sweep`) safe to be dumb. Neither table has a FK — even inside one database these are id conventions, because the writers are independent tasks.
 
 ---
 
 ### Example rows — one event fanning out to two inboxes
-
-`order_recipients` — the projection that lets user-less payment events find their customer:
-
-| order_id | user_id | restaurant_id |
-| -------- | ------- | ------------- |
-| ord_42   | usr_1   | rst_9         |
 
 `notifications` — the single `OrderConfirmed` event (id `b7e4…`) minted **two** rows, each with its own deterministic id, so each recipient's copy dedupes independently on redelivery:
 
@@ -491,19 +480,19 @@ The two halves of this database answer different questions and never join. `noti
 
 `receipts` — three orders mid-pipeline, showing every state the row can be in. Note `ord_42` settled but minted **no** notification: settlement is a deliberate silence in the bell (`mapping.py`), and the receipt is the only thing the customer sees:
 
-| order_id | settled_at | s3_key              | rendered_at | failed_at | means                                             |
-| -------- | ---------- | ------------------- | ----------- | --------- | ------------------------------------------------- |
-| ord_42   | 12:40      | receipts/ord_42.pdf | 12:40       | NULL      | rendered and sent (see the log below)             |
-| ord_43   | 12:41      | NULL                | NULL        | NULL      | owed — render hasn't run (or is retrying) yet     |
-| ord_44   | 12:38      | receipts/ord_44.pdf | 12:38       | 12:39     | parked: the mailer 4xx'd, or identity has no user |
+| order_id | settled_at | s3_key              | rendered_at | status  | means                                             |
+| -------- | ---------- | ------------------- | ----------- | ------- | ------------------------------------------------- |
+| ord_42   | 12:40      | receipts/ord_42.pdf | 12:40       | sent    | rendered and sent (see the log below)             |
+| ord_43   | 12:41      | NULL                | NULL        | pending | owed — render hasn't run (or is retrying) yet     |
+| ord_44   | 12:38      | receipts/ord_44.pdf | 12:38       | parked  | the mailer 4xx'd, or identity has no user         |
 
-`delivery_log` — the send ledger. `ord_42` has a row, so a sweeper re-enqueue or a Celery retry short-circuits to a no-op; `ord_43` has none and is past the grace window, so the sweeper owes it a chain; `ord_44` has none but `failed_at` parks it out of the sweep until a human clears the marker:
+`delivery_log` — the per-CHANNEL send ledger, holding the provider's message id. `ord_42` has a row, so a sweeper re-enqueue or a Celery retry short-circuits to a no-op. It is written in the SAME transaction that moves `status` to `sent`: the log answers "which channels went out", `status` answers "is this receipt done", and the sweeper indexes the second:
 
 | order_id | channel | sent_at | provider_message_id |
 | -------- | ------- | ------- | ------------------- |
 | ord_42   | email   | 12:40   | msg_a1c9…           |
 
-The sweeper's query is exactly that reading: `receipts LEFT JOIN delivery_log ON (order_id, channel='email')` where the join misses, `failed_at IS NULL`, and `created_at < now() - grace`.
+The sweeper's query is exactly that reading, and now it is one table: `status = 'pending' AND created_at < now() - grace`, served by a partial index over only the pending rows. It used to anti-join `delivery_log`, which made the STEADY state the expensive one — proving nothing was owed hash-joined both tables in full (measured: 7,395 buffers to return zero rows on 300k receipts, growing forever). Against the partial index the same sweep reads one page.
 
 ---
 
@@ -535,7 +524,6 @@ flowchart LR
     end
     subgraph notification_db
         notifications[notifications]
-        order_recipients[order_recipients]
         receipts[receipts]
     end
 
@@ -549,8 +537,6 @@ flowchart LR
     reservations -. "order_id" .-> orders
     payments -. "order_id" .-> orders
     notifications -. "order_id" .-> orders
-    order_recipients -. "user_id" .-> users
-    order_recipients -. "restaurant_id" .-> restaurants
     receipts -. "order_id" .-> orders
     receipts -. "user_id (→ email, read at send time)" .-> users
 ```
