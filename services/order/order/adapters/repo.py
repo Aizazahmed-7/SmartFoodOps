@@ -9,10 +9,12 @@ from typing import Any
 
 import sqlalchemy as sa
 from smartfood_outbox import stage_event as stage_outbox_event
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import order_items, orders, outbox
+from ..db import order_cancellations, order_items, orders, outbox
 
 
 def encode_cursor(placed_at: datetime, order_id: str) -> str:
@@ -85,16 +87,58 @@ class OrderRepo:
             ],
         )
 
+    # ── the cancellation join (review 2026-09-15) ──────────────────
+    # `cancel_reason` moved to its own table, so every order read carries
+    # the join. Labelled back to `cancel_reason` on purpose: four call
+    # sites read `row.cancel_reason` and none of them had to change.
+    @staticmethod
+    def _order_cols() -> list[Any]:
+        return [
+            orders,
+            order_cancellations.c.reason.label("cancel_reason"),
+            order_cancellations.c.cancelled_at,
+        ]
+
+    @staticmethod
+    def _joined() -> Any:
+        """LEFT, always: most orders never cancel, and a NULL here means
+        exactly that — the absence is the answer, not a missing row."""
+        return orders.outerjoin(
+            order_cancellations, order_cancellations.c.order_id == orders.c.order_id
+        )
+
+    async def record_cancellation(self, order_id: str, reason: str, now: datetime) -> None:
+        """First writer wins, by design. `begin_cancel` stamps the reason at
+        CANCELLING and `finish_cancel` re-stamps the same value at CANCELLED
+        — the second must not move `cancelled_at` off the moment the
+        cancellation was actually decided (activities.py)."""
+        insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
+        await self._s.execute(
+            insert(order_cancellations)
+            .values(order_id=order_id, reason=reason, cancelled_at=now)
+            .on_conflict_do_nothing(index_elements=["order_id"])
+        )
+
+    @property
+    def _dialect(self) -> str:
+        return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
+
     async def get_order(self, *, user_id: str, order_id: str) -> Row[Any] | None:
         result = await self._s.execute(
-            sa.select(orders).where((orders.c.order_id == order_id) & (orders.c.user_id == user_id))
+            sa.select(*self._order_cols())
+            .select_from(self._joined())
+            .where((orders.c.order_id == order_id) & (orders.c.user_id == user_id))
         )
         return result.one_or_none()
 
     async def get_order_any(self, order_id: str) -> Row[Any] | None:
         """Unscoped read for saga activities — the system operating on its
         own database, not a user request (no ownership clause by design)."""
-        result = await self._s.execute(sa.select(orders).where(orders.c.order_id == order_id))
+        result = await self._s.execute(
+            sa.select(*self._order_cols())
+            .select_from(self._joined())
+            .where(orders.c.order_id == order_id)
+        )
         return result.one_or_none()
 
     async def get_items(self, order_id: str) -> list[Row[Any]]:
@@ -119,7 +163,8 @@ class OrderRepo:
         all four); `after` is the exclusive continuation point; limit+1
         rows = has_more probe."""
         query = (
-            sa.select(orders)
+            sa.select(*self._order_cols())
+            .select_from(self._joined())
             .where(
                 # Brand claims see every branch's queue; branch-scoped rows
                 # (legacy orders, future branch managers) match the first
@@ -159,7 +204,8 @@ class OrderRepo:
         """Keyset page down ix_orders_history: newest first, `before` is the
         exclusive continuation point. limit+1 rows = has_more probe."""
         query = (
-            sa.select(orders)
+            sa.select(*self._order_cols())
+            .select_from(self._joined())
             .where(orders.c.user_id == user_id)
             .order_by(orders.c.placed_at.desc(), orders.c.order_id.desc())
             .limit(limit + 1)

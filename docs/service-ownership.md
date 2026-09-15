@@ -103,7 +103,7 @@ The state machine owner, and the only writer of order transitions.
 
 | | |
 |---|---|
-| Postgres | **`order_db`** — `orders` (with `delivery_address_snapshot`) + `order_items` (per-line name/price snapshots — an order survives menu edits; ADR-0018) + `pricing_snapshot`, hour-partitioned `outbox` (partitions dropped ≤6h after publish confirmed), restaurant order feed index `(restaurant_id, status, placed_at)` |
+| Postgres | **`order_db`** — `orders` (with `delivery_address_snapshot`) + `order_items` (per-line name/price snapshots — an order survives menu edits; ADR-0018) + `pricing_snapshot` + `order_cancellations` (at most one per order; its existence IS the cancellation, `reason` CHECKed against the saga's vocabulary), hour-partitioned `outbox` (partitions dropped ≤6h after publish confirmed), restaurant order feed index `(restaurant_id, status, placed_at)` |
 | DynamoDB | none — it reads nothing from the tracking or history tables; those belong to the projectors |
 | Redis | `order:idem:<key>` — idempotency fast-path, 15 min (PG keeps 7d and remains the arbiter) |
 | Kafka | **produces** `orders.events` (outbox → Debezium) |

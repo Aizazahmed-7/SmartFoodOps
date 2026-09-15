@@ -252,10 +252,10 @@ Index worth knowing: `ix_reservations_reaper (status, expires_at)` — the reape
 
 `stock` — before `ord_42` reserves 2 portions, and after (the oversell guard is the `WHERE available >= :qty` on the decrement):
 
-| item_id                       | restaurant_id | available |
-| ----------------------------- | ------------- | --------- |
-| itm_biryani _(before)_        | rst_9         | 100       |
-| itm_biryani _(after reserve)_ | rst_9         | **98**    |
+| item_id                        | restaurant_id | available |
+| ------------------------------ | ------------- | --------- |
+| itm*biryani *(before)\_        | rst_9         | 100       |
+| itm*biryani *(after reserve)\_ | rst_9         | **98**    |
 
 `reservations` — three orders, three fates. `lines` is the restore-recipe; `expires_at` is the reaper's clock:
 
@@ -284,12 +284,15 @@ erDiagram
         text status "CHECK: 13 states PLACED..SETTLED"
         text payment_method "CHECK: CARD|COD"
         text card_token
-        text request_hash "ADR-0024: body guard; NULL = pre-0024 row"
         json pricing_snapshot "totals; activities READ, never recompute"
         json delivery_address_snapshot
-        text cancel_reason
         timestamptz placed_at
         timestamptz updated_at
+    }
+    order_cancellations {
+        text order_id PK "FK — the row's EXISTENCE is the cancellation"
+        text reason "CHECK: the 8 CancelReason values"
+        timestamptz cancelled_at
     }
     order_items {
         text order_id PK "FK"
@@ -311,6 +314,7 @@ erDiagram
         timestamptz published_at
         text traceparent
     }
+    orders ||--o| order_cancellations : "at most one — absent means not cancelled"
     orders ||--o{ order_items : "line snapshots"
 ```
 
@@ -332,21 +336,21 @@ Indexes worth knowing: `ix_orders_history (user_id, placed_at DESC, order_id DES
 
 `outbox` — nine guarded transitions, but only four staged events (the in-between statuses transition silently). Per-order ordering comes from the Kafka key (`aggregate_id`):
 
-| event_type     | id (random uuid4) | note                                            |
-| -------------- | ----------------- | ----------------------------------------------- |
-| OrderPlaced    | `7c1e…`           |                                                 |
-| OrderConfirmed | `b7e4…`           | VALIDATED and PAYMENT_CLEARED staged nothing    |
-| OrderDelivered | `4f2a…`           | kitchen + pickup transitions are silent         |
-| OrderSettled   | `9d03…`           |                                                 |
+| event_type     | id (random uuid4) | note                                         |
+| -------------- | ----------------- | -------------------------------------------- |
+| OrderPlaced    | `7c1e…`           |                                              |
+| OrderConfirmed | `b7e4…`           | VALIDATED and PAYMENT_CLEARED staged nothing |
+| OrderDelivered | `4f2a…`           | kitchen + pickup transitions are silent      |
+| OrderSettled   | `9d03…`           |                                              |
 
 **Idempotency without a table (ADR-0024)** — `order_id = ord_ + uuid5(NS, "usr_1:K-7f3a…")`, so the ROW is the record:
 
-| retry with key K-7f3a… finds | answer |
-| ---------------------------- | ------ |
-| row, `request_hash` matches | 202 `{order_id: ord_42, status: <current>}` + `Idempotent-Replay: true` |
-| row, hash differs | 422 `IDEMPOTENCY_KEY_REUSE` — same key, different cart |
-| no row, workflow running | attaches via `USE_EXISTING` / the `await_placement` probe |
-| no row, nothing running | places fresh — same derived id either way |
+| retry with key K-7f3a… finds | answer                                                                  |
+| ---------------------------- | ----------------------------------------------------------------------- |
+| row, `request_hash` matches  | 202 `{order_id: ord_42, status: <current>}` + `Idempotent-Replay: true` |
+| row, hash differs            | 422 `IDEMPOTENCY_KEY_REUSE` — same key, different cart                  |
+| no row, workflow running     | attaches via `USE_EXISTING` / the `await_placement` probe               |
+| no row, nothing running      | places fresh — same derived id either way                               |
 
 ## payment_db — the money
 
@@ -489,11 +493,11 @@ The two halves of this database answer different questions and never join. `noti
 
 `receipts` — three orders mid-pipeline, showing every state the row can be in. Note `ord_42` settled but minted **no** notification: settlement is a deliberate silence in the bell (`mapping.py`), and the receipt is the only thing the customer sees:
 
-| order_id | settled_at | s3_key                    | rendered_at | failed_at | means                                             |
-| -------- | ---------- | ------------------------- | ----------- | --------- | ------------------------------------------------- |
-| ord_42   | 12:40      | receipts/ord_42.pdf       | 12:40       | NULL      | rendered and sent (see the log below)             |
-| ord_43   | 12:41      | NULL                      | NULL        | NULL      | owed — render hasn't run (or is retrying) yet     |
-| ord_44   | 12:38      | receipts/ord_44.pdf       | 12:38       | 12:39     | parked: the mailer 4xx'd, or identity has no user |
+| order_id | settled_at | s3_key              | rendered_at | failed_at | means                                             |
+| -------- | ---------- | ------------------- | ----------- | --------- | ------------------------------------------------- |
+| ord_42   | 12:40      | receipts/ord_42.pdf | 12:40       | NULL      | rendered and sent (see the log below)             |
+| ord_43   | 12:41      | NULL                | NULL        | NULL      | owed — render hasn't run (or is retrying) yet     |
+| ord_44   | 12:38      | receipts/ord_44.pdf | 12:38       | 12:39     | parked: the mailer 4xx'd, or identity has no user |
 
 `delivery_log` — the send ledger. `ord_42` has a row, so a sweeper re-enqueue or a Celery retry short-circuits to a no-op; `ord_43` has none and is past the grace window, so the sweeper owes it a chain; `ord_44` has none but `failed_at` parks it out of the sweep until a human clears the marker:
 

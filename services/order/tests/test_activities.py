@@ -7,7 +7,7 @@ import pytest
 import sqlalchemy as sa
 from order.activities import OrderActivities
 from order.adapters.repo import OrderRepo
-from order.db import metadata, order_items, orders, outbox
+from order.db import metadata, order_cancellations, order_items, orders, outbox
 from order.domain.ports import PaymentStateConflict
 from order.domain.transitions import transition
 from order.values import (
@@ -259,7 +259,7 @@ async def test_full_cancel_path_writes_reason_and_event():
     async with sessions() as s:
         # the reason lands at BEGIN — the CANCELLING window must already
         # carry it (the kitchen's decision matrix classifies from it)
-        mid = (await s.execute(sa.select(orders.c.cancel_reason))).scalar_one()
+        mid = (await s.execute(sa.select(order_cancellations.c.reason))).scalar_one()
     assert mid == "payment_declined"
     await acts.void_authorization("ord_1")
     await acts.release_reservation("ord_1")
@@ -268,7 +268,7 @@ async def test_full_cancel_path_writes_reason_and_event():
     assert ("void", "ord_1") in payment.calls
     assert ("release", "ord_1", "cancelled") in inventory.calls
     async with sessions() as s:
-        row = (await s.execute(sa.select(orders.c.cancel_reason))).scalar_one()
+        row = (await s.execute(sa.select(order_cancellations.c.reason))).scalar_one()
         types = [e.event_type for e in (await s.execute(sa.select(outbox))).all()]
     assert row == "payment_declined"
     assert EventType.ORDER_CANCELLED in types
@@ -366,7 +366,7 @@ async def test_try_begin_cancel_wins_from_kitchen_states_and_stamps_reason():
     assert await acts.try_begin_cancel("ord_1", CancelReason.CUSTOMER_CANCELLED) == "ok"
     assert await _status(sessions) == "CANCELLING"
     async with sessions() as s:
-        reason = (await s.execute(sa.select(orders.c.cancel_reason))).scalar_one()
+        reason = (await s.execute(sa.select(order_cancellations.c.reason))).scalar_one()
     assert reason == "customer_cancelled"
     # at-least-once replay: still "ok", no error
     assert await acts.try_begin_cancel("ord_1", CancelReason.CUSTOMER_CANCELLED) == "ok"

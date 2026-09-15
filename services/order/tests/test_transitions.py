@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import pytest
 import sqlalchemy as sa
 from order.adapters.repo import OrderRepo
-from order.db import metadata, orders, outbox
+from order.db import metadata, order_cancellations, orders, outbox
 from order.domain.transitions import IllegalTransition, begin_cancel_from, transition
 from smartfood_kafka import EventType
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -59,7 +59,19 @@ async def _seed_order(sessions, order_id="ord_1"):
 async def _status(sessions, order_id="ord_1"):
     async with sessions() as s:
         row = (
-            await s.execute(sa.select(orders.c.status, orders.c.updated_at, orders.c.cancel_reason))
+            await s.execute(
+                sa.select(
+                    orders.c.status,
+                    orders.c.updated_at,
+                    order_cancellations.c.reason.label("cancel_reason"),
+                    order_cancellations.c.cancelled_at,
+                ).select_from(
+                    orders.outerjoin(
+                        order_cancellations,
+                        order_cancellations.c.order_id == orders.c.order_id,
+                    )
+                )
+            )
         ).one()
     return row
 
@@ -166,3 +178,46 @@ async def test_event_stages_in_the_same_transaction_with_full_state():
     assert event.payload["totals"]["total_cents"] == 3446
     row = await _status(sessions)
     assert row.cancel_reason == "item_unavailable"
+
+
+# ── the cancellation split (review 2026-09-15) ─────────────────────
+
+
+async def test_cancelled_at_records_the_decision_not_the_finish():
+    """`begin_cancel` stamps the reason at CANCELLING and the unwind can
+    hold that state for an unbounded window; the CANCELLED transition
+    re-stamps the SAME reason and must not move the timestamp off the
+    moment the cancellation was actually decided."""
+    sessions = await _sessions()
+    await _seed_order(sessions)
+    await transition(sessions, "ord_1", expected="PLACED", target="READY")
+
+    assert await begin_cancel_from(sessions, "ord_1", allowed=KITCHEN, reason="customer_cancelled")
+    decided = (await _status(sessions)).cancelled_at
+
+    await transition(
+        sessions,
+        "ord_1",
+        expected="CANCELLING",
+        target="CANCELLED",
+        event=EventType.ORDER_CANCELLED,
+        cancel_reason="customer_cancelled",
+    )
+    row = await _status(sessions)
+    assert row.status == "CANCELLED"
+    assert row.cancel_reason == "customer_cancelled"
+    assert row.cancelled_at == decided  # the second write did not move it
+
+
+async def test_a_completed_order_has_no_cancellation_row():
+    """The absence IS the answer — there is no NULL reason to interpret."""
+    sessions = await _sessions()
+    await _seed_order(sessions)
+    await transition(sessions, "ord_1", expected="PLACED", target="DELIVERED")
+    row = await _status(sessions)
+    assert (row.status, row.cancel_reason, row.cancelled_at) == ("DELIVERED", None, None)
+    async with sessions() as s:
+        count = (
+            await s.execute(sa.select(sa.func.count()).select_from(order_cancellations))
+        ).scalar_one()
+    assert count == 0

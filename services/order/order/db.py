@@ -10,7 +10,14 @@ from typing import Literal, get_args
 import sqlalchemy as sa
 from smartfood_outbox import outbox_table
 
+from .values import CancelReason
+
 metadata = sa.MetaData()
+
+# The cancellation vocabulary, derived from the enum the saga actually
+# raises — the same single-source idiom as OrderStatus below. StrEnum
+# members ARE their values, so the tuple repr is a valid SQL IN list.
+CANCEL_REASONS: tuple[str, ...] = tuple(str(reason) for reason in CancelReason)
 
 # The state machine's vocabulary (ARCHITECTURE §6.2). The Literal is the
 # single source of truth: every transition signature is checked against it
@@ -59,7 +66,6 @@ orders = sa.Table(
     sa.Column("pricing_snapshot", sa.JSON, nullable=False),
     # {address_id,label,line1,city,lat,lon} — survives address deletion.
     sa.Column("delivery_address_snapshot", sa.JSON, nullable=False),
-    sa.Column("cancel_reason", sa.Text, nullable=True),
     # The courier, stamped when dispatch's accept lands (RECORD_RIDER).
     # NULL until assigned — and forever, for orders that die earlier.
     # Full-state events carry it from that point on, which is how
@@ -80,6 +86,38 @@ sa.Index("ix_orders_feed_brand", orders.c.brand_id, orders.c.status, orders.c.pl
 # (ix_orders_sweeper lived here until ADR-0023. Nothing scans for orphaned
 # PLACED rows any more: the workflow creates the order, so an order cannot
 # exist without one. Migration 0003 drops it.)
+
+# ── cancellation (review 2026-09-15) ───────────────────────────────
+# Was `orders.cancel_reason`, a nullable column NULL on every order that
+# completed. Split out once a second field appeared: the row's EXISTENCE is
+# now the fact, `reason` is NOT NULL because a cancellation without one is
+# meaningless, and the two can never disagree with the orders row about
+# whether a cancellation happened.
+#
+# Deliberately three columns. `cancelled_by` is derivable from `reason`
+# (customer_cancelled / restaurant_rejected / system_timeout /
+# no_rider_available each name their actor), a refund column would be
+# speculative — capture-after-delivery makes the customer refund path
+# structurally unreachable — and the unwind's progress belongs to Temporal,
+# not to a second copy here.
+order_cancellations = sa.Table(
+    "order_cancellations",
+    metadata,
+    sa.Column("order_id", sa.Text, sa.ForeignKey("orders.order_id"), primary_key=True),
+    sa.Column("reason", sa.Text, nullable=False),
+    # The moment the cancellation was DECIDED, not the moment the unwind
+    # finished: `begin_cancel` stamps the reason at CANCELLING and the
+    # compensations can hold that state for an unbounded window
+    # (activities.py). The row is written once and never moved — the
+    # CANCELLED transition re-writes the same reason and must not disturb
+    # this. NOTE this is a different instant from analytics'
+    # `order_facts.cancelled_at`, which is stamped from the terminal
+    # OrderCancelled event; the gap between them IS the unwind duration.
+    sa.Column("cancelled_at", sa.TIMESTAMP(timezone=True), nullable=False),
+    # The vocabulary its readers branch on (kitchen's decision matrix) and
+    # count with (analytics' rejection rate) — closed, and now enforced.
+    sa.CheckConstraint(f"reason IN {CANCEL_REASONS!r}", name="ck_order_cancellations_reason"),
+)
 
 order_items = sa.Table(
     "order_items",

@@ -107,29 +107,29 @@ sequenceDiagram
     W->>INV: [HTTP] POST internal reservation for ord_42
     Note over INV: ONE TX — occupy capacity slot where active below capacity,<br/>per line UPDATE stock SET available=available-2<br/>WHERE available >= 2 — the oversell guard.<br/>INSERT reservation PK ord_42, status active,<br/>expires_at now+1800s — the reaper's death clock.<br/>Event StockReserved id = uuid5 of "reservation:ord_42:0:StockReserved"
     INV-->>W: 201 created — replay returns 200, same reservation
-    W->>DB: [DB] transition PLACED→VALIDATED, v0→1, no event
+    W->>DB: [DB] transition PLACED→VALIDATED, no event
     rect rgb(0,0,0)
         Note over W,PAY: ONE ACTIVITY — authorize_payment.<br/>The call AND the write that records its answer
         W->>PAY: [HTTP] authorize 3446 — money key "ord_42:auth"
         Note over PAY: a hold, not a movement — payments row AUTHORIZED,<br/>ledger untouched. Retries reuse the SAME PSP key,<br/>so ambiguous outcomes converge (FR-22)
         PAY-->>W: 200 AUTHORIZED
-        W->>DB: [DB] transition VALIDATED→PAYMENT_CLEARED, v1→2, no event.<br/>NOT a second round trip from the workflow — it is the tail of<br/>this activity: the instant money is held, a void is owed, so<br/>that fact is written before the activity is allowed to finish
+        W->>DB: [DB] transition VALIDATED→PAYMENT_CLEARED, no event.<br/>NOT a second round trip from the workflow — it is the tail of<br/>this activity: the instant money is held, a void is owed, so<br/>that fact is written before the activity is allowed to finish
     end
-    W->>DB: [DB] confirm_order — a SEPARATE activity:<br/>PAYMENT_CLEARED→CONFIRMED, v2→3, plus event<br/>OrderConfirmed id = uuid5 of "order:ord_42:3:OrderConfirmed"
+    W->>DB: [DB] confirm_order — a SEPARATE activity:<br/>PAYMENT_CLEARED→CONFIRMED, plus event<br/>OrderConfirmed — id is a random uuid4 (ADR-0035)
     Note over W,DB: Why two, not one VALIDATED→CONFIRMED write:<br/>(1) PAYMENT_CLEARED is the only state meaning "money held, order not yet<br/>confirmed" — what the unwind reads to decide void AND release —<br/>(2) expected= makes each write a compare-and-swap, so a cancel landing<br/>between them fails confirm_order instead of overwriting the cancel —<br/>(3) retrying the confirmation must never re-call the PSP
     Note over W: wait_condition — restaurant_decision signal<br/>OR cancel_requested OR 180s timer
     K->>W: [TEMPORAL] signal restaurant_decision accept
     W->>D: [TEMPORAL] start child dlv::ord_42, REQUEST_CANCEL policy —<br/>BEFORE mark_accepted, so ACCEPTED in DB implies child exists
-    W->>DB: [DB] transition to ACCEPTED, v3→4
-    K->>DB: [DB] preparing v4→5, ready v5→6 — direct transition calls
+    W->>DB: [DB] transition to ACCEPTED
+    K->>DB: [DB] preparing, then ready — direct transition calls
     K->>D: [TEMPORAL] signal food_ready — sent post-commit, re-sent on replay
     Note over D: pickup timer, then dropoff timer —<br/>the simulated courier — dispatch milestone replaces this
-    D->>DB: [DB] transition to PICKED_UP, v6→7
-    D->>DB: [DB] transition to DELIVERED, v7→8, plus event OrderDelivered at v8
+    D->>DB: [DB] transition to PICKED_UP
+    D->>DB: [DB] transition to DELIVERED, plus event OrderDelivered
     W->>PAY: [HTTP] capture — money key "ord_42:capture"
     Note over PAY: amount from the STORED auth row, never the caller.<br/>Ledger pair — debit customer 3446, credit platform_cash 3446
     W->>INV: [HTTP] commit reservation — active→consumed,<br/>slot freed, stock stays sold
-    W->>DB: [DB] transition to SETTLED, v8→9, plus event OrderSettled at v9
+    W->>DB: [DB] transition to SETTLED, plus event OrderSettled
 ```
 
 ---
@@ -148,15 +148,15 @@ sequenceDiagram
     participant N as notification
 
     W->>INV: [HTTP] reserve → 201 — stock 100→98, slot occupied
-    W->>DB: [DB] PLACED→VALIDATED, v0→1
+    W->>DB: [DB] PLACED→VALIDATED
     W->>PAY: [HTTP] authorize — money key "ord_42:auth"
     Note over PAY: DECLINED row stored + the 402 body stored —<br/>a replayed authorize returns the SAME 402
     PAY-->>W: 402 PAYMENT_DECLINED → value "declined"
     Note over W: no exception — the value routes the workflow<br/>to the unwind. No void — nothing was held.
-    W->>DB: [DB] BEGIN_CANCEL — VALIDATED→CANCELLING, v1→2,<br/>cancel_reason stamped NOW = payment_declined
+    W->>DB: [DB] BEGIN_CANCEL — VALIDATED→CANCELLING,<br/>plus an order_cancellations row: payment_declined,<br/>cancelled_at stamped NOW — the DECISION moment
     W->>INV: [HTTP] release reservation, reason cancelled
     Note over INV: guarded active→released — stock 98→100,<br/>slot freed. A second release is a no-op.
-    W->>DB: [DB] finish_cancel — CANCELLING→CANCELLED, v2→3,<br/>plus event OrderCancelled at v3, cancel_reason inside
+    W->>DB: [DB] finish_cancel — CANCELLING→CANCELLED,<br/>plus event OrderCancelled, cancel_reason inside.<br/>The cancellation row is NOT rewritten — first writer wins
     N-->>N: [KAFKA] via Kafka, mints the customer notification —<br/>"Your card was declined, order never reached Biryani House"
     Note over W,N: FE poll shows CANCELLED + reason copy —<br/>the bell badges the durable record
 ```
@@ -181,7 +181,7 @@ sequenceDiagram
         INV--xW: [HTTP] unreachable — Name or service not known
     end
     Note over W: deadline reached. The last failure is a RETRYABLE error,<br/>not a non_retryable fault — so the workflow reads it as<br/>RAN OUT OF TIME, not IllegalTransition, and unwinds cleanly
-    W->>DB: [DB] begin_cancel — PLACED→CANCELLING, v0→1,<br/>cancel_reason system_timeout stamped NOW
+    W->>DB: [DB] begin_cancel — PLACED→CANCELLING,<br/>plus an order_cancellations row: system_timeout,<br/>cancelled_at stamped NOW
     Note over W: the reserve MAY have half-landed on a lost attempt,<br/>so release anyway — no void, nothing could be authorized at PLACED.<br/>Both undos are idempotent no-ops if the acquire never happened
     loop retry FOREVER — compensations are never deadline-bounded
         W->>INV: [HTTP] release_reservation
@@ -190,7 +190,7 @@ sequenceDiagram
     Note over W,INV: inventory comes back
     W->>INV: [HTTP] release_reservation
     INV-->>W: released — active→released, or a no-op if never reserved
-    W->>DB: [DB] finish_cancel — CANCELLING→CANCELLED, v1→2,<br/>plus event OrderCancelled at v2, cancel_reason inside
+    W->>DB: [DB] finish_cancel — CANCELLING→CANCELLED,<br/>plus event OrderCancelled, cancel_reason inside
     N-->>N: [KAFKA] via Kafka — "We couldn't reach Biryani House in time,<br/>your order was cancelled. Your card was not charged."
 ```
 

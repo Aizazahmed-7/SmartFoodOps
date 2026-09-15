@@ -58,8 +58,6 @@ async def transition(
     now = _now()
     async with sessions() as session:
         values: dict[str, Any] = {"status": target, "updated_at": now}
-        if cancel_reason is not None:
-            values["cancel_reason"] = cancel_reason
         result = await session.execute(
             orders.update()
             .where((orders.c.order_id == order_id) & (orders.c.status == expected))
@@ -79,6 +77,11 @@ async def transition(
             actual = current.status if current is not None else "absent"
             raise IllegalTransition(order_id, expected, target, actual)
 
+        if cancel_reason is not None:
+            # Same transaction as the status move: a CANCELLING row without
+            # its reason would leave the kitchen's decision matrix unable to
+            # classify replies during the unwind.
+            await OrderRepo(session).record_cancellation(order_id, cancel_reason, now)
         if event is not None:
             payload = await _full_state(session, order_id, target, now, cancel_reason)
             await OrderRepo(session).stage_event(
@@ -137,18 +140,17 @@ async def begin_cancel_from(
     (fresh apply, or an at-least-once replay finding it there — only this
     order's own workflow ever writes CANCELLING, so a replay is always
     ours); False = the courier won the race, cancellation refused."""
+    now = _now()
     async with sessions() as session:
         result = await session.execute(
             orders.update()
             .where((orders.c.order_id == order_id) & (orders.c.status.in_(allowed)))
-            .values(
-                status="CANCELLING",
-                cancel_reason=reason,
-                updated_at=_now(),
-            )
+            .values(status="CANCELLING", updated_at=now)
             .returning(orders.c.order_id)
         )
         applied = result.one_or_none() is not None
+        if applied:
+            await OrderRepo(session).record_cancellation(order_id, reason, now)
         await session.commit()
         if applied:
             await tracking.publish_status(order_id, "CANCELLING")
