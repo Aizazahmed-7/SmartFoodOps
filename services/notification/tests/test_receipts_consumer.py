@@ -87,7 +87,8 @@ async def test_settle_mints_the_claim_check_and_nudges_once():
         receipt_queue.reset_queue()
     (row,) = await _rows(sessions, receipts)
     assert row.order_id == "ord_1" and row.user_id == "usr_1"
-    assert row.totals["total_cents"] == 3104  # the payload, verbatim
+    assert row.snapshot["totals"]["total_cents"] == 3104  # the payload, verbatim
+    assert [i["name"] for i in row.snapshot["items"]] == ["Chicken Biryani"]
     assert row.s3_key is None and row.status == "pending"  # the tasks have not run
     assert enqueued == ["ord_1"]
     # The bell's silence on settlement stands: a receipt is a document,

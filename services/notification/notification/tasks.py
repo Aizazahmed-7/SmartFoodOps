@@ -147,8 +147,11 @@ def _receipt_data(row: sa.Row[Any]) -> ReceiptData:
         order_id=row.order_id,
         user_id=row.user_id,
         restaurant_name=row.restaurant_name,
-        items=row.items,
-        totals=row.totals,
+        # The domain model keeps items and totals apart — the renderer reads
+        # them separately (the EMAIL body needs only totals). Merging them
+        # was a storage decision; it stops here.
+        items=row.snapshot["items"],
+        totals=row.snapshot["totals"],
         settled_at=_aware(row.settled_at),
     )
 

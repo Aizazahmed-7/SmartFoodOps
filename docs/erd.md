@@ -446,8 +446,7 @@ erDiagram
         text order_id PK "one receipt per order forever — replays conflict-ignore"
         text user_id "resolved to an address at SEND time; no PII stored here"
         text restaurant_name "copied from the OrderSettled payload"
-        json items "claim check: the event's item shape, verbatim"
-        json totals "the pricing snapshot, verbatim"
+        json snapshot "the claim check: {items, totals} from the event, verbatim"
         timestamptz settled_at "event occurred_at — the instant the PDF prints"
         timestamptz created_at "consume time; the sweeper's grace anchor"
         text s3_key "NULL until render_receipt stores the PDF"
@@ -458,14 +457,13 @@ erDiagram
         text order_id PK
         text channel PK "'email' today; SMS later"
         timestamptz sent_at
-        text provider_message_id "the mailer's ref"
     }
     receipts |o--o| delivery_log : "logical (order_id): existence = sent"
 ```
 
 Index: `ix_notifications_inbox (recipient_type, recipient_id, created_at DESC, id DESC)` — one keyset walk per bell poll.
 
-The two halves of this database answer different questions and never join. `notifications` is the **bell** (in-app, minted from every notifying event — except the refund, which ADR-0040 mints from a Temporal workflow because payment events carry no `user_id`). `receipts` + `delivery_log` are the **receipt pipeline** (S10, FR-41): `OrderSettled` writes the `receipts` row in the same transaction as the inbox rows — that row is a **claim check**, holding everything the PDF needs so the Celery chain can be handed only an `order_id` and never call another service for data. `delivery_log` is the send ledger: a row exists ⇔ that channel was accepted by the provider, which is what makes `receipts.send` re-runnable and the beat sweeper (`receipts.sweep`) safe to be dumb. Neither table has a FK — even inside one database these are id conventions, because the writers are independent tasks.
+The two halves of this database answer different questions and never join. `notifications` is the **bell** (in-app, minted from every notifying event — except the refund, which ADR-0040 mints from a Temporal workflow because payment events carry no `user_id`). `receipts` + `delivery_log` are the **receipt pipeline** (S10, FR-41): `OrderSettled` writes the `receipts` row in the same transaction as the inbox rows — that row is a **claim check**: `snapshot` holds everything the PDF needs — the line items and the pricing totals, copied verbatim — so the Celery chain can be handed only an `order_id` and never call another service for data. `delivery_log` is the send ledger: a row exists ⇔ that channel was accepted by the provider, which is what makes `receipts.send` re-runnable and the beat sweeper (`receipts.sweep`) safe to be dumb. Neither table has a FK — even inside one database these are id conventions, because the writers are independent tasks.
 
 ---
 
@@ -480,11 +478,11 @@ The two halves of this database answer different questions and never join. `noti
 
 `receipts` — three orders mid-pipeline, showing every state the row can be in. Note `ord_42` settled but minted **no** notification: settlement is a deliberate silence in the bell (`mapping.py`), and the receipt is the only thing the customer sees:
 
-| order_id | settled_at | s3_key              | rendered_at | status  | means                                             |
-| -------- | ---------- | ------------------- | ----------- | ------- | ------------------------------------------------- |
-| ord_42   | 12:40      | receipts/ord_42.pdf | 12:40       | sent    | rendered and sent (see the log below)             |
-| ord_43   | 12:41      | NULL                | NULL        | pending | owed — render hasn't run (or is retrying) yet     |
-| ord_44   | 12:38      | receipts/ord_44.pdf | 12:38       | parked  | the mailer 4xx'd, or identity has no user         |
+| order_id | settled_at | s3_key              | rendered_at | status  | means                                         |
+| -------- | ---------- | ------------------- | ----------- | ------- | --------------------------------------------- |
+| ord_42   | 12:40      | receipts/ord_42.pdf | 12:40       | sent    | rendered and sent (see the log below)         |
+| ord_43   | 12:41      | NULL                | NULL        | pending | owed — render hasn't run (or is retrying) yet |
+| ord_44   | 12:38      | receipts/ord_44.pdf | 12:38       | parked  | the mailer 4xx'd, or identity has no user     |
 
 `delivery_log` — the per-CHANNEL send ledger, holding the provider's message id. `ord_42` has a row, so a sweeper re-enqueue or a Celery retry short-circuits to a no-op. It is written in the SAME transaction that moves `status` to `sent`: the log answers "which channels went out", `status` answers "is this receipt done", and the sweeper indexes the second:
 

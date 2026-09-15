@@ -65,8 +65,11 @@ receipts = sa.Table(
     sa.Column("order_id", sa.Text, primary_key=True),
     sa.Column("user_id", sa.Text, nullable=False),
     sa.Column("restaurant_name", sa.Text, nullable=False),
-    sa.Column("items", sa.JSON, nullable=False),  # [{name, qty, unit/line cents}]
-    sa.Column("totals", sa.JSON, nullable=False),  # the pricing snapshot, verbatim
+    # {"items": [{name, qty, unit/line cents}], "totals": the pricing
+    # snapshot verbatim} — one document because it is one thing: what this
+    # receipt prints. Never interpreted here beyond rendering it, which is
+    # why it stays opaque JSON rather than becoming columns.
+    sa.Column("snapshot", sa.JSON, nullable=False),
     sa.Column("settled_at", sa.TIMESTAMP(timezone=True), nullable=False),  # event occurred_at
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),  # sweeper grace anchor
     sa.Column("s3_key", sa.Text, nullable=True),  # set by render_receipt

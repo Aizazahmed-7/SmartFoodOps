@@ -80,8 +80,7 @@ class InboxHandler:
                         order_id=order_id,
                         user_id=str(payload["user_id"]),
                         restaurant_name=str(payload["restaurant_name"]),
-                        items=payload["items"],
-                        totals=payload["totals"],
+                        snapshot={"items": payload["items"], "totals": payload["totals"]},
                         settled_at=occurred_at,
                         created_at=datetime.now(UTC),
                     )
