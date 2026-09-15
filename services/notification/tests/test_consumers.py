@@ -108,11 +108,8 @@ async def test_refund_joins_user_through_the_projection():
     await handler.handle(_order_event("OrderPlaced", status="PLACED"))
     await handler.handle(_refund_event())
     (row,) = await _rows(sessions)
-    assert (row.recipient_type, row.recipient_id, row.kind) == (
-        "customer",
-        "usr_1",
-        "refund_processed",
-    )
+    assert (row.recipient_type, row.recipient_id) == ("customer", "usr_1")
+    assert row.title == "Refund on its way"
 
 
 async def test_refund_before_any_order_event_raises_projection_lag():
@@ -198,7 +195,7 @@ async def test_parked_refund_replays_clean_after_orders_catch_up():
     )
     await consumer2.consume_once()
     (row,) = await _rows(sessions)
-    assert (row.recipient_type, row.kind) == ("customer", "refund_processed")
+    assert (row.recipient_type, row.title) == ("customer", "Refund on its way")
 
 
 def test_group_names_are_pinned():

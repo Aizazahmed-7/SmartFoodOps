@@ -43,7 +43,6 @@ class NotificationService:
                 {
                     "id": row.id,
                     "order_id": row.order_id,
-                    "kind": row.kind,
                     "title": row.title,
                     "body": row.body,
                     "created_at": _aware(row.created_at).isoformat(),

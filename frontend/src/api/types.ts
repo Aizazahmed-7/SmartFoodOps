@@ -288,7 +288,6 @@ export interface StockRow {
 export interface NotificationRow {
   id: string;
   order_id: string;
-  kind: string;
   title: string;
   body: string;
   created_at: string;

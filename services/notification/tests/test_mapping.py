@@ -74,7 +74,7 @@ def test_unknown_cancel_reason_falls_back_gracefully():
 
 def test_delivered_notifies_the_customer():
     (draft,) = order_drafts("OrderDelivered", _order_payload(status="DELIVERED"))
-    assert (draft.recipient_type, draft.kind) == ("customer", "order_delivered")
+    assert (draft.recipient_type, draft.title) == ("customer", "Order delivered")
     assert "Biryani House" in draft.body
 
 
@@ -111,9 +111,9 @@ def test_no_rider_cancel_tells_both_sides():
             "cancel_reason": "no_rider_available",
         },
     )
-    assert [(d.recipient_type, d.kind) for d in drafts] == [
-        ("customer", "order_cancelled"),
-        ("restaurant", "order_cancelled"),
+    assert [(d.recipient_type, d.title) for d in drafts] == [
+        ("customer", "Order cancelled"),
+        ("restaurant", "No rider available"),
     ]
     assert "couldn't find a rider" in drafts[0].body
     assert "was not charged" in drafts[0].body

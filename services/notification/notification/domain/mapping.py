@@ -20,7 +20,6 @@ from smartfood_kafka import EventType
 class Draft:
     recipient_type: Literal["customer", "restaurant"]
     recipient_id: str
-    kind: str
     title: str
     body: str
 
@@ -78,14 +77,12 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
             Draft(
                 "restaurant",
                 restaurant_id,
-                "order_confirmed",
                 "New order to accept",
                 f"{items}, {total} — accept or reject before the timer cancels it.",
             ),
             Draft(
                 "customer",
                 user_id,
-                "order_confirmed",
                 "Order confirmed",
                 f"{name} has been notified and should accept shortly.",
             ),
@@ -94,14 +91,13 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
     if event_type == EventType.ORDER_CANCELLED:
         reason = payload.get("cancel_reason") or ""
         body = _CANCEL_BODIES.get(reason, _CANCEL_FALLBACK).format(name=name)
-        drafts = [Draft("customer", user_id, "order_cancelled", "Order cancelled", body)]
+        drafts = [Draft("customer", user_id, "Order cancelled", body)]
         if reason == "customer_cancelled":
             # The kitchen only hears about cancels it could be cooking for.
             drafts.append(
                 Draft(
                     "restaurant",
                     restaurant_id,
-                    "order_cancelled",
                     "Order cancelled by the customer",
                     "Stop preparing it — the slot and stock are released.",
                 )
@@ -113,7 +109,6 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
                 Draft(
                     "restaurant",
                     restaurant_id,
-                    "order_cancelled",
                     "No rider available",
                     "We couldn't find a courier in time — the order was cancelled "
                     "and the slot released.",
@@ -126,7 +121,6 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
             Draft(
                 "customer",
                 user_id,
-                "order_delivered",
                 "Order delivered",
                 f"Your order from {name} has arrived — enjoy!",
             )
@@ -144,7 +138,6 @@ def payment_drafts(event_type: str, payload: dict[str, Any], *, user_id: str) ->
             Draft(
                 "customer",
                 user_id,
-                "refund_processed",
                 "Refund on its way",
                 f"{total} is heading back to your card.",
             )

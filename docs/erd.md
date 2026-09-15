@@ -437,7 +437,6 @@ erDiagram
         text recipient_type "CHECK: customer|restaurant"
         text recipient_id "user_id, or the BRAND id for kitchen mail (ADR-0028)"
         text order_id "logical -> order.orders"
-        text kind
         text title
         text body
         timestamptz created_at "event occurred_at, replay-stable"
@@ -485,10 +484,10 @@ The two halves of this database answer different questions and never join. `noti
 
 `notifications` — the single `OrderConfirmed` event (id `b7e4…`) minted **two** rows, each with its own deterministic id, so each recipient's copy dedupes independently on redelivery:
 
-| id = ntf_uuid5 of…       | recipient_type | recipient_id | kind            | title               | read_at                          |
-| ------------------------ | -------------- | ------------ | --------------- | ------------------- | -------------------------------- |
-| "b7e4…:restaurant:rst_9" | restaurant     | rst_9        | order_confirmed | New order to accept | 12:03                            |
-| "b7e4…:customer:usr_1"   | customer       | usr_1        | order_confirmed | Order confirmed     | NULL _(unread — the bell badge)_ |
+| id = ntf_uuid5 of…       | recipient_type | recipient_id | title               | read_at                          |
+| ------------------------ | -------------- | ------------ | ------------------- | -------------------------------- |
+| "b7e4…:restaurant:rst_9" | restaurant     | rst_9        | New order to accept | 12:03                            |
+| "b7e4…:customer:usr_1"   | customer       | usr_1        | Order confirmed     | NULL _(unread — the bell badge)_ |
 
 `receipts` — three orders mid-pipeline, showing every state the row can be in. Note `ord_42` settled but minted **no** notification: settlement is a deliberate silence in the bell (`mapping.py`), and the receipt is the only thing the customer sees:
 

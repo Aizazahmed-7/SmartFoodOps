@@ -108,7 +108,6 @@ class InboxHandler:
                     recipient_type=draft.recipient_type,
                     recipient_id=draft.recipient_id,
                     order_id=order_id,
-                    kind=draft.kind,
                     title=draft.title,
                     body=draft.body,
                     created_at=occurred_at,

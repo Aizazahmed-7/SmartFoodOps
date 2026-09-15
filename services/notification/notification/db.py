@@ -24,7 +24,6 @@ notifications = sa.Table(
     sa.Column("recipient_type", sa.Text, nullable=False),
     sa.Column("recipient_id", sa.Text, nullable=False),  # user_id or restaurant_id
     sa.Column("order_id", sa.Text, nullable=False),
-    sa.Column("kind", sa.Text, nullable=False),
     sa.Column("title", sa.Text, nullable=False),
     sa.Column("body", sa.Text, nullable=False),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),  # event occurred_at
