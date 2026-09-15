@@ -30,7 +30,6 @@ async def _seed_order(sessions, order_id="ord_1"):
             user_id="usr_1",
             restaurant_id="rst_1",
             restaurant_name="Biryani House",
-            card_token="tok_ok",
             request_hash="hash-x",
             pricing_snapshot={
                 "subtotal_cents": 3000,

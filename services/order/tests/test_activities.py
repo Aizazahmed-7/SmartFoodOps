@@ -77,7 +77,6 @@ async def _setup():
             user_id="usr_1",
             restaurant_id="rst_1",
             restaurant_name="Biryani House",
-            card_token="tok_ok",
             request_hash="hash-of-K-1",
             pricing_snapshot={
                 "subtotal_cents": 3000,
@@ -116,7 +115,7 @@ def _price():
         restaurant_id="rst_1",
         amount_cents=3446,
         currency="USD",
-        card_token="tok_ok",
+        card_token="tok_ok",  # the live path: workflow input → Payment
         lines=[LineSpec(item_id="itm_a", qty=2)],
     )
 
@@ -128,8 +127,8 @@ def _placement(order_id="ord_2", key="K-2"):
         user_id="usr_1",
         restaurant_id="rst_1",
         restaurant_name="Biryani House",
-        card_token="tok_ok",
         currency="USD",
+        card_token="tok_ok",
         amount_cents=3446,
         placed_at=datetime.now(UTC).isoformat(),
         lines=[

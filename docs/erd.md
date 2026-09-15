@@ -283,7 +283,6 @@ erDiagram
         text restaurant_name_snapshot "branch-labeled: Biryani House - Airport"
         text status "CHECK: 13 states PLACED..SETTLED"
         text payment_method "CHECK: CARD|COD"
-        text card_token
         json pricing_snapshot "totals; activities READ, never recompute"
         json delivery_address_snapshot
         timestamptz placed_at

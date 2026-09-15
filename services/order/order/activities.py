@@ -105,7 +105,6 @@ class OrderActivities:
                     restaurant_id=placement.restaurant_id,
                     brand_id=placement.brand_id,
                     restaurant_name=placement.restaurant_name,
-                    card_token=placement.card_token,
                     request_hash=placement.request_hash,
                     pricing_snapshot=placement.pricing_snapshot,
                     address_snapshot=placement.address_snapshot,

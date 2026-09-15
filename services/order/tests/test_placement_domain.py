@@ -136,7 +136,6 @@ async def test_placement_writes_row_lines_and_event_in_one_commit(make_snapshot,
 
     # 1. the order, with every snapshot placement promised (FR-14/16)
     assert order.status == "PLACED"
-    assert order.card_token == "tok_ok"
     # (1200 + 300) * 2 = 3000; tax = 3000*825//10000 = 247
     assert order.pricing_snapshot == {
         "subtotal_cents": 3000,

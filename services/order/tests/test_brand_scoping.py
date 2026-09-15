@@ -123,7 +123,6 @@ async def _insert_order(sessions, order_id: str, restaurant_id: str, brand_id: s
                 brand_id=brand_id,
                 restaurant_name_snapshot="Biryani House",
                 status="PLACED",
-                card_token="tok_ok",
                 pricing_snapshot={},
                 delivery_address_snapshot={},
                 placed_at=now,

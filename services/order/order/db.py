@@ -54,7 +54,11 @@ orders = sa.Table(
     sa.Column("restaurant_name_snapshot", sa.Text, nullable=False),
     sa.Column("status", sa.Text, nullable=False, server_default="PLACED"),
     sa.Column("payment_method", sa.Text, nullable=False, server_default="CARD"),
-    sa.Column("card_token", sa.Text, nullable=False),
+    # No card_token here. The instrument reaches Payment through the
+    # workflow input, and Payment keeps its own copy for its own lifecycle
+    # — an unread third copy in this database was retention, not record
+    # (review 2026-09-15). Capture and void key on the PSP ref, not the
+    # token, so nothing downstream ever needed it back.
     # sha256 of the exact placement body this order was created from
     # (ADR-0024). The order row IS the idempotency record now: a retry
     # re-derives this order_id and reads the row — same hash → replay the
