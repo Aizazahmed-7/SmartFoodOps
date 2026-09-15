@@ -447,10 +447,8 @@ erDiagram
         text user_id "resolved to an address at SEND time; no PII stored here"
         text restaurant_name "copied from the OrderSettled payload"
         json snapshot "the claim check: {items, totals} from the event, verbatim"
-        timestamptz settled_at "event occurred_at — the instant the PDF prints"
-        timestamptz created_at "consume time; the sweeper's grace anchor"
+        timestamptz created_at
         text s3_key "NULL until render_receipt stores the PDF"
-        timestamptz rendered_at
         text status "CHECK: pending|sent|parked — the sweeper's partial index"
     }
     delivery_log {
