@@ -6,6 +6,7 @@ bypass scoping. The reservation API is system-only — saga activities call
 it; it is never edge-routed.
 """
 
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -129,6 +130,40 @@ async def set_capacity(
     await _own(ctx, restaurant_id, request)
     capacity, active = await _svc(request).set_capacity(restaurant_id, body.capacity)
     return {"restaurant_id": restaurant_id, "capacity": capacity, "active": active}
+
+
+# ── system: kitchen congestion (FR-85) ─────────────────────────────
+
+
+@router.get("/v1/internal/restaurants/{restaurant_id}/load")
+async def read_load(restaurant_id: str, ctx: SystemOnly, request: Request) -> dict:
+    """The only kitchen-congestion signal the system has.
+
+    `active`/`capacity` exists because reservations gate on it (FR-15); it
+    was never published anywhere, so an explanation engine could not tell
+    "this kitchen is saturated" from "this kitchen is idle and something
+    else is wrong". This endpoint publishes the fact and nothing more — no
+    "busy" flag, no percentage, no advice. Whether 7-of-8 means busy is a
+    judgement, and FR-82 puts every judgement in one pure resolver so it
+    can be tested exhaustively; a second opinion encoded here would be a
+    second place to be wrong.
+
+    404 when the kitchen has no load row: unknown, not idle. Synthesising
+    `active: 0` would hand the resolver a fact nobody observed.
+
+    `as_of` is the reading's own clock. The caller is writing prose about
+    "right now" and must be able to tell how old "now" is.
+    """
+    load = await _svc(request).load(restaurant_id)
+    if load is None:
+        raise ApiError(ErrorCode.NOT_FOUND, "no load record for this restaurant", 404)
+    active, capacity = load
+    return {
+        "restaurant_id": restaurant_id,
+        "active": active,
+        "capacity": capacity,
+        "as_of": datetime.now(UTC).isoformat(),
+    }
 
 
 # ── system: the reservation lifecycle (saga activities) ────────────

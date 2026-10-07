@@ -7,12 +7,19 @@ the real transition() helper against the same FILE-backed sqlite the app
 uses — the tests move state the same way the saga does, never by raw
 UPDATE."""
 
+import json
+
 import pytest
+import sqlalchemy as sa
 from fastapi.testclient import TestClient
 from order.config import Settings
+from order.db import outbox
 from order.domain.ports import SagaGone, SagaUnavailable
 from order.main import create_app
 from smartfood_auth import AuthContext, headers_for
+from smartfood_kafka import EventType
+
+SYSTEM = headers_for(AuthContext(sub="svc:ai-assistant", roles=frozenset({"system"})))
 
 CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
 OWNER = headers_for(
@@ -404,3 +411,69 @@ def test_prep_routes_are_scoped(client, db_url, place, advance_order):
             client.post(f"/v1/restaurant/orders/{order_id}/{route}", headers=OTHER).status_code
             == 404
         )
+
+
+def test_the_kitchen_moves_announce_themselves_with_the_timeline(
+    client, db_url, saga, place, advance_order
+):
+    """FR-81 through the real HTTP path. The kitchen is where a delay
+    actually happens, so these two events are the ones the explanation
+    engine leans on — and each must carry the timeline, not just its own
+    moment, so a consumer joining at OrderReady can time the cooking."""
+    order_id = place(client)
+    advance_order(db_url, order_id, TO_ACCEPTED)
+    assert client.post(f"/v1/restaurant/orders/{order_id}/preparing", headers=OWNER).status_code
+    assert client.post(f"/v1/restaurant/orders/{order_id}/ready", headers=OWNER).status_code == 200
+
+    engine = sa.create_engine(db_url.replace("+aiosqlite", ""))
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa.select(outbox.c.event_type, outbox.c.payload).where(
+                outbox.c.aggregate_id == order_id
+            )
+        ).all()
+    engine.dispose()
+    staged = {row.event_type: row.payload for row in rows}
+    assert EventType.ORDER_PREPARING in staged
+    assert EventType.ORDER_READY in staged
+
+    ready = staged[EventType.ORDER_READY]
+    ready = ready if isinstance(ready, dict) else json.loads(ready)
+    timeline = ready["milestones"]
+    # advance_order walked the saga moves with the same writer, so the
+    # accept stamp is real rather than fixture-injected.
+    assert timeline["accepted_at"] is not None
+    assert timeline["preparing_at"] < timeline["ready_at"]
+    assert timeline["picked_up_at"] is None
+
+
+# ── the timeline read, as the order actually moves (FR-83) ─────────
+
+
+def test_timeline_fills_in_as_the_order_moves(client, db_url, place, advance_order):
+    order_id = place(client)
+    advance_order(
+        db_url,
+        order_id,
+        [
+            ("PLACED", "VALIDATED"),
+            ("VALIDATED", "PAYMENT_CLEARED"),
+            ("PAYMENT_CLEARED", "CONFIRMED"),
+            ("CONFIRMED", "ACCEPTED"),
+        ],
+    )
+    body = client.get(f"/v1/internal/orders/{order_id}/timeline", headers=SYSTEM).json()
+    assert body["status"] == "ACCEPTED"
+    # The two the restaurant's decision window is measured between.
+    assert body["confirmed_at"] < body["accepted_at"]
+    assert body["preparing_at"] is None
+
+
+def test_timeline_carries_the_cancel_reason(client, db_url, place, advance_order):
+    """FR-86 renders from this: the cause is what separates "you cancelled
+    this" from "your food was cooked and then binned"."""
+    order_id = place(client)
+    advance_order(db_url, order_id, [("PLACED", "CANCELLED")], reason="payment_declined")
+    body = client.get(f"/v1/internal/orders/{order_id}/timeline", headers=SYSTEM).json()
+    assert body["status"] == "CANCELLED"
+    assert body["cancel_reason"] == "payment_declined"

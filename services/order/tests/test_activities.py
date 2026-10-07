@@ -280,6 +280,12 @@ async def test_mark_accepted_from_confirmed():
     await acts.confirm_order("ord_1")
     await acts.mark_accepted("ord_1")
     assert await _status(sessions) == "ACCEPTED"
+    async with sessions() as s:
+        types = [e.event_type for e in (await s.execute(sa.select(outbox))).all()]
+    # FR-81: the saga's own accept now announces itself. Without this the
+    # explanation engine cannot tell "the restaurant never accepted" from
+    # "the restaurant accepted and the kitchen has not started".
+    assert EventType.ORDER_ACCEPTED in types
 
 
 async def _to_ready(acts, sessions):
@@ -302,6 +308,7 @@ async def test_pickup_and_delivered_stage_the_delivery_event():
     assert await _status(sessions) == "DELIVERED"
     async with sessions() as s:
         types = [e.event_type for e in (await s.execute(sa.select(outbox))).all()]
+    assert EventType.ORDER_PICKED_UP in types  # FR-81
     assert EventType.ORDER_DELIVERED in types
 
 

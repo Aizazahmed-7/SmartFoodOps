@@ -36,10 +36,18 @@ class EventType(StrEnum):
     RESERVATION_RELEASED = "ReservationReleased"
     RESERVATION_CONSUMED = "ReservationConsumed"
 
-    # order — aggregate "order"; major states only (plan: no per-transition
-    # spam). CONFIRMED/CANCELLED/DELIVERED/SETTLED land with S5/S6.
+    # order — aggregate "order". Part A published major states only ("no
+    # per-transition spam"); Part B's explanation engine amends that,
+    # because a stage that never announces itself is a stage no consumer
+    # can time (PRD-partb FR-81, ADR-0046). The anti-spam intent is kept
+    # where it actually lived: notification's `order_drafts` returns no
+    # draft for any of the four below, so no customer gains a push.
     ORDER_PLACED = "OrderPlaced"
     ORDER_CONFIRMED = "OrderConfirmed"
+    ORDER_ACCEPTED = "OrderAccepted"
+    ORDER_PREPARING = "OrderPreparing"
+    ORDER_READY = "OrderReady"
+    ORDER_PICKED_UP = "OrderPickedUp"
     ORDER_CANCELLED = "OrderCancelled"
     ORDER_DELIVERED = "OrderDelivered"
     ORDER_SETTLED = "OrderSettled"
@@ -59,6 +67,17 @@ class EventType(StrEnum):
     RIDER_ASSIGNED = "RiderAssigned"
     RIDER_DELIVERY_COMPLETED = "RiderDeliveryCompleted"
 
+    # ai-assistant — aggregate "interaction", one event per answered turn.
+    # A product KPI rather than telemetry, so it goes through the outbox
+    # like every other business fact (PRD FR-94, ADR-0002).
+    ASSISTANT_INTERACTION = "AssistantInteraction"
+    # What we put in front of a customer, and what they went on to order.
+    # ACCEPTED is derived from the order stream, never reported by a client
+    # (FR-79) — a surface that grades its own recommendations is a metric
+    # that improves when the client changes.
+    RECOMMENDATION_SHOWN = "RecommendationShown"
+    RECOMMENDATION_ACCEPTED = "RecommendationAccepted"
+
 
 class Topic(StrEnum):
     """Topic suffixes — always composed with a cell via `topic()` (§9:
@@ -75,6 +94,10 @@ class Topic(StrEnum):
     # in dev, DDB Streams in prod (ADR-0026).
     DISPATCH_EVENTS = "dispatch.events"
     RIDER_LOCATIONS = "rider.locations"  # GPS telemetry (downsampled)
+    # AI-plane facts. NOT browse.events' shape: those are lossy telemetry
+    # with nothing to be atomic with, these are the source of the six
+    # required metrics (FR-95) and are staged transactionally.
+    ASSISTANT_EVENTS = "assistant.events"
 
 
 def topic(cell_id: str, suffix: Topic) -> str:

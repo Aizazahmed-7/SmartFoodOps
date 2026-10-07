@@ -145,6 +145,25 @@ class InventoryService:
             await session.commit()
             return load.capacity, load.active
 
+    async def load(self, restaurant_id: str) -> tuple[int, int] | None:
+        """(active, capacity), or None when this kitchen has no load row.
+
+        None is NOT "idle" and the caller must not round it to zero. A
+        restaurant with no row has never had a reservation reach it — the
+        honest reading is "unknown", and FR-85's consumer (the explanation
+        engine) has a branch for that, because telling a customer "the
+        kitchen is quiet" on the strength of a missing row is exactly the
+        invented fact ADR-0043 exists to prevent.
+
+        Uncached on purpose. `active` moves on every reserve and every
+        commit; a congestion number served from a cache would describe a
+        kitchen that no longer exists, and a stale explanation is worse
+        than no explanation because the customer cannot tell it is stale.
+        """
+        async with self._sessions() as session:
+            row = await InventoryRepo(session).get_load(restaurant_id)
+        return None if row is None else (row.active, row.capacity)
+
     # ── saga: reserve / release / commit ───────────────────────────
 
     async def reserve(
