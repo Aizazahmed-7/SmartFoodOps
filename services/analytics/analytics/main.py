@@ -51,11 +51,15 @@ def create_app(settings: Settings | None = None, *, runners: list[Runner] | None
         # Live wiring only: loop, retries, DLQ policy all live (tested) in
         # smartfood-kafka; the batch shape is FR-43's.
         from .consumers import (
+            GROUP_ASSISTANT,
             GROUP_FACTS,
+            GROUP_ITEMS,
             GROUP_REPOINT,
             GROUP_VIEWS,
+            AssistantFactsProjector,
             BrandRepointHandler,
             FactsProjector,
+            ItemFactsProjector,
             ViewsProjector,
         )
 
@@ -76,6 +80,27 @@ def create_app(settings: Settings | None = None, *, runners: list[Runner] | None
             serde,
             bootstrap=settings.kafka_bootstrap,
         )
+        # Its own group on the SAME topic as the order facts: a bug in a
+        # Part B projection must not park the batches the dashboards bill by.
+        items = ItemFactsProjector(sessions)
+        items_consumer = EventConsumer(
+            topic(settings.cell_id, Topic.ORDERS_EVENTS),
+            GROUP_ITEMS,
+            items,
+            serde,
+            bootstrap=settings.kafka_bootstrap,
+        )
+        # The topic B3 has been publishing to and nobody has read. Its own
+        # group, like the item facts: the six FR-95 metrics start here and
+        # a bug in them must not park the order dashboards.
+        assistant = AssistantFactsProjector(sessions)
+        assistant_consumer = EventConsumer(
+            topic(settings.cell_id, Topic.ASSISTANT_EVENTS),
+            GROUP_ASSISTANT,
+            assistant,
+            serde,
+            bootstrap=settings.kafka_bootstrap,
+        )
         repoint_consumer = EventConsumer(
             topic(settings.cell_id, Topic.CATALOG_CHANGES),
             GROUP_REPOINT,
@@ -89,6 +114,12 @@ def create_app(settings: Settings | None = None, *, runners: list[Runner] | None
             ),
             lambda: views_consumer.run_batches(
                 views, max_batch=settings.batch_max, wait_ms=settings.batch_wait_ms
+            ),
+            lambda: items_consumer.run_batches(
+                items, max_batch=settings.batch_max, wait_ms=settings.batch_wait_ms
+            ),
+            lambda: assistant_consumer.run_batches(
+                assistant, max_batch=settings.batch_max, wait_ms=settings.batch_wait_ms
             ),
             repoint_consumer.run,
         ]
