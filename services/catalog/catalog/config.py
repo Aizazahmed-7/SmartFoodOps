@@ -48,3 +48,17 @@ class Settings(BaseSettings):
     # the ambiguous-outcome case), so it must be tunable without a deploy.
     internal_timeout_seconds: float = 5.0
     internal_connect_timeout_seconds: float = 3.0
+
+    # --- Hybrid search (FR-65, ADR-0029 §4) -----------------------------
+    # The one read-path call Part A makes into the GenAI plane. OFF by
+    # default: semantic search is an upgrade to discovery, and discovery
+    # must not start depending on a service that did not exist last week.
+    assistant_base_url: str = "http://localhost:8013"
+    hybrid_search: Literal["on", "off"] = "off"
+    # 2 s, and it is a HANG detector rather than a latency SLO (ADR-0041).
+    # ADR-0019's 150 ms budget assumed embedding was free; measured, a hosted
+    # embedder is ~500 ms of the ~560 ms search. Set below the measured max
+    # (1066 ms embed) and the path silently falls back to lexical on every
+    # query while still returning 200 — which is how an eval run came to
+    # score the fallback and report it as the semantic path.
+    hybrid_search_timeout_s: float = 2.0

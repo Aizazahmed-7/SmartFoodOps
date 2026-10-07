@@ -2,7 +2,7 @@
 and the defensive payload paths."""
 
 import sqlalchemy as sa
-from analytics.adapters.repo import _total_cents
+from analytics.adapters.repo import _total_cents, event_values
 from analytics.consumers import FactsProjector
 from analytics.db import metadata, order_facts
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -346,3 +346,15 @@ async def test_brand_repoint_heals_only_null_rows():
             )
         ).scalar_one()
     assert untouched is None
+
+
+def test_the_new_order_milestones_are_skipped_not_parked():
+    """FR-81 widened `c1.orders.events` with four stage events. This
+    consumer is a DECISION away from recording them: the fact table times
+    an order end-to-end (placed → delivered → settled) and stage-level
+    congestion is B5's explanation engine's job, reading Order's own row.
+    What matters here is that a widened producer does not park this
+    consumer's batches — the forward-compatibility contract in
+    `event_values`' own docstring."""
+    for event_type in ("OrderAccepted", "OrderPreparing", "OrderReady", "OrderPickedUp"):
+        assert event_values(event_type, {"order_id": "ord_1"}) is None

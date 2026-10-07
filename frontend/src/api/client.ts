@@ -20,6 +20,10 @@ import type {
   MenuItem,
   NotificationList,
   OrderDetail,
+  ContentDraft,
+  FeedbackDigest,
+  OrderExplanation,
+  OrderFeedback,
   OrderList,
   OrderStatus,
   PlacedOrder,
@@ -30,7 +34,11 @@ import type {
   SearchResult,
   StockRow,
   TokenPair,
- RestaurantAnalytics } from "./types";
+ RestaurantAnalytics,
+  AskAccepted,
+  Recommendations,
+  AssistantCard,
+  AssistantTicket } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -346,6 +354,63 @@ export const tapDelivery = (orderId: string, action: "pickup" | "deliver") =>
 export const getCourier = (orderId: string) =>
   request<CourierView>("GET", `/v1/deliveries/${orderId}/courier`);
 
+/** B5: why is my order where it is. 404 = unknown or not yours (the two
+ * are one answer by design), which the caller renders as "no explanation"
+ * rather than as an error. */
+export const getOrderExplanation = (orderId: string) =>
+  request<OrderExplanation>("GET", `/v1/assistant/orders/${orderId}/explanation`);
+
+/** B6: rate a delivered order. PUT because one row per order — re-sending
+ * is the same statement, and a correction replaces rather than conflicts. */
+export const putOrderFeedback = (orderId: string, rating: number, comment: string | null) =>
+  request<{ order_id: string; rating: number; comment: string | null }>(
+    "PUT", `/v1/orders/${orderId}/feedback`, { rating, comment: comment || null },
+  );
+
+/** 404 = never rated (or not yours), which the caller renders as "ask". */
+export const getOrderFeedback = (orderId: string) =>
+  request<OrderFeedback>("GET", `/v1/orders/${orderId}/feedback`);
+
+// ── the content studio (B6) ────────────────────────────────────────
+
+export const listDrafts = (params: { status?: string; kind?: string } = {}) => {
+  const q = new URLSearchParams();
+  if (params.status) q.set("status", params.status);
+  if (params.kind) q.set("kind", params.kind);
+  return request<{ drafts: ContentDraft[] }>("GET", `/v1/assistant/drafts?${q}`);
+};
+
+export const draftMenuItems = (body: { item_ids?: string[]; category?: string; request?: string }) =>
+  request<{ draft_ids: string[]; queued: number; skipped: number }>(
+    "POST", "/v1/assistant/drafts/menu-items", body,
+  );
+
+export const draftBusinessCopy = (kind: "promotions" | "engagement", ask: string) =>
+  request<{ draft_id: string; kind: string }>(
+    "POST", `/v1/assistant/drafts/${kind}`, { request: ask },
+  );
+
+/** Records the decision. The MENU WRITE is a separate, ordinary Catalog
+ * PATCH the caller makes first — the assistant has no menu-write authority
+ * (ADR-0029), and the order matters: a failure between the two leaves a
+ * draft that still needs action rather than a false record of publication. */
+export const approveDraft = (draftId: string, publishedContent: string) =>
+  request<ContentDraft>(
+    "POST", `/v1/assistant/drafts/${draftId}/approve`, { published_content: publishedContent },
+  );
+
+export const rejectDraft = (draftId: string) =>
+  request<{ draft_id: string; status: string }>("POST", `/v1/assistant/drafts/${draftId}/reject`);
+
+export const replayDraft = (draftId: string) =>
+  request<{ draft_id: string; status: string }>("POST", `/v1/assistant/drafts/${draftId}/replay`);
+
+export const getFeedbackDigest = () =>
+  request<FeedbackDigest>("GET", "/v1/assistant/feedback");
+
+export const requestFeedbackSummary = () =>
+  request<{ draft_id: string; kind: string }>("POST", "/v1/assistant/feedback/summary");
+
 export const getNotifyTicket = () =>
   request<{ ticket: string; expires_in: number; stream: string }>(
     "POST", "/v1/notifications/ticket",
@@ -360,3 +425,49 @@ export const markAllNotificationsRead = () =>
   request<{ marked: number }>("POST", "/v1/notifications/read-all");
 
 export { decodeClaims };
+
+
+// ── the assistant (B3) ─────────────────────────────────────────────
+
+/** 202, not 200: the answer does not exist yet. The turn runs detached and
+ * the body carries an id and a stream ticket. `Idempotency-Key` makes a
+ * retry stream the turn already running rather than paying for a second
+ * generation (FR-67). */
+export const askAssistant = (body: {
+  question: string;
+  city: string;
+  conversation_id?: string;
+}) =>
+  request<AskAccepted>("POST", "/v1/assistant/messages", body, {
+    // A fresh key per ask, NOT `idemKeyFor`: that helper keeps one slot in
+    // localStorage keyed by body hash, so a question would evict the
+    // checkout key, and asking the same thing twice on purpose would
+    // silently re-stream the first answer. What the key protects here is
+    // the transparent 401-refresh retry inside `request`.
+    headers: { "Idempotency-Key": crypto.randomUUID() },
+  });
+
+/** A fresh ticket for a stream already in flight. Without this, resumption
+ * does not work in a browser at all: `EventSource` reconnects on its own, to
+ * the same URL, carrying the ticket it already spent. */
+export const getAssistantTicket = (messageId: string) =>
+  request<AssistantTicket>("POST", `/v1/assistant/messages/${messageId}/ticket`);
+
+/** The dishes the answer named, priced NOW. A separate read from the stream
+ * on purpose — the prose is final the moment it is written and a price is
+ * not, so a reader who comes back tomorrow gets yesterday's words and
+ * today's menu (FR-60). */
+export const getAssistantItems = (messageId: string) =>
+  request<{ items: AssistantCard[] }>("GET", `/v1/assistant/messages/${messageId}/items`);
+
+/** What to order, for a customer who has not asked anything (FR-80), or who
+ * gave a budget (FR-76). Reading this is what records the showing the
+ * acceptance rate is measured against — so it is a GET with a side effect,
+ * deliberately: the alternative is a client that reports its own
+ * impressions, which is the thing FR-79 rules out. */
+export const getRecommendations = (city: string, budgetCents?: number) =>
+  request<Recommendations>(
+    "GET",
+    `/v1/assistant/recommendations?city=${encodeURIComponent(city)}` +
+      (budgetCents ? `&budget_cents=${budgetCents}` : ""),
+  );

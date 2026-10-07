@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from aiokafka.errors import TopicAlreadyExistsError
+from aiokafka.errors import ClusterAuthorizationFailedError, KafkaError, TopicAlreadyExistsError
 from smartfood_kafka import (
     DOMAIN_EVENT_SCHEMA,
     DOMAIN_EVENT_SUBJECT,
@@ -168,34 +168,153 @@ async def test_send_nowait_appends_without_awaiting_an_ack():
     assert value[0] == 0 and struct.unpack(">I", value[1:5])[0] == 9
 
 
+class _CreateResponse:
+    def __init__(self, topic_errors):
+        self.topic_errors = topic_errors
+
+
+class _Described:
+    """The shape aiokafka hands back: response.resources[0] is a 5-tuple
+    whose last element is a list of (name, value, read_only, source, ...)."""
+
+    def __init__(self, entries):
+        self.resources = [(0, "", 2, "topic", entries)]
+
+
 class StubAdmin:
-    def __init__(self, exists: bool = False):
+    DEFAULT = 5  # ConfigSource.DEFAULT_CONFIG — inherited from the broker
+    DYNAMIC = 1  # ConfigSource.DYNAMIC_TOPIC_CONFIG — set on this topic
+
+    def __init__(self, exists: bool = False, entries: list | None = None, raises: bool = False):
         self.exists = exists
+        self.raises = raises
         self.created: list = []
+        self.altered: list = []
         self.closed = False
+        # What a topic Kafka auto-created looks like: policy inherited.
+        self._entries = (
+            entries
+            if entries is not None
+            else [("cleanup.policy", "delete", False, self.DEFAULT, False, [])]
+        )
 
     async def start(self):
         pass
 
     async def create_topics(self, topics):
-        if self.exists:
+        if self.raises:
             raise TopicAlreadyExistsError
+        if self.exists:
+            # How a live broker actually answers: the error rides IN the
+            # response, which is the blind spot that let this go unnoticed.
+            return _CreateResponse([(t.name, 36, "already exists") for t in topics])
         self.created.extend(topics)
+        return _CreateResponse([(t.name, 0, None) for t in topics])
+
+    async def describe_configs(self, resources):
+        return [_Described(self._entries)]
+
+    async def alter_configs(self, resources):
+        self.altered.extend(resources)
 
     async def close(self):
         self.closed = True
 
 
-async def test_ensure_compacted_topic_creates_once():
+async def test_ensure_compacted_topic_creates_with_the_policy():
     admin = StubAdmin()
     await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
     assert admin.created[0].name == "c1.catalog.changes"
     assert admin.created[0].topic_configs == {"cleanup.policy": "compact"}
+    assert admin.altered == [] and admin.closed
+
+
+async def test_an_existing_topic_that_is_already_compacted_is_left_alone():
+    """The steady state — every boot of every service that owns a topic. A
+    describe and nothing else."""
+    admin = StubAdmin(
+        exists=True,
+        entries=[("cleanup.policy", "compact", False, StubAdmin.DYNAMIC, False, [])],
+    )
+    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
+    assert admin.created == [] and admin.altered == [] and admin.closed
+
+
+async def test_an_already_exists_code_in_the_response_is_not_mistaken_for_success():
+    """THE root cause. aiokafka does not raise for an existing topic on
+    every broker version — TOPIC_ALREADY_EXISTS (36) arrives inside
+    CreateTopicsResponse. The original helper caught only the exception, so
+    against a broker that answers this way it reported success and changed
+    nothing, on every boot, for the life of the topic."""
+    admin = StubAdmin(exists=True)
+    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
+    assert admin.altered[0].configs["cleanup.policy"] == "compact"
+
+
+async def test_the_raising_broker_path_still_reconciles():
+    """Older clients/brokers signal it as an exception. Both roads lead to
+    the same reconcile."""
+    admin = StubAdmin(exists=True, raises=True)
+    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
+    assert admin.altered[0].configs["cleanup.policy"] == "compact"
+
+
+async def test_another_topics_error_is_not_read_as_ours():
+    """A response may carry entries we did not ask about. Matching on the
+    name keeps a neighbour's failure from being reported as this topic's —
+    the difference between "created" and "raise" for the wrong reason."""
+
+    class Noisy(StubAdmin):
+        async def create_topics(self, topics):
+            return _CreateResponse(
+                [("some.other.topic", 41, "not controller"), ("c1.catalog.changes", 0, None)]
+            )
+
+    admin = Noisy()
+    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
+    assert admin.altered == []  # ours was created, so nothing to reconcile
+
+
+async def test_a_topic_kafka_auto_created_is_corrected():
+    """THE regression. Kafka auto-creates on first produce or subscribe with
+    the broker defaults (delete, 7-day retention); the old code swallowed
+    TopicAlreadyExistsError and left it that way forever. Found live in B1:
+    c1.catalog.changes had aged out entirely, which voids the
+    last-event-per-key guarantee the full-state payloads are built on."""
+    admin = StubAdmin(exists=True, raises=True)  # policy inherited from the broker
+    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
+    assert admin.created == []
+    (resource,) = admin.altered
+    assert resource.name == "c1.catalog.changes"
+    assert resource.configs["cleanup.policy"] == "compact"
     assert admin.closed
 
-    replay = StubAdmin(exists=True)
-    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=replay)
-    assert replay.created == [] and replay.closed  # swallowed, admin still closed
+
+async def test_correcting_the_policy_preserves_an_operators_own_overrides():
+    """`alter_configs` REPLACES the resource's dynamic set, so a correction
+    that did not carry these forward would silently revert them to the
+    broker default — turning a fix into a regression."""
+    admin = StubAdmin(
+        exists=True,
+        entries=[
+            ("cleanup.policy", "delete", False, StubAdmin.DEFAULT, False, []),
+            ("max.message.bytes", "2097152", False, StubAdmin.DYNAMIC, False, []),
+            ("retention.ms", "604800000", False, StubAdmin.DEFAULT, False, []),
+        ],
+    )
+    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
+    (resource,) = admin.altered
+    assert resource.configs["max.message.bytes"] == "2097152"  # operator's, kept
+    assert resource.configs["cleanup.policy"] == "compact"  # ours, applied
+    assert "retention.ms" not in resource.configs  # inherited, not ours to pin
+
+
+async def test_a_topic_with_no_policy_entry_at_all_is_corrected():
+    """Defensive: a broker that omits the key rather than reporting a
+    default must not be read as "already compacted"."""
+    admin = StubAdmin(exists=True, entries=[])
+    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
+    assert admin.altered[0].configs == {"cleanup.policy": "compact"}
 
 
 async def test_versions_endpoint_refusal_is_loud():
@@ -218,3 +337,46 @@ async def test_schema_by_id_caches():
     await registry.schema_by_id(7)
     await registry.schema_by_id(7)
     assert calls["n"] == 1  # second hit served from cache
+
+
+async def test_a_topic_we_may_not_administer_does_not_block_startup():
+    """The normal production posture: topics provisioned by IaC, the service
+    principal holding produce/consume and nothing else. This helper runs
+    inside catalog's lifespan, so raising here would crash-loop a container
+    that only ever needed to produce."""
+
+    class Forbidden(StubAdmin):
+        async def create_topics(self, topics):
+            return _CreateResponse([("c1.catalog.changes", 29, "not authorized")])
+
+    admin = Forbidden()
+    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
+    assert admin.altered == []  # not attempted — we were told we may not
+    assert admin.closed
+
+
+async def test_a_reconcile_we_may_not_perform_does_not_block_startup():
+    """Create may be permitted while ALTER_CONFIGS is not. The topic exists
+    and is writable; what is lost is the policy check, which is worth a loud
+    log line and not an outage."""
+
+    class NoAlter(StubAdmin):
+        async def alter_configs(self, resources):
+            raise ClusterAuthorizationFailedError("nope")
+
+    admin = NoAlter(exists=True)
+    await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=admin)
+    assert admin.closed
+
+
+async def test_an_unrecognised_failure_is_still_raised():
+    """The line between "not permitted" and "broken" has to stay somewhere:
+    a topic we could neither create nor identify is not something to
+    continue past."""
+
+    class NotController(StubAdmin):
+        async def create_topics(self, topics):
+            return _CreateResponse([("c1.catalog.changes", 41, "not controller")])
+
+    with pytest.raises(KafkaError):
+        await ensure_compacted_topic("kafka:9092", "c1.catalog.changes", admin=NotController())

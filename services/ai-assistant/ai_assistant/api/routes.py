@@ -24,7 +24,8 @@ from smartfood_auth import AuthContext, require_system
 from smartfood_realtime import sse_event
 
 from ..domain.budget import BudgetExceeded, PlaneShed
-from ..domain.ports import LlmRateLimited, LlmUnavailable
+from ..domain.ports import EmbeddingUnavailable, LlmRateLimited, LlmUnavailable
+from ..domain.retrieval import Candidate, Filters
 from ..domain.router import NoProviderAvailable, Task
 from ..domain.service import AssistantService, Turn
 from ..metrics import STREAM_CLOSURES
@@ -167,3 +168,70 @@ async def echo_stream(body: EchoIn, ctx: SystemOnly, request: Request) -> Stream
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+class RetrieveIn(StrictModel):
+    """`city` is required and has no default: every query is geo-scoped
+    (FR-63), and an unscoped retrieval would offer dishes from a city the
+    customer cannot order from."""
+
+    query: str = Field(min_length=1, max_length=400)
+    city: str = Field(min_length=1, max_length=80)
+    max_price_cents: int | None = Field(default=None, ge=0, le=10_000_000)
+    tags: list[str] = Field(default_factory=list, max_length=10)
+    cuisines: list[str] = Field(default_factory=list, max_length=10)
+    limit: int = Field(default=10, ge=1, le=50)
+    # The caller states its own policy on paused restaurants, and the
+    # default is the strict one. FR-63's "open branches only" governs what
+    # the assistant RECOMMENDS — offering a closed kitchen in a chat answer
+    # is wrong. Catalog's `/v1/search` is a different contract: its card
+    # carries `status` so the client can badge a closed restaurant and still
+    # let a customer browse the menu. Hard-coding the strict rule here made
+    # a config flag silently change what search returned.
+    open_only: bool = True
+
+
+@router.post("/v1/internal/assistant/retrieve")
+async def retrieve(body: RetrieveIn, ctx: SystemOnly, request: Request) -> dict:
+    """Ranked candidates for the knowledge index — ids and scores, never
+    cards (FR-62).
+
+    SystemOnly and never routed through the edge: the gateway's allowlist
+    does not carry `/v1/internal/*`, so this is reachable from inside the
+    mesh only. Catalog's `HybridSearch` adapter is its first caller.
+
+    **It returns ids because it must.** Names and prices are Catalog's to
+    give, and resolving them there rather than here is what keeps a stale
+    indexed `price_cents` structurally unable to reach a customer through
+    search — the same rule FR-60 applies to the assistant's answers, bought
+    here for free rather than enforced by review.
+
+    Retrieval failing is a 503 with `Retry-After`, never a 500: the caller's
+    correct response is to fall back to lexical search (FR-65), and an error
+    it can recognise is what lets it.
+    """
+    retriever = request.app.state.retriever
+    filters = Filters(
+        city=body.city,
+        max_price_cents=body.max_price_cents,
+        tags=body.tags,
+        cuisines=body.cuisines,
+        open_only=body.open_only,
+    )
+    try:
+        found = await retriever.retrieve(query=body.query, filters=filters, limit=body.limit)
+    except EmbeddingUnavailable as exc:
+        raise _unavailable() from exc
+    return {
+        "items": [_candidate(c) for c in found.items],
+        "restaurants": [_candidate(c) for c in found.restaurants],
+    }
+
+
+def _candidate(candidate: Candidate) -> dict:
+    return {
+        "chunk_id": candidate.chunk_id,
+        "restaurant_id": candidate.restaurant_id,
+        "item_id": candidate.item_id,
+        "score": candidate.score,
+    }

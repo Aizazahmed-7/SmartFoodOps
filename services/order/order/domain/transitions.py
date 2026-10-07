@@ -41,6 +41,39 @@ class TransitionResult:
     applied: bool  # False = idempotent replay (already at target)
 
 
+MILESTONES: dict[str, str] = {
+    "PAYMENT_CLEARED": "payment_cleared_at",
+    "CONFIRMED": "confirmed_at",
+    "ACCEPTED": "accepted_at",
+    "PREPARING": "preparing_at",
+    "READY": "ready_at",
+    "PICKED_UP": "picked_up_at",
+}
+"""target status → the column that remembers when it was reached (FR-81).
+
+Stamped inside the guarded UPDATE and nowhere else, which is the whole
+reason it can be trusted: `WHERE status = :expected` means a replayed or
+raced transition matches 0 rows, so the stamp cannot be overwritten by a
+redelivery arriving minutes later. A milestone is a FACT about a moment, and
+the only code allowed to write it is the code that caused the moment.
+
+PAYMENT_CLEARED earns one because it is the moment money starts existing:
+`authorize_payment` moves VALIDATED -> PAYMENT_CLEARED only on a successful
+authorization, so this stamp IS the evidence that a card hold exists. An
+explanation that tells a cancelled customer whether they were charged has
+to read this and not `confirmed_at`, which is one transition too late.
+
+CONFIRMED earns one for a specific reason: `accept_timeout_s` runs from it,
+so it is the start of the only budgeted window before the kitchen. Timing
+that window from `placed_at` instead would charge the restaurant for the
+saga's reserve-and-authorize round trip.
+
+Statuses absent here have no column on purpose. PLACED already has
+`placed_at`; the terminal moves (DELIVERED, SETTLED, CANCELLED) announce
+themselves as events that carry `occurred_at`, so a consumer can time them
+without the row growing a column per state."""
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -58,6 +91,9 @@ async def transition(
     now = _now()
     async with sessions() as session:
         values: dict[str, Any] = {"status": target, "updated_at": now}
+        milestone = MILESTONES.get(target)
+        if milestone is not None:
+            values[milestone] = now
         result = await session.execute(
             orders.update()
             .where((orders.c.order_id == order_id) & (orders.c.status == expected))
@@ -199,5 +235,19 @@ async def _full_state(
         "delivery_address": order.delivery_address_snapshot,
         "cancel_reason": cancel_reason,
         "rider_id": order.rider_id,
+        # The whole timeline, not just this moment (FR-81). Full-state means
+        # full state: a consumer that joins the stream at OrderReady must be
+        # able to tell how long the kitchen took without replaying from the
+        # beginning of the topic. The row was re-read AFTER the UPDATE in
+        # this same transaction, so the milestone this event announces is
+        # already among these.
+        "milestones": {
+            column: _iso(getattr(order, column, None)) for column in MILESTONES.values()
+        },
+        "placed_at": order.placed_at.isoformat(),
         "occurred_at": now.isoformat(),
     }
+
+
+def _iso(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()

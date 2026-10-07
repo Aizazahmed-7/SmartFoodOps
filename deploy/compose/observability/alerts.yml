@@ -175,3 +175,249 @@ groups:
           summary: "a receipt was rejected by the mail provider and parked — it will NOT retry on its own"
           runbook: docs/runbooks.md#receiptparked
           dashboard: http://localhost:3000/d/smartfoodops-slo
+
+  # ── the assistant plane (B7) ──────────────────────────────────────
+  # Its own group, like its own consumer groups and its own dashboard: the
+  # assistant is deliberately a 99.5% plane beside a 99.95% ordering path
+  # (NFR-23), so its noise must never be mistaken for the ordering path's.
+  - name: assistant
+    rules:
+      - alert: AssistantTimeToFirstTokenBreach
+        # NFR-21: time-to-first-token p95 < 1.5s. The number a customer
+        # actually feels — a streamed answer's HTTP duration is its
+        # connection lifetime, which is why stream routes are kept out of
+        # the HTTP histogram entirely.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(assistant_time_to_first_token_seconds_bucket[10m]))) > 1.5
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "assistant time-to-first-token p95 above 1.5s (NFR-21)"
+          runbook: docs/runbooks.md#assistanttimetofirsttokenbreach
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantAnswerLatencyBreach
+        # NFR-21: complete answer p95 < 6s, on generation only. `explain`
+        # is a different task with a different budget and averaging the two
+        # would let a fast templated path hide a slow conversational one.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(assistant_response_seconds_bucket{task="generate"}[10m]))) > 6
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "assistant answer p95 above 6s (NFR-21)"
+          runbook: docs/runbooks.md#assistantanswerlatencybreach
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantUngroundedAnswer
+        # NFR-26: 100% of item references in SHIPPED answers resolve to
+        # real items. This counter is post-validation leakage, so one is
+        # not noise — it is a customer told about a dish that does not
+        # exist. "An alerting signal, not a curiosity", in the NFR's words.
+        expr: increase(assistant_ungrounded_total[15m]) > 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "a shipped answer cited something that was never retrieved (NFR-26)"
+          runbook: docs/runbooks.md#assistantungroundedanswer
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantKnowledgeStale
+        # NFR-28: a committed menu change is visible to retrieval within
+        # 60s p99, and the NFR says staleness beyond that PAGES. A stale
+        # index does not fail loudly: it answers confidently about a menu
+        # the kitchen has already changed.
+        #
+        # Reads the BACKLOG gauge, not the freshness histogram, and that
+        # correction matters more than the threshold. The histogram is
+        # observed only when a restaurant is successfully indexed, so a
+        # drain that never succeeds — the embedding provider hard-down —
+        # observes nothing at all, every bucket's rate is zero,
+        # histogram_quantile returns NaN, and `NaN > 60` is false. The page
+        # stayed inactive in exactly the outage it exists for, while the
+        # dashboard showed a flat gap that reads as "no menu changes".
+        # The gauge rises when nothing is draining, which is the condition.
+        expr: assistant_knowledge_backlog_seconds > 60
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "menu changes are taking over 60s to reach retrieval (NFR-28)"
+          runbook: docs/runbooks.md#assistantknowledgestale
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantKnowledgeDrainFailing
+        # The row stays queued when a drain pass raises, so this is a RETRY
+        # rate and not a loss rate — hence warn. Sustained, it becomes the
+        # cause of AssistantKnowledgeStale above.
+        expr: increase(assistant_knowledge_drain_failures_total[15m]) > 3
+        for: 5m
+        labels: { severity: warn }
+        annotations:
+          summary: "the knowledge drain is failing repeatedly — the index is falling behind"
+          runbook: docs/runbooks.md#assistantknowledgedrainfailing
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantProviderFailoversSustained
+        # ADR-0030 §4. ONE failover is the design working — the secondary
+        # caught it. A sustained rate means the primary is down and every
+        # answer is paying the retry before it starts.
+        #
+        # A RATIO, because the condition is one. An absolute 0.1/s is 6
+        # failovers a minute, so a cell serving 2 turns/min could have its
+        # primary provider 503 on literally every call — every answer paying
+        # a full failover round-trip, TTFT doubled — and never reach the
+        # threshold. The share of calls that failed over works at any
+        # traffic level; the floor keeps an idle window out of it.
+        expr: |
+          sum(rate(assistant_provider_failovers_total[10m]))
+            / sum(rate(assistant_response_seconds_count[10m])) > 0.5
+          and sum(rate(assistant_response_seconds_count[10m])) > 0.01
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "the assistant is routinely failing over to its secondary provider"
+          runbook: docs/runbooks.md#assistantproviderfailoverssustained
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantSheddingCustomers
+        # FR-102's budgets refusing calls BEFORE a provider sees them. A
+        # per-user budget catching one heavy user is the mechanism working;
+        # a cell budget refusing everyone is an outage wearing a polite
+        # message, and the `reason` label is what separates them.
+        #
+        # `breaker_open` only. A single `user_budget` refusal — one customer
+        # re-sending a long question at 02:00 — keeps `increase(...[10m])`
+        # above zero for the full ten minutes, so `for: 5m` was always
+        # satisfied by one routine event and the signal that matters was
+        # buried under it. The per-user bucket doing its job is not an
+        # incident; the cell-wide breaker refusing everyone is.
+        expr: sum(increase(assistant_budget_refusals_total{reason="breaker_open"}[10m])) > 0
+        for: 5m
+        labels: { severity: warn }
+        annotations:
+          summary: "the cell breaker is refusing assistant calls before they reach a provider"
+          runbook: docs/runbooks.md#assistantsheddingcustomers
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantCacheHitRateCollapsed
+        # NFR-24 names the cache tiers load-bearing rather than an
+        # optimisation: provider quota is the binding constraint at the
+        # ceiling, and the hit rate is what keeps generations inside it. A
+        # collapse is a cost and capacity incident, not a slow day.
+        #
+        # The trailing `and` is load-bearing: without a volume floor, an
+        # idle window makes the numerator and denominator both zero and the
+        # ratio reads as a total collapse. An alert that fires every quiet
+        # night is an alert people learn to close.
+        #
+        # The denominator is the EXACT tier's lookups, not every lookup.
+        # The tiers are sequential — `exact_cache -> retrieve ->
+        # semantic_cache -> generate` — and both increment the same counter,
+        # so the semantic tier is only ever consulted after an exact MISS.
+        # Summing both counts one turn once or twice depending on whether
+        # the first tier hit, and the bias runs the wrong way: a healthier
+        # semantic tier adds lookups to the denominator and pushes the
+        # computed rate DOWN. 10 exact hits + 20 semantic hits over 100
+        # turns is a real 30% rate and computed as 15.8% — a page for
+        # beating the floor. One exact lookup happens per turn, so that is
+        # the denominator that means "turns".
+        expr: |
+          sum(rate(assistant_cache_total{result="hit"}[30m]))
+            / sum(rate(assistant_cache_total{tier="exact"}[30m])) < 0.2
+          and sum(rate(assistant_cache_total{tier="exact"}[30m])) > 0.025
+        for: 30m
+        labels: { severity: warn }
+        annotations:
+          summary: "assistant answer-cache hit rate below 20% for 30m (NFR-24)"
+          runbook: docs/runbooks.md#assistantcachehitratecollapsed
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantWorkerTargetAbsent
+        # The same trap WorkerTargetAbsent documents for order-worker, and
+        # the newly added scrape job has the same dns_sd shape: a dead
+        # container means Docker DNS returns nothing, Prometheus reads an
+        # EMPTY target list, and `up` goes absent rather than 0 — so
+        # ServiceDown matches nothing. Absence is the symptom. When this
+        # worker dies the content studio and the reindex stop, and their
+        # counters simply freeze at the last scraped value, which no panel
+        # on the AI dashboard renders as a change.
+        expr: absent(up{job="ai-assistant-worker"}) == 1
+        for: 5m
+        labels: { severity: warn }
+        annotations:
+          summary: "no ai-assistant-worker is being discovered — content jobs and the reindex are not running"
+          runbook: docs/runbooks.md#assistantworkertargetabsent
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantFactsLagging
+        # The one that makes every OTHER number on the AI dashboard
+        # trustworthy. `analytics.assistant.v1` projects the interaction
+        # facts all six FR-95 metrics are read from. If it stalls, nothing
+        # errors: the panels keep rendering, the window keeps sliding, and
+        # the numbers quietly describe a shorter period than their label.
+        expr: |
+          sum by (consumergroup, topic) (
+            kafka_consumergroup_lag{consumergroup="analytics.assistant.v1"}) > 100
+        for: 10m
+        labels: { severity: warn }
+        annotations:
+          summary: "assistant interaction facts are {{ $value }} events behind — the AI KPIs are stale"
+          runbook: docs/runbooks.md#assistantfactslagging
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+  # ── cost governance (NFR-25) ──────────────────────────────────────
+  # The budget is $0.004 per order (capacity-plan §7, A23). It is ~60x the
+  # modelled cost on today's flash-lite models and ~2.4x the modelled cost
+  # on a premium model, which is the point: it must survive a DELIBERATE
+  # model upgrade and still catch an unintended loop. Warn at 60% of budget
+  # per the capacity plan's standing rule that 60% triggers a planned
+  # action, page at the budget itself.
+  - name: assistant-cost
+    rules:
+      - alert: AssistantCostPerOrderElevated
+        # The `and` is the lesson AssistantCacheHitRateCollapsed taught:
+        # with no orders the denominator is zero, the ratio is +Inf, and a
+        # quiet night pages. Only evaluated when orders are actually
+        # flowing.
+        expr: |
+          assistant:usd_per_order > 0.0024
+          and sum(rate(order_placement_seconds_count{outcome="placed"}[10m])) > 0.005
+        for: 30m
+        labels: { severity: warn }
+        annotations:
+          summary: "AI cost per order at {{ $value | printf \"$%.5f\" }} — 60% of the $0.004 budget (NFR-25)"
+          runbook: docs/runbooks.md#assistantcostperorderelevated
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantCostPerOrderOverBudget
+        expr: |
+          assistant:usd_per_order > 0.004
+          and sum(rate(order_placement_seconds_count{outcome="placed"}[10m])) > 0.005
+        for: 15m
+        labels: { severity: page }
+        annotations:
+          summary: "AI cost per order at {{ $value | printf \"$%.5f\" }} — OVER the $0.004 budget (NFR-25)"
+          runbook: docs/runbooks.md#assistantcostperorderoverbudget
+          dashboard: http://localhost:3000/d/smartfoodops-assistant
+
+      - alert: AssistantSpendUnpriced
+        # Tokens billed by a vendor the price table cannot price. This does
+        # not make the cost line a bit wrong — it makes it CONFIDENTLY LOW,
+        # because an unpriced model drops out of the join and the panel
+        # keeps rendering a smaller number with no gap in it. Every tripwire
+        # above is blind for exactly that model until this is fixed.
+        #
+        # `for` SHORTER than the 10m rate window behind the series, which is
+        # not a detail: a worker job on a 15-minute schedule makes this
+        # non-zero for ten minutes and zero for five, so a 15m `for` reset
+        # its pending state every cycle and the alert guarding the cost
+        # design's one blind spot would never have fired at all.
+        expr: sum(assistant:tokens_unpriced_per_second) > 0
+        for: 5m
+        labels: { severity: warn }
+        annotations:
+          summary: "tokens are being billed by a model with no row in the price table — every cost number below it is too low"
+          runbook: docs/runbooks.md#assistantspendunpriced
+          dashboard: http://localhost:3000/d/smartfoodops-assistant

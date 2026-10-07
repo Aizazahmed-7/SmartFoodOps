@@ -39,6 +39,20 @@ OrderStatus = Literal[
 ]
 STATUSES: tuple[str, ...] = get_args(OrderStatus)
 
+RATEABLE_STATUSES: tuple[str, ...] = ("DELIVERED", "SETTLED")
+"""FR-91: a customer may rate an order that arrived.
+
+SETTLED is included because it is DELIVERED plus money — to the person who
+ate the food they are the same evening, and excluding it would mean the
+window to leave feedback closed the moment the card was captured.
+
+REFUNDED is deliberately absent. It is reachable only from DELIVERED, so
+the food did arrive — but a refund means something went wrong that this
+scale cannot express, and inviting a star rating there asks the wrong
+question. Feedback on a refunded order belongs to support, not to a corpus
+that FR-92 will summarise as how the kitchen is doing.
+"""
+
 orders = sa.Table(
     "orders",
     metadata,
@@ -77,6 +91,17 @@ orders = sa.Table(
     sa.Column("rider_id", sa.Text, nullable=True),
     sa.Column("placed_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
+    # The milestones (FR-81). `updated_at` is overwritten by every move, so
+    # it can say WHEN something last happened but never WHAT took long.
+    # Stamped by transition() inside the guarded UPDATE, which is what makes
+    # them exactly-once: a replayed transition matches 0 rows and therefore
+    # cannot re-stamp a moment that already passed.
+    sa.Column("payment_cleared_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    sa.Column("confirmed_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    sa.Column("accepted_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    sa.Column("preparing_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    sa.Column("ready_at", sa.TIMESTAMP(timezone=True), nullable=True),
+    sa.Column("picked_up_at", sa.TIMESTAMP(timezone=True), nullable=True),
     # tuple repr renders as ('PLACED', 'VALIDATED', ...) — valid SQL IN list.
     sa.CheckConstraint(f"status IN {STATUSES!r}", name="ck_orders_status"),
     sa.CheckConstraint("payment_method IN ('CARD','COD')", name="ck_orders_payment_method"),
@@ -121,6 +146,39 @@ order_cancellations = sa.Table(
     # The vocabulary its readers branch on (kitchen's decision matrix) and
     # count with (analytics' rejection rate) — closed, and now enforced.
     sa.CheckConstraint(f"reason IN {CANCEL_REASONS!r}", name="ck_order_cancellations_reason"),
+)
+
+# FR-91. Part A captured no feedback at all, so there was nothing to
+# summarise and no honest proxy for it.
+order_feedback = sa.Table(
+    "order_feedback",
+    metadata,
+    # One row per order, as the schema rather than as a rule somebody
+    # remembers. A customer changing their mind rewrites this row; the
+    # summary is regenerated from whatever the rows currently say, which is
+    # the only version anyone can defend quoting.
+    sa.Column("order_id", sa.Text, sa.ForeignKey("orders.order_id"), primary_key=True),
+    # Who said it — the ownership check on every read and write, and the
+    # reason a summary can promise it quotes only real customers.
+    sa.Column("user_id", sa.Text, nullable=False),
+    # Snapshotted from the order, not joined. A summary is scoped to one
+    # restaurant's own rows, and a branch can be repointed to a brand later
+    # (ADR-0028); feedback about the food served that night belongs to the
+    # branch that served it.
+    sa.Column("restaurant_id", sa.Text, nullable=False),
+    sa.Column("brand_id", sa.Text, nullable=True),
+    sa.Column("rating", sa.Integer, nullable=False),
+    # Optional, and most ratings will not have one. A summary that needs
+    # quotes has to cope with a corpus that is mostly stars.
+    sa.Column("comment", sa.Text, nullable=True),
+    sa.Column("submitted_at", sa.TIMESTAMP(timezone=True), nullable=False),
+    sa.CheckConstraint("rating BETWEEN 1 AND 5", name="ck_order_feedback_rating"),
+    # BOTH, because the read is `restaurant_id = claim OR brand_id = claim`
+    # — a claim names either (ADR-0028) and an OR across two columns cannot
+    # use one of them. With both, the planner takes a BitmapOr instead of
+    # scanning the table on every studio mount.
+    sa.Index("ix_order_feedback_restaurant", "restaurant_id", "submitted_at"),
+    sa.Index("ix_order_feedback_brand", "brand_id", "submitted_at"),
 )
 
 order_items = sa.Table(

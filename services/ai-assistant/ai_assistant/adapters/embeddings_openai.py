@@ -36,6 +36,9 @@ class OpenAiEmbeddings:
         retry: RetryPolicy | None = None,
     ) -> None:
         self._key = api_key
+        # base_url carries the API version segment (see OpenAiLlm): appended
+        # here is only the operation, so a vendor whose compat path is not
+        # spelled `/v1` (e.g. Gemini's `/v1beta/openai`) works unchanged.
         self._base = base_url.rstrip("/")
         self._http = http
         self._model = model
@@ -57,7 +60,7 @@ class OpenAiEmbeddings:
         try:
             payload = await post_json(
                 self._http,
-                f"{self._base}/v1/embeddings",
+                f"{self._base}/embeddings",
                 headers={
                     "authorization": f"Bearer {self._key}",
                     "content-type": "application/json",

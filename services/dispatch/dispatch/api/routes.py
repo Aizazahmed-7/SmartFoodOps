@@ -176,6 +176,17 @@ async def deliver(order_id: str, ctx: Rider, request: Request) -> dict:
 # ── customer surface: the courier dot ──────────────────────────────
 
 
+@router.get("/v1/internal/deliveries/{order_id}")
+async def delivery_state(order_id: str, ctx: SystemOnly, request: Request) -> dict:
+    """Dispatch's side of an explanation (FR-83). 404 = no delivery row,
+    which for an order that has not reached READY is the ordinary case and
+    not an error — the caller reads it as "no courier facts yet"."""
+    view = await _svc(request).delivery_state(order_id)
+    if view is None:
+        raise ApiError(ErrorCode.NOT_FOUND, "no delivery for this order", 404)
+    return view
+
+
 @router.get("/v1/deliveries/{order_id}/courier")
 async def courier(order_id: str, ctx: Auth, request: Request) -> dict:
     view = await _svc(request).courier_position(order_id, caller_sub=ctx.sub)

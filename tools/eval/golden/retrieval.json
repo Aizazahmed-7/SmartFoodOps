@@ -1,0 +1,65 @@
+[
+  {
+    "id": "vague-light",
+    "query": "something light",
+    "city": "islamabad",
+    "k": 3,
+    "why": "FR-64's headline case, and the only one here that needs MEANING rather than words: nothing on this menu says 'light'. The acceptable set is what a person would hand someone asking for something light in Islamabad \u2014 salads, a yoghurt side, rice-paper rolls, a clear broth, plain breads. It is deliberately generous, because the claim being tested is 'the embedder understands light', not 'the embedder ranks the way I would'. A burger or a fizzy drink in the top 3 fails it, and that is the failure worth catching.",
+    "acceptable": [
+      "Kachumber Salad",
+      "Raita",
+      "Summer Rolls",
+      "Veg Pho",
+      "Avocado Maki",
+      "Garlic Naan",
+      "Butter Naan",
+      "Afghani Naan",
+      "Palak Paneer"
+    ]
+  },
+  {
+    "id": "vague-spicy",
+    "query": "something spicy",
+    "city": "islamabad",
+    "k": 3,
+    "why": "Vague in phrasing but not in vocabulary: `spicy` is a declared tag and rides in the chunk text, so the lexical leg can reach it. An ACCEPTABLE SET rather than a required pair, and the measurement is why: the first run marked this failed for returning Tangy Jalapeno, which declares `spicy` and which any customer would accept. Five dishes on this menu are declared spicy; demanding two specific ones in the top 3 asserted that retrieval should prefer MY two, which is not a relevance judgement anybody could defend. What is actually being asked is 'is everything it offered spicy', and that is precision.",
+    "acceptable": [
+      "Chapli Kebab",
+      "Chicken Biryani",
+      "Chicken Tikka Pizza",
+      "Arrabbiata",
+      "Tangy Jalapeno"
+    ]
+  },
+  {
+    "id": "typo-biriani",
+    "query": "biriani",
+    "city": "islamabad",
+    "k": 3,
+    "relevant": [
+      "Chicken Biryani"
+    ],
+    "why": "The trigram pass, at catalog's live-measured 0.35 threshold. The vector leg cannot help \u2014 a misspelling embeds nowhere near the word it meant."
+  },
+  {
+    "id": "exact-name",
+    "query": "chapli kebab",
+    "city": "islamabad",
+    "k": 3,
+    "relevant": [
+      "Chapli Kebab"
+    ],
+    "why": "The floor. If an exact dish name does not come back first, nothing else in this rubric is worth reading. Chosen over 'biryani' deliberately: the menu holds several kebabs, so this also checks the right one wins."
+  },
+  {
+    "id": "category-drinks",
+    "query": "cold drink",
+    "city": "islamabad",
+    "k": 3,
+    "relevant": [
+      "Coke",
+      "Sprite"
+    ],
+    "why": "Neither dish says 'cold' and neither says 'drink' in its name \u2014 the word that connects them is the CATEGORY, which rides in the chunk text (ADR-0033). This is the case that would break first if the category line were ever dropped from a chunk to save tokens."
+  }
+]

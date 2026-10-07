@@ -11,6 +11,8 @@ alerting:
 
 rule_files:
   - /etc/prometheus/alerts.yml
+  # The LLM price table and the cost series derived from it (NFR-25).
+  - /etc/prometheus/llm-costs.yml
 
 scrape_configs:
   - job_name: identity
@@ -42,6 +44,12 @@ scrape_configs:
     dns_sd_configs: [{ names: ["receipt-renderer"], type: A, port: 9109 }]
   - job_name: receipt-sender
     dns_sd_configs: [{ names: ["receipt-sender"], type: A, port: 9110 }]
+  # The assistant's worker serves WORKER_METRICS_PORT and was never scraped,
+  # so every signal the content studio and the knowledge drain emit from the
+  # worker process — drain failures, knowledge freshness, embed calls — was
+  # invisible, and an alert on one of them would have sat silently healthy.
+  - job_name: ai-assistant-worker
+    dns_sd_configs: [{ names: ["ai-assistant-worker"], type: A, port: 9113 }]
   - job_name: edge-bff
     static_configs: [{ targets: ["edge-bff:8000"] }]
   - job_name: cadvisor            # container CPU/memory — the U in USE

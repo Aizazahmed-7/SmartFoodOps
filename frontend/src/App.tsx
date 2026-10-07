@@ -3,6 +3,7 @@ import { Link, NavLink, Route, Routes, useLocation, useNavigate } from "react-ro
 import { onboardRestaurant } from "./api/client";
 import { useAuth, hasRole } from "./state/auth";
 import { useCart } from "./state/cart";
+import AssistantPanel from "./components/AssistantPanel";
 import NotificationBell from "./components/NotificationBell";
 import Account from "./pages/Account";
 import Browse from "./pages/Browse";
@@ -111,6 +112,9 @@ export default function App() {
           <Route path="/partner/dashboard" element={<PartnerDashboard />} />
         </Routes>
       </main>
+      {/* Global rather than per-page: a customer asks from wherever they
+          are, and the turn survives navigation because the panel does. */}
+      <AssistantPanel />
     </div>
   );
 }
