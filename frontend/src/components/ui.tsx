@@ -25,11 +25,21 @@ export function Money({ cents }: { cents: number }) {
 
 /** The ONE banner shape — pages compose their message, not their chrome. */
 const NOTE_TONE = {
+  // Neutral. A note is not automatically a problem — "the kitchen is
+  // preparing your order" in amber tells the customer something is wrong
+  // when nothing is.
+  info: "border-slate-700 bg-slate-900/60 text-slate-300",
   warn: "border-amber-900 bg-amber-950/60 text-amber-200",
   error: "border-red-900 bg-red-950/50 text-red-200",
 } as const;
 
-export function Note({ tone, children }: { tone: "warn" | "error"; children: ReactNode }) {
+export function Note({
+  tone,
+  children,
+}: {
+  tone: keyof typeof NOTE_TONE;
+  children: ReactNode;
+}) {
   return (
     <div className={`rounded-xl border px-4 py-3 text-sm ${NOTE_TONE[tone]}`}>
       {children}

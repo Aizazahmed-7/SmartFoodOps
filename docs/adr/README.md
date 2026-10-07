@@ -35,6 +35,8 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0029](0029-genai-plane-is-a-separate-service.md) | The GenAI plane is a separate service; the ordering path never awaits an LLM | Accepted |
 | [0030](0030-llm-providers-behind-a-port.md) | LLM providers behind a port: task routing, failover, budget breaker | Accepted |
 | [0031](0031-orchestration-split-langgraph-temporal-celery.md) | Orchestration split: LangGraph owns the turn, Temporal owns sagas, Celery owns batch | Accepted |
+| [0032](0032-vectors-live-in-the-shared-postgres.md) | Vectors live in the shared Postgres behind a `VectorStore` port; pgvector image base-matched and pinned | Accepted |
+| [0033](0033-menu-knowledge-is-a-kafka-projection.md) | Menu knowledge is a Kafka projection, chunked per item and per restaurant | Accepted |
 | [0034](0034-multi-role-identity-and-per-login-sessions.md) | Multi-role identity, role-specific tables, and one session row per login | Accepted |
 | [0035](0035-random-event-ids.md) | Event ids are random, not derived | Accepted |
 | [0036](0036-placement-consents-to-a-total.md) | Placement consents to a total, not a menu version | Accepted |
@@ -42,5 +44,13 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0038](0038-outbox-carries-no-aggregate-version.md) | The outbox and the event envelope carry no `aggregate_version` | Accepted |
 | [0039](0039-no-table-carries-a-version-column.md) | No table carries a version column | Accepted |
 | [0040](0040-refund-notifications-run-as-a-workflow.md) | Refund notifications run as a Temporal workflow | Accepted |
+| [0041](0041-semantic-search-costs-a-round-trip.md) | Semantic search is the primary path; NFR-22's 150 ms search budget superseded | Accepted |
+| [0042](0042-the-stream-resume-contract.md) | The stream-resume contract: subscribe, then snapshot, then drop | Accepted |
+| [0043](0043-grounding-and-guardrails.md) | Grounding and guardrails: what the model is allowed to be trusted with | Accepted |
+| [0044](0044-assistant-facts-are-a-kpi-not-telemetry.md) | Assistant interaction facts are a KPI, not telemetry | Accepted |
+| [0045](0045-the-answer-cache-and-its-fence.md) | The answer cache, and what it is fenced against | Accepted |
+| [0046](0046-milestones-are-facts-about-moments.md) | Order milestones are facts about moments | Accepted |
+| [0047](0047-a-model-may-change-words-never-facts.md) | A model may change words, never facts | Accepted |
+| [0048](0048-the-assistant-writes-no-menus.md) | The assistant writes no menus | Accepted |
 
 **Conventions**: files are `NNNN-kebab-title.md`; numbers are never reused. Superseding an ADR = new ADR + status change here, never editing the old decision.

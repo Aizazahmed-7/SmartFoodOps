@@ -31,7 +31,7 @@ import { DEFAULT_CITY } from "../cities";
 const SPEED_MPS = 45; // arcade-brisk — the demo shouldn't feel like traffic
 const ARRIVE_M = 40; // mirrors rider_sim.main.ARRIVE_M and the sim's taps
 const M_PER_DEG_LAT = 111_320;
-const START = { lat: 39.8005, lon: -89.652 }; // mid-city kickoff
+const START = { lat: 33.71, lon: 73.048 }; // mid-city kickoff (inside CityMap.CITY)
 
 function metersBetween(a: { lat: number; lon: number }, b: { lat: number; lon: number }) {
   const dLat = (b.lat - a.lat) * M_PER_DEG_LAT;
