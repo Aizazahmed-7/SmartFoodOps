@@ -15,14 +15,25 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from time import perf_counter
+from typing import Literal
 
 from ..metrics import (
     PROVIDER_FAILOVERS,
+    REDACTIONS,
     RESPONSE_SECONDS,
     TIME_TO_FIRST_TOKEN_SECONDS,
     TOKENS,
 )
-from .ports import Completion, LlmPort, LlmRateLimited, LlmUnavailable, Message, TokenChunk
+from .policy import redact
+from .ports import (
+    Completion,
+    LlmPort,
+    LlmRateLimited,
+    LlmUnavailable,
+    Message,
+    PlaneShed,
+    TokenChunk,
+)
 
 
 class Task(StrEnum):
@@ -56,6 +67,35 @@ class Route:
     max_input_tokens: int
     primary: ModelSpec
     secondary: ModelSpec | None = None
+
+
+def _scrubbed(messages: Sequence[Message]) -> list[Message]:
+    """Strip contact and payment details from everything leaving for a
+    provider (FR-73).
+
+    **Here, and not at each call site.** ADR-0043 §6 said the redactor runs
+    at the port boundary "so a new caller cannot forget it" — and then the
+    B3 review found that no call site ran it at all: `redact` was defined,
+    metered and unit-tested, and dead. A customer typing "deliver to 42
+    Maple Street, call 0301-234-5678" sent both to the provider verbatim.
+
+    This is the boundary that was described. Every generative path in the
+    service goes through `ModelRouter`, so a future caller gets it without
+    knowing it exists — which is the only version of this rule that stays
+    true.
+
+    The system prompt is scrubbed along with everything else. It contains no
+    contact details, so this costs nothing, and exempting it would mean
+    deciding per-message which text is trusted — the distinction that has
+    already been wrong twice in this milestone.
+    """
+    scrubbed: list[Message] = []
+    for message in messages:
+        text, counts = redact(message.content)
+        for kind, found in counts.items():
+            REDACTIONS.labels(kind=kind).inc(found)
+        scrubbed.append(Message(role=message.role, content=text))
+    return scrubbed
 
 
 class NoProviderAvailable(Exception):
@@ -107,15 +147,32 @@ def default_policy(
         ),
         # Batch tasks: no user is waiting, so they get the good model and a
         # long leash, and they are the first thing a spend breaker starves.
+        # They carry the cross-vendor secondary too, so a single-provider
+        # fleet (e.g. only the OpenAI-compat key set) still serves them
+        # instead of answering 503 — no user is waiting, but the pipeline is.
         Task.CONTENT_DRAFT: Route(
-            Task.CONTENT_DRAFT, 4_000, anthropic(generate_model, 1_024), None
+            Task.CONTENT_DRAFT,
+            4_000,
+            anthropic(generate_model, 1_024),
+            openai(generate_fallback, 1_024),
         ),
-        Task.SUMMARIZE: Route(Task.SUMMARIZE, 16_000, anthropic(generate_model, 1_024), None),
+        Task.SUMMARIZE: Route(
+            Task.SUMMARIZE,
+            16_000,
+            anthropic(generate_model, 1_024),
+            openai(generate_fallback, 1_024),
+        ),
     }
 
 
 class ModelRouter:
-    def __init__(self, providers: Mapping[str, LlmPort], policy: Mapping[Task, Route]) -> None:
+    def __init__(
+        self,
+        providers: Mapping[str, LlmPort],
+        policy: Mapping[Task, Route],
+        *,
+        generation: Literal["on", "off"] = "on",
+    ) -> None:
         for name, provider in providers.items():
             if provider.provider != name:
                 # Registering {"anthropic": OpenAiLlm(...)} would otherwise
@@ -127,6 +184,25 @@ class ModelRouter:
                 )
         self._providers = dict(providers)
         self._policy = dict(policy)
+        self._generation = generation
+
+    def _shed(self) -> None:
+        """Ladder step 2a (NFR-29), enforced HERE and not at a call site.
+
+        It lived on `AssistantService.prepare`, which turns out to be reached
+        only by the two internal diagnostic endpoints — so an operator could
+        throw the switch, smoke-test `/v1/internal/assistant/echo`, see a 503,
+        and record the step as applied while every customer question, every
+        explanation polish and every content draft kept generating and
+        billing at full rate. A switch that reports success without acting is
+        worse than no switch.
+
+        The router is the one place every generation converges, which is the
+        property that matters: a new call site cannot forget to ask, because
+        it cannot reach a provider without coming through here.
+        """
+        if self._generation == "off":
+            raise PlaneShed("generation disarmed (ladder step 2a)")
 
     def route(self, task: Task) -> Route:
         return self._policy[task]
@@ -153,9 +229,11 @@ class ModelRouter:
         ).inc()
 
     async def complete(self, task: Task, messages: Sequence[Message]) -> Completion:
+        self._shed()
         specs = self.specs_for(task)
         if not specs:
             raise NoProviderAvailable(f"no provider registered for task {task.value}")
+        messages = _scrubbed(messages)
         last: Exception | None = None
         for index, spec in enumerate(specs):
             started = perf_counter()
@@ -191,9 +269,11 @@ class ModelRouter:
         client sees an error frame, and the user re-asks. A half-answer
         from one model finished by another is worse than a visible failure.
         """
+        self._shed()
         specs = self.specs_for(task)
         if not specs:
             raise NoProviderAvailable(f"no provider registered for task {task.value}")
+        messages = _scrubbed(messages)
         last: Exception | None = None
         for index, spec in enumerate(specs):
             started = perf_counter()
