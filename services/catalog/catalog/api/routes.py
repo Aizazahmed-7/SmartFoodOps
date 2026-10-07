@@ -16,7 +16,7 @@ from smartfood_api import ApiError, ErrorCode, StrictModel
 from smartfood_auth import AuthContext, Role, require_role, require_system
 
 from ..domain.models import Restaurant
-from ..domain.ports import GrantRejected, GrantUnavailable
+from ..domain.ports import SEARCH_PATH, GrantRejected, GrantUnavailable
 from ..domain.service import (
     BranchLimitReached,
     BranchOnlyAction,
@@ -586,6 +586,23 @@ async def delete_item(
 SystemOnly = Annotated[AuthContext, Depends(require_system())]
 
 
+@router.post("/v1/internal/catalog/republish")
+async def republish(ctx: SystemOnly, request: Request) -> dict:
+    """Re-stage a full-state event for every restaurant.
+
+    An OPERATOR action, not a background one: it writes one outbox row per
+    restaurant, so on a large catalog it is a deliberate burst rather than
+    something to call casually. SystemOnly — it is reachable from inside the
+    mesh and never through the edge (the gateway allowlist does not route
+    `/v1/internal/*`).
+
+    Use it to rebuild a downstream projection from the compacted topic when
+    that topic is not already a complete snapshot — which, after the B1
+    compaction finding, it was not.
+    """
+    return {"republished": await _svc(request).republish_all()}
+
+
 @router.get("/v1/internal/restaurants/{restaurant_id}/snapshot")
 async def pricing_read(
     restaurant_id: str,
@@ -683,6 +700,12 @@ async def search(
         page=page,
     )
     response.headers["Cache-Control"] = "no-store"
+    # Which system actually answered. Not decoration: with semantic search
+    # on, a slow or failing assistant degrades to lexical and still returns
+    # 200 with plausible results (FR-65) — so "the results look fine" does
+    # not mean the retriever ran. The eval suite asserts on this header
+    # after scoring a fallback run and reporting it as the semantic path's.
+    response.headers["X-Search-Path"] = SEARCH_PATH.get()
     return result
 
 
