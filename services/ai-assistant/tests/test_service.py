@@ -96,3 +96,11 @@ async def test_concurrency_cap_is_held_for_the_whole_stream(llm: FakeLlm):
     async for _ in iterator:
         pass
     assert not svc._turns.locked()
+
+
+def test_the_router_is_exposed_so_the_graph_streams_through_it(llm: FakeLlm):
+    """The turn graph needs a `stream`, and it must be the ROUTER's — a graph
+    handed a provider directly would bypass the failover rule and the budget
+    settlement, silently, for every streamed answer."""
+    built = service(llm)
+    assert built.router.stream == built._router.stream  # noqa: SLF001

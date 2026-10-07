@@ -58,6 +58,14 @@ class AssistantService:
         # and the retrieval API's latency on the same event loop.
         self._turns = asyncio.Semaphore(max_concurrent_turns)
 
+    @property
+    def router(self) -> ModelRouter:
+        """The graph streams through the router, not through a provider: it
+        is what turns a TASK into a model and owns the one failover rule
+        (ADR-0030 §3-4). Exposed read-only rather than passed separately so
+        there is one router per process and not two policies."""
+        return self._router
+
     async def prepare(self, *, subject: str, prompt: str, task: Task = Task.GENERATE) -> Turn:
         """Every way this call can be refused, decided up front.
 
