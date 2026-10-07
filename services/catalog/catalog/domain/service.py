@@ -605,6 +605,37 @@ class CatalogService:
             log.info("brand cutover storm published", brands=converged)
         return converged
 
+    async def republish_all(self) -> int:
+        """Re-stage a full-state event for every restaurant.
+
+        `catalog.changes` is compacted, so the topic normally IS the
+        backup — the last record per key stands alone, which is why every
+        payload carries the whole menu. That guarantee only holds while the
+        topic is actually compacted, and B1 found (2026-09-16) that it had
+        never been: the topic ran on the broker's default delete policy and
+        its oldest records had aged out entirely. The policy is fixed
+        (smartfood-kafka `ensure_compacted_topic`), but compaction cannot
+        resurrect what retention already removed.
+
+        This republishes the current truth into the fixed topic so the
+        compacted log is once again a complete snapshot of the catalog —
+        the one-off repair for that gap, and thereafter the way any
+        downstream projection is rebuilt from scratch without a bespoke
+        backfill script.
+
+        One transaction per restaurant, like the cutover storm above, so a
+        crash resumes rather than restarting.
+        """
+        async with self._sessions() as session:
+            ids = await CatalogRepo(session).get_all_restaurant_ids()
+        for restaurant_id in ids:
+            async with self._sessions() as session:
+                repo = CatalogRepo(session)
+                await self._publish(repo, restaurant_id, EventType.RESTAURANT_UPDATED)
+                await session.commit()
+        log.info("catalog republished", restaurants=len(ids))
+        return len(ids)
+
     async def set_status(self, restaurant_id: str, status: str) -> Restaurant:
         async with self._sessions() as session:
             repo = CatalogRepo(session)

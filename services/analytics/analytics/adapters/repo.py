@@ -21,7 +21,13 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import menu_views, order_facts
+from ..db import (
+    assistant_facts,
+    menu_views,
+    order_facts,
+    order_item_facts,
+    restaurant_brands,
+)
 
 
 def _scoped(columns: Any, restaurant_id: str) -> sa.ColumnElement[bool]:
@@ -30,6 +36,82 @@ def _scoped(columns: Any, restaurant_id: str) -> sa.ColumnElement[bool]:
     restaurant_id arm also keeps pre-repoint rows and old branch-scoped
     tokens visible through the transition window."""
     return (columns.restaurant_id == restaurant_id) | (columns.brand_id == restaurant_id)
+
+
+def _within_hours(
+    dialect: str,
+    start: sa.ColumnElement[Any],
+    moment: sa.ColumnElement[Any],
+    hours: int,
+) -> sa.ColumnElement[bool]:
+    """`moment` lands in [start, start + hours) — the bounded attribution
+    window every "did X follow Y?" read here needs.
+
+    Per-dialect because the arithmetic is: PG adds an interval, sqlite
+    subtracts julian days. `make_interval` rather than a built SQL string
+    so `hours` travels as a bound parameter and never as text."""
+    if dialect == "postgresql":  # pragma: no cover — PG-only
+        window_end = start + sa.func.make_interval(0, 0, 0, 0, hours)
+        return (moment >= start) & (moment < window_end)
+    elapsed = sa.func.julianday(moment) - sa.func.julianday(start)
+    return (elapsed >= 0) & (elapsed < hours / 24.0)
+
+
+def _cited_any(dialect: str, ids: sa.ColumnElement[Any]) -> sa.ColumnElement[bool]:
+    """The id list is non-empty — ARRAY on PG, JSON on sqlite (`_slugs`)."""
+    if dialect == "postgresql":  # pragma: no cover — PG-only
+        return sa.func.cardinality(ids) > 0
+    return sa.func.json_array_length(ids) > 0
+
+
+def _cites(
+    dialect: str, ids: sa.ColumnElement[Any], item: sa.ColumnElement[Any]
+) -> sa.ColumnElement[bool]:
+    """`item` is one of the ids. Containment, not a join table: the ids are
+    a derived read model that lives on the row being filtered."""
+    if dialect == "postgresql":  # pragma: no cover — PG-only
+        return item == sa.any_(ids)
+    each = sa.func.json_each(ids).table_valued("value")
+    # `correlate_except` is load-bearing, not tidiness. `item` belongs to a
+    # table that may be TWO levels out, and auto-correlation only reaches
+    # the immediately enclosing SELECT — so without this the table gets
+    # re-added to this subquery's FROM and the predicate stops asking "did
+    # THIS row match" and starts asking "did ANY row match", which is true
+    # almost always. A cartesian product, and a silently inflated metric.
+    inner = sa.select(sa.literal(1)).select_from(each).where(sa.column("value") == item)
+    return sa.exists(inner.correlate_except(each))
+
+
+def _people(column: Any) -> sa.ColumnElement[int]:
+    """Distinct REAL customers, excluding the empty `user_id`.
+
+    `assistant_acceptance` and `assistant_conversion` already excluded it
+    from their joins; the counting queries did not, so every anonymous turn
+    collapsed into one synthetic person who — sharing a `user_id` with every
+    other anonymous turn — also looked like a RETURNING customer. Two
+    strangers became one regular, and `returning_rate` was wrong in both
+    numerator and denominator.
+    """
+    return sa.func.count(sa.distinct(sa.case((column != "", column))))
+
+
+def _claim_cites(dialect: str, ids: sa.ColumnElement[Any], claim: str) -> sa.ColumnElement[bool]:
+    """This owner's claim is among the ids the answer CITED.
+
+    Two arms for the same reason `_scoped` has two: a citation names a
+    BRANCH (that is what the index carries) and a restaurant admin's claim
+    is normally the BRAND. The direct arm covers a claim that is itself a
+    branch — an old token, or a restaurant with no brand — and the second
+    asks the mapping which branches this brand owns. The namespaces are
+    disjoint (ADR-0028), which is what makes OR-ing them safe.
+    """
+    rb = restaurant_brands.c
+    owns_a_cited_branch = sa.exists(
+        sa.select(sa.literal(1)).where(
+            (rb.brand_id == claim) & _cites(dialect, ids, rb.restaurant_id)
+        )
+    )
+    return _cites(dialect, ids, sa.literal(claim)) | owns_a_cited_branch
 
 
 # Which columns each event type contributes beyond the always-updated base.
@@ -42,6 +124,13 @@ _EVENT_COLUMNS: dict[str, str] = {
 }
 
 _REJECTION_REASONS = ("restaurant_rejected", "restaurant_timeout")
+
+# How long an action may follow a browse or an answer and still be credited
+# to it. One constant for both funnels on purpose: "converted" has to mean
+# the same span of time whether the nudge was a menu page or the assistant,
+# or the two numbers sit on a dashboard inviting a comparison they do not
+# support.
+_ATTRIBUTION_HOURS = 24
 
 
 def _total_cents(payload: dict[str, Any]) -> int:
@@ -106,6 +195,48 @@ def view_values(payload: dict[str, Any], event_id: str) -> dict[str, Any]:
     }
 
 
+def item_values(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """One OrderPlaced → one row per distinct menu item on it (FR-96).
+
+    Pure, like `event_values`, and for the same reason: the convergence
+    guard lives here once, whether events land singly or in a batch.
+
+    **Quantities are summed across lines sharing a menu item.** The cart
+    splits a line per option combination, so "large, no chilli" and "small"
+    are two lines and one dish. Keying on `(order_id, menu_item_id)` without
+    summing would silently drop one of them; keying per line would make the
+    row a line number, which is not a fact anybody wants to join on.
+
+    A line with no `menu_item_id` is skipped rather than fatal: the
+    recommender keys on item ids, so a row without one is unusable, and
+    parking the whole topic over a malformed line would take the order facts
+    down with it.
+    """
+    placed_at = datetime.fromisoformat(payload["placed_at"])
+    merged: dict[str, dict[str, Any]] = {}
+    for line in payload.get("items") or []:
+        item_id = line.get("menu_item_id")
+        if not item_id:
+            continue
+        row = merged.get(item_id)
+        if row is None:
+            merged[item_id] = {
+                "order_id": payload["order_id"],
+                "menu_item_id": item_id,
+                "restaurant_id": payload["restaurant_id"],
+                "brand_id": payload.get("brand_id"),
+                "user_id": payload.get("user_id", ""),
+                "name_snapshot": line.get("name", ""),
+                "qty": int(line.get("qty", 0)),
+                "line_total_cents": int(line.get("line_total_cents", 0)),
+                "placed_at": placed_at,
+            }
+            continue
+        row["qty"] += int(line.get("qty", 0))
+        row["line_total_cents"] += int(line.get("line_total_cents", 0))
+    return list(merged.values())
+
+
 class AnalyticsRepo:
     def __init__(self, session: AsyncSession):
         self._s = session
@@ -129,6 +260,26 @@ class AnalyticsRepo:
             await self._s.execute(
                 stmt.on_conflict_do_update(index_elements=["order_id"], set_=update_cols)
             )
+
+    async def insert_item_facts(self, rows: list[dict[str, Any]]) -> None:
+        """Bulk item fold: one multi-VALUES statement, DO NOTHING on the
+        composite key.
+
+        DO NOTHING rather than DO UPDATE, and that is the whole redelivery
+        story: an item fact is written once from OrderPlaced and never
+        changes — the order's lifecycle lives on `order_facts`. A
+        redelivered OrderPlaced therefore has nothing to update and must not
+        pretend otherwise. It also makes duplicate keys WITHIN one statement
+        legal, which a batch spanning a replayed partition routinely has.
+        """
+        if not rows:
+            return
+        insert = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
+        await self._s.execute(
+            insert(order_item_facts)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=["order_id", "menu_item_id"])
+        )
 
     async def insert_views(self, rows: list[dict[str, Any]]) -> None:
         """Bulk MenuViewed fold: INSERT .. DO NOTHING on the deterministic
@@ -154,6 +305,24 @@ class AnalyticsRepo:
             )
             healed += int(cast("CursorResult[Any]", result).rowcount)
         return healed
+
+    async def record_brand(self, restaurant_id: str, brand_id: str, at: datetime) -> None:
+        """One branch → its brand, upserted. DO UPDATE and not DO NOTHING:
+        a repoint MOVES a branch, and a mapping that kept the first answer
+        would scope an owner's history to a brand that no longer owns it."""
+        insert = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
+        statement = insert(restaurant_brands).values(
+            restaurant_id=restaurant_id, brand_id=brand_id, updated_at=at
+        )
+        await self._s.execute(
+            statement.on_conflict_do_update(
+                index_elements=["restaurant_id"],
+                set_={
+                    "brand_id": statement.excluded.brand_id,
+                    "updated_at": statement.excluded.updated_at,
+                },
+            )
+        )
 
     # ── aggregate reads (all bounded by a `since` window) ──────────
 
@@ -317,15 +486,9 @@ class AnalyticsRepo:
                 ).where(_scoped(mv, restaurant_id) & (mv.viewed_at >= since))
             )
         ).one()
-        if self._s.bind.dialect.name == "postgresql":  # pragma: no cover — PG-only
-            # interval math; the sqlite branch below is the unit-suite twin.
-            window_end = mv.viewed_at + sa.text("interval '24 hours'")
-            in_window = (f.placed_at >= mv.viewed_at) & (f.placed_at < window_end)
-        else:
-            day = 1.0
-            in_window = (
-                (sa.func.julianday(f.placed_at) - sa.func.julianday(mv.viewed_at)) >= 0
-            ) & ((sa.func.julianday(f.placed_at) - sa.func.julianday(mv.viewed_at)) < day)
+        in_window = _within_hours(
+            self._s.bind.dialect.name, mv.viewed_at, f.placed_at, _ATTRIBUTION_HOURS
+        )
         converted = (
             await self._s.execute(
                 sa.select(sa.func.count(sa.distinct(mv.user_id))).where(
@@ -369,4 +532,336 @@ class AnalyticsRepo:
             "cancelled": row.cancelled or 0,
             "rejected": int(row.rejected or 0),
             "settled": row.settled or 0,
+        }
+
+    async def insert_assistant_facts(self, rows: list[dict[str, Any]]) -> None:
+        """Bulk interaction fold, DO UPDATE on `message_id` (FR-94).
+
+        DO UPDATE rather than DO NOTHING, which is the opposite call from
+        `insert_item_facts` and for a reason worth stating: an item fact is
+        written once from OrderPlaced and never changes, so a redelivery has
+        nothing to say. An interaction fact CAN legitimately be restated —
+        a turn that streamed and then failed at the last token settles
+        twice, and the second fact is the true one. Both carry absolute
+        values keyed by the message, so converging on the latest is correct
+        and a counter would not be.
+
+        Duplicate keys inside one batch are therefore possible and must not
+        abort it: the last write of a `message_id` wins, which is also the
+        order the partition delivered them in.
+        """
+        if not rows:
+            return
+        deduped: dict[str, dict[str, Any]] = {row["message_id"]: row for row in rows}
+        insert = pg_insert if self._s.bind.dialect.name == "postgresql" else sqlite_insert
+        statement = insert(assistant_facts).values(list(deduped.values()))
+        await self._s.execute(
+            statement.on_conflict_do_update(
+                index_elements=["message_id"],
+                set_={
+                    column: statement.excluded[column]
+                    for column in (
+                        "outcome",
+                        "refusal_reason",
+                        "cache_tier",
+                        "item_ids",
+                        "restaurant_ids",
+                        "candidates",
+                        "ungrounded",
+                        "duration_ms",
+                        "occurred_at",
+                    )
+                },
+            )
+        )
+
+    # ── the assistant's aggregates (FR-95) ─────────────────────────
+
+    async def assistant_totals(self, since: datetime) -> dict[str, Any]:
+        """Usage, response time and grounding in one pass over the window.
+
+        Response time is averaged three ways because one way is a lie: a
+        cache hit returns in milliseconds and a generated answer in seconds,
+        so the blended mean describes neither experience and drifts with the
+        hit rate rather than with the system getting faster.
+        """
+        a = assistant_facts.c
+        generated = a.cache_tier == ""
+        row = (
+            await self._s.execute(
+                sa.select(
+                    sa.func.count().label("turns"),
+                    _people(a.user_id).label("users"),
+                    sa.func.count(sa.distinct(a.conversation_id)).label("conversations"),
+                    sa.func.avg(a.duration_ms).label("avg_ms"),
+                    # No `else_`: the other arm is NULL and avg() skips it,
+                    # which is how each mean sees only its own population.
+                    sa.func.avg(sa.case((generated, a.duration_ms))).label("avg_generated"),
+                    sa.func.avg(sa.case((~generated, a.duration_ms))).label("avg_cached"),
+                    sa.func.sum(sa.case((~generated, 1), else_=0)).label("cached"),
+                    sa.func.sum(a.candidates).label("candidates"),
+                    sa.func.sum(a.ungrounded).label("ungrounded"),
+                ).where(a.occurred_at >= since)
+            )
+        ).one()
+        return {
+            "turns": row.turns or 0,
+            "users": row.users or 0,
+            "conversations": row.conversations or 0,
+            "avg_ms": row.avg_ms,
+            "avg_generated": row.avg_generated,
+            "avg_cached": row.avg_cached,
+            "cached": int(row.cached or 0),
+            "candidates": int(row.candidates or 0),
+            "ungrounded": int(row.ungrounded or 0),
+        }
+
+    async def assistant_outcomes(self, since: datetime) -> dict[str, int]:
+        """Turns per outcome, GROUP BY rather than a fixed set of counts.
+
+        An outcome the graph starts emitting shows up here on its own.
+        Hard-coding the ones we know today would make the breakdown quietly
+        stop summing to the turn count the day a new one lands — and the
+        gap would read as a drop in questions asked, not as a missing row.
+        """
+        a = assistant_facts.c
+        rows = (
+            await self._s.execute(
+                sa.select(a.outcome, sa.func.count().label("turns"))
+                .where(a.occurred_at >= since)
+                .group_by(a.outcome)
+                .order_by(sa.func.count().desc(), a.outcome)
+            )
+        ).all()
+        return {row.outcome: row.turns for row in rows}
+
+    async def assistant_returning(self, since: datetime) -> int:
+        """Customers who came back: >1 distinct CONVERSATION in the window.
+
+        Conversations, not turns. A long single conversation is one visit
+        that went well; two conversations are two occasions the assistant
+        was worth opening, which is the thing engagement is asking about.
+        """
+        a = assistant_facts.c
+        per_user = (
+            sa.select(a.user_id)
+            .where((a.occurred_at >= since) & (a.user_id != ""))
+            .group_by(a.user_id)
+            .having(sa.func.count(sa.distinct(a.conversation_id)) > 1)
+            .subquery()
+        )
+        count = (
+            await self._s.execute(sa.select(sa.func.count()).select_from(per_user))
+        ).scalar_one()
+        return int(count or 0)
+
+    async def assistant_acceptance(self, since: datetime) -> dict[str, int]:
+        """Recommendation acceptance, measured PER TURN: of the turns that
+        named at least one dish, how many were followed by that customer
+        ordering one of those dishes inside the attribution window.
+
+        Per turn and not per item, which is the choice worth defending. An
+        answer naming five dishes is one recommendation a customer acts on
+        or does not; scoring it per item caps it at 20% for behaving
+        perfectly, so the rate would fall every time the answers got more
+        helpful.
+
+        The denominator excludes an empty `user_id`. There should not be
+        one — the chat route is authenticated — but if one ever appears it
+        would join to every anonymous order row in the table and credit the
+        assistant with strangers' dinners. The same lesson `funnel` learned
+        about anonymous viewers, applied before it can bite.
+        """
+        a, i = assistant_facts.c, order_item_facts.c
+        dialect = self._s.bind.dialect.name
+        # Cited, not retrieved: `item_ids` is what the ANSWER named. A dish
+        # the customer was never shown cannot have been accepted.
+        ordered = sa.exists(
+            sa.select(sa.literal(1)).where(
+                (i.user_id == a.user_id)
+                & _cites(dialect, a.item_ids, i.menu_item_id)
+                & _within_hours(dialect, a.occurred_at, i.placed_at, _ATTRIBUTION_HOURS)
+            )
+        )
+        row = (
+            await self._s.execute(
+                sa.select(
+                    sa.func.count().label("recommending"),
+                    sa.func.sum(sa.case((ordered, 1), else_=0)).label("accepted"),
+                ).where(
+                    (a.occurred_at >= since) & (a.user_id != "") & _cited_any(dialect, a.item_ids)
+                )
+            )
+        ).one()
+        return {
+            "recommending": row.recommending or 0,
+            "accepted": int(row.accepted or 0),
+            "window_hours": _ATTRIBUTION_HOURS,
+        }
+
+    async def assistant_conversion(self, since: datetime) -> dict[str, int]:
+        """Did an interaction lead to an order? (FR-97)
+
+        Two numbers from two directions, because one number cannot answer
+        both questions honestly:
+
+        `converted` is counted TURN-side — of the turns that pointed a
+        customer at a restaurant, how many were followed by that customer
+        ordering there inside the window. That is a rate about answers.
+
+        `orders` is counted ORDER-side, distinct. Three turns about the same
+        restaurant followed by one dinner are three turns that worked and
+        ONE order; counting the turn-side numerator as orders would report
+        three, and the revenue beside it would be triple-counted. The two
+        denominators differ on purpose and the windows do too: the turn-side
+        window bounds `occurred_at`, the order-side one bounds `placed_at`,
+        so an order here may be attributed to a turn just before `since`.
+
+        Matching is on the branch id the answer CITED. Citations carry
+        branch ids (`rst_…`) and order facts carry the branch, so they meet
+        directly; if the recommender ever starts citing a BRAND this needs
+        the `_scoped` disjunction, or the rate silently reads zero.
+
+        A caveat no column can carry: this is correlation inside a window,
+        not a controlled measurement. A customer who was going to order
+        anyway and asked a question first lands in `converted` too. The
+        number is worth having and is not worth calling causation.
+        """
+        a, f = assistant_facts.c, order_facts.c
+        dialect = self._s.bind.dialect.name
+        in_window = _within_hours(dialect, a.occurred_at, f.placed_at, _ATTRIBUTION_HOURS)
+        same_customer_and_place = (
+            (f.user_id == a.user_id)
+            & _cites(dialect, a.restaurant_ids, f.restaurant_id)
+            & in_window
+        )
+        turn_side = (
+            await self._s.execute(
+                sa.select(
+                    sa.func.count().label("naming"),
+                    sa.func.sum(
+                        sa.case(
+                            (sa.exists(sa.select(sa.literal(1)).where(same_customer_and_place)), 1),
+                            else_=0,
+                        )
+                    ).label("converted"),
+                ).where(
+                    (a.occurred_at >= since)
+                    # Same exclusion acceptance makes, for the same reason:
+                    # an empty user_id would join to every anonymous order.
+                    & (a.user_id != "")
+                    & _cited_any(dialect, a.restaurant_ids)
+                )
+            )
+        ).one()
+        attributed = sa.exists(
+            sa.select(sa.literal(1)).where(same_customer_and_place & (a.user_id != ""))
+        )
+        order_side = (
+            await self._s.execute(
+                sa.select(
+                    sa.func.count().label("orders"),
+                    # Revenue counts SETTLED only — the house rule the
+                    # lifetime block already follows. An order the kitchen
+                    # rejected still converted; it just never became money.
+                    sa.func.sum(sa.case((f.settled_at.is_not(None), f.total_cents), else_=0)).label(
+                        "revenue_cents"
+                    ),
+                ).where((f.placed_at >= since) & (f.user_id != "") & attributed)
+            )
+        ).one()
+        return {
+            "naming": turn_side.naming or 0,
+            "converted": int(turn_side.converted or 0),
+            "orders": order_side.orders or 0,
+            "revenue_cents": int(order_side.revenue_cents or 0),
+            "window_hours": _ATTRIBUTION_HOURS,
+        }
+
+    # ── one owner's AI insights (FR-98), scoped by the CLAIM ───────
+
+    async def restaurant_assistant_views(self, claim: str, since: datetime) -> dict[str, int]:
+        """Turns whose answer named this owner, and how many customers
+        asked. The AI-driven equivalent of a menu view: the moment the
+        assistant put this restaurant in front of someone."""
+        a = assistant_facts.c
+        row = (
+            await self._s.execute(
+                sa.select(
+                    sa.func.count().label("turns"),
+                    _people(a.user_id).label("customers"),
+                ).where(
+                    (a.occurred_at >= since)
+                    & _claim_cites(self._s.bind.dialect.name, a.restaurant_ids, claim)
+                )
+            )
+        ).one()
+        return {"turns": row.turns or 0, "customers": row.customers or 0}
+
+    async def restaurant_assistant_conversion(self, claim: str, since: datetime) -> dict[str, int]:
+        """This owner's half of FR-97, counted the same two ways and scoped
+        on BOTH ends: a turn that named this owner, followed by an order AT
+        this owner. Neither side alone is this owner's business — a turn
+        that mentioned them and sent the customer elsewhere is not their
+        conversion, and an order they won without the assistant is not
+        AI-driven."""
+        a, f = assistant_facts.c, order_facts.c
+        dialect = self._s.bind.dialect.name
+        mine = _claim_cites(dialect, a.restaurant_ids, claim)
+        # `_scoped(f, claim)` and NOT `_cites(a.restaurant_ids,
+        # f.restaurant_id)`, which is the correction an adversarial pass
+        # forced and it was wrong in both directions at once.
+        #
+        # Branch-exactness OVER-counted: `mine` already requires the turn to
+        # have cited this owner, so matching the order against ANY cited
+        # branch let a turn that named me and a competitor count as my
+        # conversion when the customer ate at the competitor — other
+        # tenants' orders moving my rate, and a reading channel on their
+        # traffic. It also UNDER-counted: a brand whose assistant named one
+        # branch lost every customer who ordered from a sibling branch.
+        #
+        # The owner-level rule the docstring states is the right one and it
+        # fixes both: cited this owner, then ordered at this owner. The
+        # platform-wide `assistant_conversion` keeps branch-exact matching,
+        # where there is no claim and no owner to be level with.
+        pair = (
+            (f.user_id == a.user_id)
+            & (a.user_id != "")
+            & _scoped(f, claim)
+            & _within_hours(dialect, a.occurred_at, f.placed_at, _ATTRIBUTION_HOURS)
+        )
+        turn_side = (
+            await self._s.execute(
+                sa.select(
+                    sa.func.count().label("naming"),
+                    sa.func.sum(
+                        sa.case(
+                            (sa.exists(sa.select(sa.literal(1)).where(pair)), 1),
+                            else_=0,
+                        )
+                    ).label("converted"),
+                ).where((a.occurred_at >= since) & (a.user_id != "") & mine)
+            )
+        ).one()
+        order_side = (
+            await self._s.execute(
+                sa.select(
+                    sa.func.count().label("orders"),
+                    sa.func.sum(sa.case((f.settled_at.is_not(None), f.total_cents), else_=0)).label(
+                        "revenue_cents"
+                    ),
+                ).where(
+                    (f.placed_at >= since)
+                    & (f.user_id != "")
+                    & _scoped(f, claim)
+                    & sa.exists(sa.select(sa.literal(1)).where(pair & mine))
+                )
+            )
+        ).one()
+        return {
+            "naming": turn_side.naming or 0,
+            "converted": int(turn_side.converted or 0),
+            "orders": order_side.orders or 0,
+            "revenue_cents": int(order_side.revenue_cents or 0),
+            "window_hours": _ATTRIBUTION_HOURS,
         }

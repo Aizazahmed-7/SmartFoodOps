@@ -273,3 +273,110 @@ flowchart LR
 **To update**: (1) change the assumption row in §1; (2) recompute the affected §2/§3 formulas — they are all one-line arithmetic on purpose; (3) compare new load against each unit budget; anything past 60% schedules its runbook *now*, at planning time; (4) if a *unit budget* itself changes (new instance class, new measured ceiling), rerun the relevant load-test scenario before editing the budget line. Worked example — fleet doubles (A3: 30k→60k): GPS ops 90k→180k ⇒ Redis needs ~6 shards (reshard runbook); WS nodes 5→9 (N+1 at 8k/node); `rider.locations` 12k msg/s still <1k/partition — no Kafka change; nothing else moves.
 
 **Ownership**: this file is the canonical capacity record. PRs that change an assumption, a budget, or a provisioned size must update this document in the same change; the quarterly capacity review re-walks §1 against observed production ratios (events/order, watch time, offers/delivery are all measurable in Grafana) and replaces (derived)/(proposed) values with measured ones.
+
+---
+
+## 7. The AI plane (Part B)
+
+Scope: the assistant plane at the same **2,500 orders/s** ceiling as the rest
+of this document. It is sized on a different axis from everything above —
+**provider quota, not CPU** — and the whole section exists to make that
+explicit, because the instinct from §3 is to reach for instance counts and
+they are not the constraint here.
+
+Assumption numbering continues the shared namespace; A19–A24 are Part B.
+
+### 7.1 Assumptions
+
+| # | Assumption | Value | Source |
+|---|---|---|---|
+| A19 | Customers who engage the assistant | 5% of orders | NFR-24 |
+| A20 | Turns per engaged customer | 3 | NFR-24 |
+| A21 | Tokens per turn (prompt + completion) | ~2,220 | (derived — reconciles NFR-24's ~50M tokens/min at 375 turns/s) |
+| A22 | Answer-cache hit rate, steady state | ≥20% | (proposed — the floor `AssistantCacheHitRateCollapsed` defends; NFR-24 names the cache load-bearing) |
+| A23 | AI cost budget per order | **$0.004** | (proposed — see §7.4) |
+| A24 | Assistant availability target | 99.5% | NFR-23 |
+
+### 7.2 Derived load at the ceiling
+
+| Quantity | Formula | Value |
+|---|---|---|
+| Assistant turns/s | 2,500 × A19 (5%) × A20 (3) | **375/s** |
+| Generations/s (cache cold) | 375 | 375/s |
+| Generations/s (at A22's 20% floor) | 375 × 0.8 | 300/s |
+| Tokens/s | 375 × A21 (2,220) | **~833k/s** (~50M/min) |
+| Tokens per order | 833k ÷ 2,500 | **~333** |
+
+**The binding constraint is tokens per minute, and it is a vendor's number,
+not ours.** 50M tokens/min is far above a default commercial tier, so the
+ceiling is not reachable on one provider account at any instance count. Three
+things are therefore load-bearing rather than optimisations, exactly as
+NFR-24 says: multi-provider routing (ADR-0030) spreads the quota, the cache
+tiers remove whole generations from the bill, and the templated paths
+(FR-87's explanations) answer without a provider at all.
+
+A22 is why the cache hit rate has an alert rather than just a panel: each
+point of hit rate is ~3.75 generations/s of quota returned at the ceiling,
+so a collapse is a capacity event that arrives looking like a cost event.
+
+### 7.3 What is NOT a constraint
+
+- **CPU/memory.** A turn is almost entirely waiting on a provider. ADR-0031's
+  `max_concurrent_turns` cap exists to stop a chat burst starving the
+  retrieval API on the same event loop — it is a fairness guard, not a
+  throughput budget.
+- **pgvector.** Retrieval is an HNSW lookup per turn: 375/s against an index
+  sized by the menu corpus, not by order volume. The menu does not grow with
+  traffic, which decouples it from A1 entirely.
+- **The ordering path.** NFR-23 is explicit and it is the point of the whole
+  separation: **order placement availability is unchanged by any AI
+  failure**, and that is proven by the outage drill, not by this paragraph.
+
+### 7.4 Cost budget (NFR-25)
+
+Modelled cost per order, from A21's 333 tokens:
+
+| Model class | Blended price | Cost per order |
+|---|---|---|
+| Flash-class (today) | ~$0.19 / 1M | ~$0.00006 |
+| Premium-class | ~$5.00 / 1M | ~$0.0017 |
+
+A23 sets the budget at **$0.004 per order**. That is ~60× the modelled
+flash-class figure and ~2.4× the premium-class figure, and the asymmetry is
+deliberate: the budget must survive a **deliberate model upgrade** without
+paging anyone, while still catching an unintended loop, a prompt that stopped
+truncating, or a cache that quietly went cold. A tripwire that fires on a
+planned decision gets silenced, and then it is not a tripwire.
+
+Per this document's standing rule, 60% of budget ($0.0024/order) triggers the
+runbook as a planned action; the budget itself pages.
+
+> The prices above are **illustrative placeholders**, as is the table in
+> `deploy/compose/observability/llm-costs.yml`. Set both from the vendor's
+> current published price list before anyone makes a decision from a cost
+> panel. The arithmetic is the deliverable here; the vendor's numbers are an
+> input that changes without asking us.
+
+### 7.5 Scale triggers
+
+| Signal | Trigger | Action |
+|---|---|---|
+| Provider quota headroom | tokens/min > 60% of the lowest-tier quota | Add provider capacity or shift routing weight (ADR-0030) |
+| Cache hit rate | < A22's 20% floor for 30m | `AssistantCacheHitRateCollapsed` — quota demand has risen ~25% with no traffic change |
+| Cost per order | > $0.0024 | `AssistantCostPerOrderElevated` |
+| Knowledge freshness | p99 > 60s | `AssistantKnowledgeStale` — the drain is behind, not the plane |
+
+### 7.6 How to re-derive this section
+
+Change A19, A20 or A21 and every row in §7.2 follows; A21 is the one most
+likely to drift, because it moves with the prompt and with how much retrieved
+context is packed into it. Re-measure it directly rather than re-deriving it:
+
+```promql
+sum(rate(assistant_tokens_total[1h])) / sum(rate(assistant_response_seconds_count[1h]))
+```
+
+The **Tokens per order** panel on the AI dashboard is the same quantity per
+order, and it is the honest early warning: it moves on a prompt change or a
+cache regression, while the cost line also moves when a vendor reprices —
+which is not an engineering regression and should not be read as one.

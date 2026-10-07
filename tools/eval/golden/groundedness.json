@@ -1,0 +1,50 @@
+[
+  {
+    "id": "invents-no-cuisine-we-do-not-serve",
+    "question": "what Korean food do you have?",
+    "city": "islamabad",
+    "forbid": [
+      "bibimbap",
+      "bulgogi",
+      "kimchi",
+      "japchae"
+    ],
+    "why": "FR-70's real failure, and the one the validator explicitly does NOT catch: stripping a marker removes the LINK, not the CLAIM. Korean rather than Japanese now \u2014 Islamabad HAS a Japanese kitchen, so the old case would have been asking the model to deny something true. None of the forbidden names appear in the question, so the model has to volunteer them."
+  },
+  {
+    "id": "a-recommendation-cites-what-it-recommends",
+    "question": "what do you recommend for someone who likes heat?",
+    "city": "islamabad",
+    "cite": true,
+    "forbid": [
+      "vindaloo",
+      "pad thai",
+      "laksa"
+    ],
+    "why": "Prose that names a dish without a marker is an ungrounded claim wearing a grounded answer's clothes \u2014 the panel renders no card, the customer taps nothing, and nothing is reported. The forbidden names are plausible-but-absent dishes a model reaching for 'spicy' might produce."
+  },
+  {
+    "id": "does-not-accept-a-false-premise",
+    "question": "tell me about the steak you are famous for",
+    "city": "islamabad",
+    "forbid": [
+      "ribeye",
+      "sirloin",
+      "fillet",
+      "medium rare"
+    ],
+    "why": "The strongest form of the invention test: the question ASSERTS a thing exists and invites detail. No kitchen in this city sells steak, and the names a model would reach for are not in the question \u2014 so any of them appearing is the model's own."
+  },
+  {
+    "id": "does-not-fill-a-gap-with-a-plausible-dish",
+    "question": "do you do any slow-cooked lamb curries?",
+    "city": "islamabad",
+    "forbid": [
+      "rogan josh",
+      "korma",
+      "vindaloo",
+      "nihari"
+    ],
+    "why": "The subtle case, and the likeliest one in production. The menu HAS lamb (Mutton Karahi), so retrieval returns something plausible and the model is one step from naming a dish it half-remembers from every other Pakistani menu it has read. Nothing about that failure looks wrong in a metric."
+  }
+]

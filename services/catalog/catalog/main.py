@@ -149,6 +149,24 @@ def create_app(
     # sees app.state.service; the domain only sees the sessionmaker.
     if search is None:
         search = PostgresSearch(sessions)  # PG-only SQL — fine: prod IS Postgres
+        if settings.hybrid_search == "on" and own_http is not None:  # pragma: no cover — live
+            # Wrapped, never replaced. PostgresSearch stays constructed and
+            # becomes the fallback, so turning the flag on adds a leg and
+            # turning it off removes one — neither is a code path that only
+            # exists in one configuration.
+            from .adapters.hybrid_search import HybridSearch
+
+            search = HybridSearch(
+                sessions,
+                search,
+                base_url=settings.assistant_base_url,
+                # The client catalog already owns and already closes on
+                # shutdown — a second one here would be a connection pool
+                # nobody drains.
+                http=own_http,
+                timeout_s=settings.hybrid_search_timeout_s,
+                enabled=True,
+            )
     app.state.browse = browse_events
     app.state.service = CatalogService(
         sessions, grants, cache, search, default_timezone=settings.default_timezone

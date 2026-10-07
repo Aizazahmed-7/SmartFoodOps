@@ -38,6 +38,14 @@ x-app-base: &app-base
     PAYMENT_BASE_URL: http://payment:8007
     NOTIFICATION_BASE_URL: http://notification:8008
     ASSISTANT_BASE_URL: http://ai-assistant:8013
+    # B2: catalog's /v1/search routes through the assistant's hybrid
+    # retriever and falls back to PostgresSearch. On in dev so the
+    # fallback is exercised by ordinary use rather than only by a drill.
+    HYBRID_SEARCH: ${HYBRID_SEARCH:-on}
+    # A hang detector, not a latency SLO (ADR-0041): a hosted embedder is
+    # ~500ms of a ~560ms semantic search, so ADR-0019's 150ms would fall
+    # back to lexical on every query while still returning 200.
+    HYBRID_SEARCH_TIMEOUT_S: ${HYBRID_SEARCH_TIMEOUT_S:-2.0}
     MOCK_PSP_BASE_URL: http://mock-psp:9080
     MAILER_BASE_URL: http://mock-mailer:9081
     # Arms the receipts pipeline (S10) — only notification and its workers
@@ -67,15 +75,16 @@ services:
 
   postgres:
     profiles: [core]
-    # STAYS on postgres:15. The obvious pgvector swap (pgvector/pgvector:pg15)
-    # is a glibc DOWNGRADE — postgres:15 is Debian trixie (glibc 2.41), the
-    # pgvector image is bookworm (glibc 2.36) — and Postgres refuses a
-    # collation-version downgrade: `template1` mismatches, which blocks
-    # CREATE DATABASE outright and fails initdb convergence with exit 3.
-    # Found live in B0. Choosing between a REINDEX migration, a `make nuke`,
-    # and a base-matched image is ADR-0032's job in B1, where vectors are
-    # actually needed. See docs/local-dev.md §11.
-    image: postgres:15
+    # pgvector on a BASE-MATCHED, PINNED tag (ADR-0032). The `-trixie` suffix
+    # is load-bearing, not decoration: `pgvector/pgvector:pg15` defaults to
+    # bookworm (glibc 2.36) while this volume was initialised by postgres:15
+    # under trixie (glibc 2.41), and Postgres refuses that collation-version
+    # DOWNGRADE — `template1` mismatches, which blocks CREATE DATABASE
+    # outright and fails initdb convergence with exit 3 (found live in B0).
+    # The trixie variant is the same glibc build, so it is a drop-in on the
+    # existing pg-data. Never move this to a tag that does not name its
+    # distribution: a stateful volume may not follow a moving base.
+    image: pgvector/pgvector:0.8.6-pg15-trixie
     ports: ["5432:5432"]
     # logical WAL: what Debezium's pgoutput plugin decodes (S6). Costs a
     # little WAL volume; changes nothing for normal SQL clients.
@@ -574,6 +583,51 @@ services:
   # a Lambda. Provider keys come from an untracked deploy/compose/.env — an
   # EMPTY key disarms that provider (ADR-0030 §7), so this service starts
   # and answers /healthz with no credentials at all, which is the default.
+  # The AI plane's worker (B6). Its own container because the queue it
+  # serves is nothing like the API's work: a draft is a provider call an
+  # admin is waiting on, and a reindex is hours of batch embedding. Without
+  # a consumer the content queue is theoretical — jobs commit, enqueue, and
+  # sit in `queued` forever.
+  #
+  # --pool threads for the same reason the receipt workers use it: counters
+  # incremented in forked children never reach the parent's /metrics.
+  ai-assistant-worker:
+    <<: *app-base
+    profiles: [apps]
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      UV_PROJECT_ENVIRONMENT: /venvs/ai-assistant
+      DATABASE_URL: postgresql+asyncpg://assistant_svc:assistant_svc@postgres:5432/assistant_db
+      REDIS_URL: redis://redis:6379/3
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      MODEL_GENERATE: ${MODEL_GENERATE:-}
+      MODEL_GENERATE_FALLBACK: ${MODEL_GENERATE_FALLBACK:-}
+      MODEL_CHEAP: ${MODEL_CHEAP:-}
+      MODEL_CHEAP_FALLBACK: ${MODEL_CHEAP_FALLBACK:-}
+      WORKER_METRICS_PORT: "9113"
+    command:
+      [
+        "uv",
+        "run",
+        "--package",
+        "ai-assistant",
+        "celery",
+        "-A",
+        "ai_assistant.tasks:celery_app",
+        "worker",
+        "-Q",
+        "assistant.content",
+        "--pool",
+        "threads",
+        "--concurrency",
+        "2",
+        "-l",
+        "info",
+      ]
+
   ai-assistant:
     <<: *app-base
     profiles: [apps]
@@ -586,6 +640,16 @@ services:
       REDIS_URL: redis://redis:6379/3
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # The OpenAI adapter is OpenAI-WIRE-compatible, not OpenAI-only: pointing
+      # OPENAI_BASE_URL at any `/v1/{chat/completions,embeddings}` endpoint
+      # (e.g. Gemini's OpenAI-compat shim) re-homes both the fallback LLM and
+      # the embedder onto that provider with one key. Model ids are DATA
+      # (ADR-0030 §3), so a provider swap is these four env vars, not code.
+      # Defaults keep the OpenAI catalog; override in .env to go elsewhere.
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      MODEL_GENERATE_FALLBACK: ${MODEL_GENERATE_FALLBACK:-gpt-4.1}
+      MODEL_CHEAP_FALLBACK: ${MODEL_CHEAP_FALLBACK:-gpt-4.1-mini}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
       # Ladder step 2a as a manual switch: "off" keeps retrieval, templates
       # and caches answering while every generative path returns 503.
       GENERATION: ${GENERATION:-on}
@@ -865,6 +929,11 @@ services:
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      # The LLM price table and its derived cost series (NFR-25). A rule
+      # file named in prometheus.yml but not mounted is NOT fatal: the
+      # process starts, the alerts load, and the cost series silently do not
+      # exist — which looks exactly like "spend is zero".
+      - ./observability/llm-costs.yml:/etc/prometheus/llm-costs.yml:ro
       - prometheus-data:/prometheus
 
   grafana:

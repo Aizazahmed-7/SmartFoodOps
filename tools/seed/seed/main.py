@@ -28,9 +28,15 @@ PASSWORD = "demo1234demo"  # every demo login, per docs/local-dev.md
 # 3 km offer radius and haversine ETAs all run on genuine geography — while
 # the frontend renders the box as its own 2D game map. Fake world, real math.
 CITY_BOXES: dict[str, tuple[float, float, float, float]] = {
-    # (south lat, west lon, north lat, east lon) — ~4.4 km × ~3.4 km
-    "springfield": (39.780, -89.670, 39.820, -89.630),
-    "shelbyville": (39.860, -89.670, 39.900, -89.630),
+    # (south lat, west lon, north lat, east lon) — ~4.4 km × ~3.4 km each.
+    # Real coordinates: Islamabad's F-sectors and Rawalpindi's Saddar, about
+    # 12 km apart, which is what makes the 3 km offer radius and the
+    # haversine ETAs behave like the real thing rather than like a diagram.
+    # The city ids match `frontend/src/cities.ts` exactly — they did not
+    # before, and a seeded world nobody could reach from the city chips was
+    # the result.
+    "islamabad": (33.690, 73.030, 33.730, 73.067),
+    "rawalpindi": (33.580, 73.040, 33.620, 73.077),
 }
 
 
@@ -89,44 +95,52 @@ ADDONS = [
 
 # city, name, cuisines, {category: [(item, cents, description, tags, groups)]}
 TEMPLATES: list[dict[str, Any]] = [
-    # ── springfield ──────────────────────────────────────────────────
+    # ── islamabad ────────────────────────────────────────────────────
     {
-        "city": "springfield",
+        "city": "islamabad",
         "name": "Biryani House",
         "cuisines": ["pakistani", "bbq"],
         # The demo's multi-branch brand (ADR-0028): a second location whose
         # branch inherits the base menu; seeded with its own stock and one
-        # branch-86'd base item for demo texture.
-        "branches": [{"label": "Airport", "city": "springfield"}],
+        # branch-86'd base item for demo texture. The branch sits in the
+        # OTHER city on purpose — a brand spanning Islamabad and Rawalpindi
+        # is what makes the city filter visibly do something.
+        "branches": [{"label": "Saddar", "city": "rawalpindi"}],
         "menu": {
             "Mains": [
                 (
                     "Chicken Biryani",
-                    1200,
-                    "Fragrant basmati layered with spiced chicken and caramelized onions",
+                    450,
+                    "Fragrant basmati layered with spiced chicken and caramelised onions",
                     ["halal", "spicy"],
                     SIZE,
                 ),
                 (
                     "Mutton Karahi",
-                    1800,
-                    "Slow-cooked in a wok with ginger, tomatoes and green chilies",
+                    1850,
+                    "Slow-cooked in a wok with ginger, tomatoes and green chillies",
                     ["halal"],
                     SPICE,
                 ),
                 (
                     "Seekh Kebab",
-                    950,
+                    380,
                     "Char-grilled minced beef skewers with mint chutney",
                     ["halal"],
                     [],
                 ),
             ],
             "Sides": [
-                ("Raita", 200, "Cool yogurt with cucumber and roasted cumin", ["vegetarian"], []),
+                (
+                    "Raita",
+                    120,
+                    "Cool yoghurt with cucumber and roasted cumin",
+                    ["vegetarian"],
+                    [],
+                ),
                 (
                     "Garlic Naan",
-                    250,
+                    90,
                     "Tandoor-baked flatbread brushed with garlic butter",
                     ["vegetarian"],
                     [],
@@ -135,426 +149,342 @@ TEMPLATES: list[dict[str, Any]] = [
         },
     },
     {
-        "city": "springfield",
-        "name": "Burger Barn",
+        "city": "islamabad",
+        "name": "Savour Pulao",
+        "cuisines": ["pakistani"],
+        "menu": {
+            "Pulao": [
+                (
+                    "Chicken Pulao",
+                    380,
+                    "Rice steamed in seasoned stock with tender chicken",
+                    ["halal"],
+                    SIZE,
+                ),
+                ("Mutton Pulao", 520, "The same pot, with slow-cooked mutton", ["halal"], SIZE),
+            ],
+            "Sides": [
+                ("Shami Kebab", 150, "Griddled lentil and beef patty", ["halal"], []),
+                ("Kachumber Salad", 80, "Onion, tomato and cucumber with lemon", ["vegan"], []),
+            ],
+        },
+    },
+    {
+        "city": "islamabad",
+        "name": "Kabul Grill",
+        "cuisines": ["middle-eastern", "bbq"],
+        "menu": {
+            "Grill": [
+                (
+                    "Chapli Kebab",
+                    420,
+                    "Flat spiced beef patty fried with tomato and coriander",
+                    ["halal", "spicy"],
+                    SPICE,
+                ),
+                ("Afghani Tikka", 480, "Yoghurt-marinated chicken over coals", ["halal"], SIZE),
+            ],
+            "Breads": [
+                ("Afghani Naan", 100, "Long tandoor bread, sesame crusted", ["vegetarian"], []),
+            ],
+        },
+    },
+    {
+        "city": "islamabad",
+        "name": "Tuscany Courtyard",
+        "cuisines": ["italian"],
+        "menu": {
+            "Pasta": [
+                (
+                    "Chicken Alfredo",
+                    550,
+                    "Fettuccine in a cream and parmesan sauce",
+                    ["halal"],
+                    SIZE,
+                ),
+                (
+                    "Arrabbiata",
+                    460,
+                    "Penne in a chilli and garlic tomato sauce",
+                    ["vegetarian", "spicy"],
+                    SPICE,
+                ),
+            ],
+            "Sides": [("Garlic Bread", 180, "Baked with herb butter", ["vegetarian"], ADDONS)],
+        },
+    },
+    {
+        "city": "islamabad",
+        "name": "Sakura Teppan",
+        "cuisines": ["japanese"],
+        "menu": {
+            "Sushi": [
+                ("Salmon Maki", 680, "Eight pieces, rolled to order", [], SIZE),
+                ("Avocado Maki", 520, "Eight pieces, no fish", ["vegan"], SIZE),
+            ],
+            "Hot": [
+                ("Chicken Katsu", 620, "Panko-crumbed cutlet with tonkatsu sauce", ["halal"], []),
+            ],
+        },
+    },
+    {
+        "city": "islamabad",
+        "name": "Taco Bandido",
+        "cuisines": ["mexican"],
+        "menu": {
+            "Tacos": [
+                ("Beef Birria Tacos", 490, "Three tacos with consommé to dip", ["halal"], SPICE),
+                ("Bean Tacos", 390, "Three tacos, black bean and lime", ["vegan"], SPICE),
+            ],
+            "Sides": [("Loaded Nachos", 320, "Cheese, jalapeño, salsa", ["vegetarian"], ADDONS)],
+        },
+    },
+    {
+        "city": "islamabad",
+        "name": "Delhi Darbar",
+        "cuisines": ["indian"],
+        "menu": {
+            "Curry": [
+                (
+                    "Butter Chicken",
+                    520,
+                    "Tomato and cream, finished with butter",
+                    ["halal"],
+                    SIZE,
+                ),
+                (
+                    "Palak Paneer",
+                    440,
+                    "Spinach with cubes of fresh cheese",
+                    ["vegetarian"],
+                    SIZE,
+                ),
+            ],
+            "Breads": [
+                ("Butter Naan", 90, "Tandoor-baked, brushed with butter", ["vegetarian"], [])
+            ],
+        },
+    },
+    {
+        "city": "islamabad",
+        "name": "Saigon Bowl",
+        "cuisines": ["vietnamese"],
+        "menu": {
+            "Pho": [
+                ("Beef Pho", 540, "Twelve-hour bone broth, rice noodles, herbs", ["halal"], SIZE),
+                ("Veg Pho", 440, "Mushroom broth, tofu, herbs", ["vegan"], SIZE),
+            ],
+            "Rolls": [("Summer Rolls", 280, "Rice paper, herbs, peanut dip", ["vegan"], [])],
+        },
+    },
+    {
+        "city": "islamabad",
+        "name": "Golden Dragon",
+        "cuisines": ["chinese"],
+        "menu": {
+            "Wok": [
+                ("Chicken Manchurian", 470, "Crisp chicken in a tangy gravy", ["halal"], SPICE),
+                ("Vegetable Chow Mein", 380, "Wok-tossed noodles and greens", ["vegan"], SIZE),
+            ],
+            "Soup": [("Hot and Sour Soup", 220, "Peppery, thickened, with egg", [], SPICE)],
+        },
+    },
+    {
+        "city": "islamabad",
+        "name": "Pizza Pilgrim",
+        "cuisines": ["pizza"],
+        "menu": {
+            "Pizza": [
+                # The one dish with a required radio AND a multi-select, so
+                # the checkbox path in the item modal has data (the old
+                # world's "Burger Barn" smash played this part).
+                ("Margherita", 480, "Tomato, mozzarella, basil", ["vegetarian"], SIZE + ADDONS),
+                (
+                    "Chicken Tikka Pizza",
+                    620,
+                    "The local favourite, on a thin base",
+                    ["halal", "spicy"],
+                    SIZE,
+                ),
+            ],
+            "Sides": [("Cheesy Sticks", 240, "Baked with oregano", ["vegetarian"], ADDONS)],
+        },
+    },
+    # ── rawalpindi ───────────────────────────────────────────────────
+    {
+        "city": "rawalpindi",
+        "name": "Saddar Nihari",
+        "cuisines": ["pakistani"],
+        "menu": {
+            "Nihari": [
+                (
+                    "Beef Nihari",
+                    480,
+                    "Overnight stew with ginger, chilli and fried onion",
+                    ["halal", "spicy"],
+                    SPICE,
+                ),
+                ("Maghaz Masala", 550, "Brain masala, a Rawalpindi breakfast", ["halal"], []),
+            ],
+            "Breads": [("Khameeri Roti", 70, "Leavened tandoor bread", ["vegetarian"], [])],
+        },
+    },
+    {
+        "city": "rawalpindi",
+        "name": "Chatkhara Chaat",
+        "cuisines": ["pakistani"],
+        "menu": {
+            "Chaat": [
+                (
+                    "Dahi Bhalla",
+                    180,
+                    "Lentil dumplings in yoghurt and tamarind",
+                    ["vegetarian"],
+                    [],
+                ),
+                ("Fruit Chaat", 160, "Seasonal fruit with chaat masala", ["vegan"], SIZE),
+            ],
+            "Snacks": [
+                (
+                    "Samosa Plate",
+                    120,
+                    "Four potato samosas with chutney",
+                    ["vegetarian", "spicy"],
+                    [],
+                )
+            ],
+        },
+    },
+    {
+        "city": "rawalpindi",
+        "name": "Burger Adda",
         "cuisines": ["burgers", "fast-food"],
         "menu": {
             "Burgers": [
                 (
-                    "Smash Burger",
-                    950,
-                    "Double-smashed patties, American cheese, house sauce",
-                    [],
-                    SIZE + ADDONS,
-                ),
-                (
-                    "Veggie Burger",
-                    850,
-                    "Black-bean patty with chipotle mayo",
-                    ["vegetarian"],
+                    "Zinger Burger",
+                    320,
+                    "Crumbed chicken fillet, mayo, lettuce",
+                    ["halal"],
                     ADDONS,
                 ),
-                (
-                    "BBQ Bacon Burger",
-                    1250,
-                    "Smoked bacon, cheddar, crispy onions, bourbon BBQ",
-                    [],
-                    ADDONS,
-                ),
+                ("Beef Smash", 390, "Two smashed patties with cheese", ["halal"], ADDONS),
             ],
             "Sides": [
                 (
-                    "Loaded Fries",
-                    550,
-                    "Cheese sauce, jalapenos, scallions",
+                    "Masala Fries",
+                    150,
+                    "Fries tossed in chaat masala",
                     ["vegetarian", "spicy"],
-                    [],
-                ),
-                ("Onion Rings", 450, "Beer-battered, served with ranch", ["vegetarian"], []),
-            ],
-            "Shakes": [
-                ("Vanilla Malt", 500, "Hand-spun with real vanilla bean", ["vegetarian"], []),
+                    SIZE,
+                )
             ],
         },
     },
     {
-        "city": "springfield",
-        "name": "Pasta Palace",
-        "cuisines": ["italian"],
-        "menu": {
-            "Pasta": [
-                ("Carbonara", 1400, "Guanciale, pecorino, egg yolk — no cream, ever", [], []),
-                (
-                    "Arrabbiata",
-                    1200,
-                    "Penne in a fiery garlic-chili tomato sauce",
-                    ["vegetarian", "spicy"],
-                    [],
-                ),
-                ("Lasagna al Forno", 1500, "Layered beef ragu baked with bechamel", [], []),
-            ],
-            "Salads": [
-                ("Caprese", 900, "Buffalo mozzarella, heirloom tomato, basil", ["vegetarian"], []),
-            ],
-            "Dolci": [
-                ("Tiramisu", 700, "Espresso-soaked ladyfingers, mascarpone", ["vegetarian"], []),
-            ],
-        },
-    },
-    {
-        "city": "springfield",
-        "name": "Sushi Spot",
-        "cuisines": ["japanese"],
-        "menu": {
-            "Rolls": [
-                ("California Roll", 1100, "Crab, avocado, cucumber", [], []),
-                ("Spicy Tuna", 1300, "Tuna, sriracha mayo, scallion", ["spicy"], []),
-                ("Dragon Roll", 1500, "Eel and avocado over shrimp tempura", [], []),
-            ],
-            "Small Plates": [
-                ("Miso Soup", 350, "Tofu, wakame, scallion", ["vegetarian"], []),
-                ("Edamame", 400, "Steamed and sea-salted", ["vegan"], []),
-            ],
-        },
-    },
-    {
-        "city": "springfield",
-        "name": "Taco Town",
-        "cuisines": ["mexican"],
-        "menu": {
-            "Tacos": [
-                ("Al Pastor", 900, "Spit-roasted pork, pineapple, cilantro", ["spicy"], SPICE),
-                ("Baja Fish", 1000, "Beer-battered cod, cabbage slaw, lime crema", [], []),
-                (
-                    "Veggie Taco",
-                    800,
-                    "Grilled peppers, black beans, avocado",
-                    ["vegetarian", "vegan"],
-                    [],
-                ),
-            ],
-            "Burritos": [
-                ("Carne Asada Burrito", 1150, "Grilled steak, rice, beans, salsa roja", [], SPICE),
-            ],
-            "Sides": [
-                ("Chips and Guac", 600, "Fresh-mashed guacamole", ["vegan"], []),
-            ],
-        },
-    },
-    {
-        "city": "springfield",
-        "name": "Curry Corner",
+        "city": "rawalpindi",
+        "name": "Bombay Chowk",
         "cuisines": ["indian"],
         "menu": {
-            "Curries": [
+            "Curry": [
                 (
-                    "Butter Chicken",
-                    1500,
-                    "Tandoori chicken in velvety tomato-butter sauce",
-                    [],
-                    SIZE + SPICE,
+                    "Chana Masala",
+                    360,
+                    "Chickpeas stewed with tomato and spice",
+                    ["vegan", "spicy"],
+                    SIZE,
                 ),
-                ("Chana Masala", 1100, "Chickpeas in tangy amchoor gravy", ["vegan"], SPICE),
-                ("Palak Paneer", 1250, "House-made paneer in spinach puree", ["vegetarian"], []),
+                ("Rogan Josh", 580, "Kashmiri lamb curry", ["halal"], SPICE),
             ],
-            "Breads": [
-                ("Butter Naan", 250, "Blistered in the tandoor", ["vegetarian"], []),
-                ("Tandoori Roti", 150, "Whole-wheat, brushed with ghee on request", ["vegan"], []),
-            ],
+            "Rice": [("Jeera Rice", 180, "Basmati tempered with cumin", ["vegan"], [])],
         },
     },
     {
-        "city": "springfield",
-        "name": "Pho Real",
-        "cuisines": ["vietnamese"],
-        "menu": {
-            "Soups": [
-                ("Beef Pho", 1300, "Twelve-hour bone broth, brisket, rice noodles", [], SIZE),
-                ("Tofu Pho", 1150, "Aromatic vegetable broth, fried tofu", ["vegetarian"], SIZE),
-            ],
-            "Street Snacks": [
-                ("Fresh Spring Rolls", 550, "Shrimp, herbs, vermicelli, peanut dip", [], []),
-                ("Banh Mi", 900, "Grilled pork, pickled daikon, pate, baguette", [], []),
-            ],
-        },
-    },
-    {
-        "city": "springfield",
-        "name": "Falafel Factory",
-        "cuisines": ["middle-eastern"],
-        "menu": {
-            "Wraps": [
-                (
-                    "Falafel Wrap",
-                    850,
-                    "Crispy chickpea falafel, tahini, pickles",
-                    ["vegan", "halal"],
-                    [],
-                ),
-                ("Shawarma", 1000, "Marinated chicken off the spit, garlic toum", ["halal"], []),
-            ],
-            "Plates": [
-                ("Mixed Grill Plate", 1600, "Kofta, shish tawook, saffron rice", ["halal"], []),
-                ("Hummus Bowl", 700, "Silky hummus, olive oil, warm pita", ["vegan"], []),
-            ],
-        },
-    },
-    {
-        "city": "springfield",
-        "name": "Wok This Way",
+        "city": "rawalpindi",
+        "name": "Noodle Bar Saddar",
         "cuisines": ["chinese"],
         "menu": {
-            "Stir Fry": [
+            "Noodles": [
                 (
-                    "Kung Pao Chicken",
-                    1250,
-                    "Peanuts, dried chilies, Sichuan pepper",
-                    ["spicy"],
+                    "Chilli Garlic Noodles",
+                    350,
+                    "Wok-fried, heavy on the garlic",
+                    ["vegan", "spicy"],
                     SPICE,
                 ),
-                ("Beef and Broccoli", 1300, "Wok-seared in oyster sauce", [], []),
-                ("Veg Chow Mein", 1000, "Springy noodles, seasonal greens", ["vegetarian"], []),
+                ("Beef Chowmein", 440, "Thin noodles with strips of beef", ["halal"], SIZE),
             ],
-            "Rice": [
-                ("Yangzhou Fried Rice", 900, "Shrimp, char siu, egg", [], []),
-            ],
+            "Sides": [("Spring Rolls", 200, "Six, with sweet chilli dip", ["vegetarian"], [])],
         },
     },
     {
-        "city": "springfield",
-        "name": "Pizza Planet",
+        "city": "rawalpindi",
+        "name": "Napoli Slice",
         "cuisines": ["pizza", "italian"],
         "menu": {
-            "Pizzas": [
-                (
-                    "Margherita",
-                    1300,
-                    "San Marzano tomato, fior di latte, basil",
-                    ["vegetarian"],
-                    SIZE,
-                ),
-                ("Pepperoni", 1500, "Cup-and-char pepperoni, hot honey drizzle", [], SIZE),
-                (
-                    "Truffle Mushroom",
-                    1600,
-                    "Roasted mushrooms, truffle cream, no tomato",
-                    ["vegetarian"],
-                    SIZE,
-                ),
+            "Pizza": [
+                ("Pepperoni", 580, "Beef pepperoni, mozzarella", ["halal"], SIZE),
+                ("Veggie Supreme", 500, "Peppers, olives, mushroom, onion", ["vegetarian"], SIZE),
             ],
-            "Sides": [
-                (
-                    "Garlic Knots",
-                    450,
-                    "Parmesan, parsley, roasted-garlic butter",
-                    ["vegetarian"],
-                    [],
-                ),
-                ("Buffalo Wings", 700, "Tossed in house buffalo sauce", ["spicy"], []),
-            ],
+            "Pasta": [("Lasagne", 520, "Layered beef ragù and béchamel", ["halal"], [])],
         },
     },
-    # ── shelbyville ──────────────────────────────────────────────────
     {
-        "city": "shelbyville",
-        "name": "Seoul Kitchen",
-        "cuisines": ["korean"],
+        "city": "rawalpindi",
+        "name": "Sushi Saddar",
+        "cuisines": ["japanese"],
+        "menu": {
+            "Sushi": [
+                ("Tuna Nigiri", 640, "Four pieces over seasoned rice", [], SIZE),
+                ("Cucumber Roll", 420, "Six pieces, simple and cold", ["vegan"], SIZE),
+            ],
+            "Hot": [("Chicken Ramen", 560, "Shoyu broth, soft egg, chashu", ["halal"], SPICE)],
+        },
+    },
+    {
+        "city": "rawalpindi",
+        "name": "El Mariachi",
+        "cuisines": ["mexican"],
         "menu": {
             "Mains": [
                 (
-                    "Bibimbap",
-                    1250,
-                    "Stone-bowl rice, seasonal vegetables, gochujang, fried egg",
-                    ["vegetarian"],
-                    SPICE,
+                    "Chicken Quesadilla",
+                    440,
+                    "Griddled tortilla, cheese, peppers",
+                    ["halal"],
+                    ADDONS,
                 ),
-                ("Bulgogi Bowl", 1400, "Soy-pear marinated beef over steamed rice", [], []),
-                ("Korean Fried Chicken", 1300, "Double-fried, gochujang glaze", ["spicy"], []),
+                ("Veggie Burrito", 400, "Rice, beans, salsa, wrapped", ["vegan"], SIZE),
             ],
-            "Sides": [
-                ("Kimchi", 300, "House-fermented napa cabbage", ["vegan", "spicy"], []),
-            ],
+            "Sides": [("Guacamole and Chips", 260, "Made to order", ["vegan"], [])],
         },
     },
     {
-        "city": "shelbyville",
-        "name": "Noodle Nirvana",
-        "cuisines": ["thai"],
+        "city": "rawalpindi",
+        "name": "Pho Pindi",
+        "cuisines": ["vietnamese"],
         "menu": {
-            "Noodles": [
-                ("Pad Thai", 1200, "Tamarind, peanuts, lime", [], SPICE),
-                ("Drunken Noodles", 1250, "Wide rice noodles, Thai basil, chili", ["spicy"], SPICE),
+            "Pho": [
+                ("Chicken Pho", 460, "Clear broth, rice noodles, spring onion", ["halal"], SIZE),
+                ("Tofu Pho", 400, "Mushroom broth with silken tofu", ["vegan"], SIZE),
             ],
-            "Curries": [
-                ("Green Curry", 1350, "Coconut milk, bamboo shoots, Thai eggplant", ["spicy"], []),
-            ],
-            "Desserts": [
-                ("Mango Sticky Rice", 650, "Coconut cream, ripe mango", ["vegan"], []),
-            ],
+            "Sides": [("Banh Mi", 300, "Baguette with pickled vegetables", ["halal"], ADDONS)],
         },
     },
     {
-        "city": "shelbyville",
-        "name": "The Greek Corner",
-        "cuisines": ["greek", "mediterranean"],
+        "city": "rawalpindi",
+        "name": "Zaitoon Shawarma",
+        "cuisines": ["middle-eastern"],
         "menu": {
-            "Gyros": [
-                ("Chicken Gyro", 950, "Spit-roasted, tzatziki, warm pita", [], []),
-                ("Lamb Gyro", 1100, "Slow-roasted lamb, red onion, tomato", [], []),
+            "Wraps": [
+                ("Chicken Shawarma", 280, "Carved off the spit, garlic sauce", ["halal"], ADDONS),
+                ("Falafel Wrap", 240, "Fried chickpea patties, tahini", ["vegan"], ADDONS),
             ],
-            "Plates": [
-                ("Greek Salad", 850, "Feta, kalamata olives, cucumber", ["vegetarian"], []),
-                ("Moussaka", 1300, "Eggplant, spiced lamb, bechamel", [], []),
-            ],
-            "Sweets": [
-                ("Baklava", 500, "Walnut, honey, phyllo", ["vegetarian"], []),
-            ],
-        },
-    },
-    {
-        "city": "shelbyville",
-        "name": "Bagel Bros",
-        "cuisines": ["breakfast", "cafe"],
-        "menu": {
-            "Bagels": [
-                (
-                    "Lox and Schmear",
-                    1200,
-                    "Cured salmon, cream cheese, capers, everything bagel",
-                    [],
-                    [],
-                ),
-                ("Classic BEC", 750, "Bacon, egg, cheese on a plain bagel", [], []),
-                ("Avocado Smash", 850, "Chili flakes, lemon, sesame bagel", ["vegetarian"], []),
-            ],
-            "Coffee": [
-                ("Drip Coffee", 300, "Bottomless while you wait", ["vegan"], SIZE),
-                ("Oat Latte", 550, "Double shot, oat milk", ["vegan"], SIZE),
-            ],
-        },
-    },
-    {
-        "city": "shelbyville",
-        "name": "Smoke Stack BBQ",
-        "cuisines": ["bbq", "american"],
-        "menu": {
-            "Plates": [
-                ("Brisket Plate", 1800, "Fourteen-hour smoked, two sides", [], []),
-                ("Pulled Pork Sandwich", 1100, "Carolina vinegar sauce, slaw", [], []),
-                ("Half Rack Ribs", 1600, "Dry-rubbed St. Louis cut", [], []),
-            ],
-            "Sides": [
-                ("Mac and Cheese", 500, "Three-cheese, smoked", ["vegetarian"], []),
-                ("Cornbread", 350, "Honey butter", ["vegetarian"], []),
-            ],
-        },
-    },
-    {
-        "city": "shelbyville",
-        "name": "Green Bowl",
-        "cuisines": ["healthy", "salads"],
-        "menu": {
-            "Bowls": [
-                ("Quinoa Power Bowl", 1150, "Roasted sweet potato, kale, tahini", ["vegan"], []),
-                ("Kale Caesar", 1050, "Almond parm, sourdough croutons", ["vegetarian"], []),
-                (
-                    "Harvest Bowl",
-                    1200,
-                    "Wild rice, roasted squash, goat cheese",
-                    ["vegetarian"],
-                    [],
-                ),
-            ],
-            "Juices": [
-                ("Green Juice", 600, "Celery, apple, ginger, lemon", ["vegan"], []),
-            ],
-        },
-    },
-    {
-        "city": "shelbyville",
-        "name": "Dumpling Dynasty",
-        "cuisines": ["chinese", "dim-sum"],
-        "menu": {
-            "Dumplings": [
-                ("Pork Soup Dumplings", 950, "Eight per steamer, rich aspic broth", [], []),
-                (
-                    "Chive and Egg Dumplings",
-                    850,
-                    "Pan-fried, crispy lace bottom",
-                    ["vegetarian"],
-                    [],
-                ),
-                ("Har Gow", 800, "Crystal shrimp dumplings", [], []),
-            ],
-            "Small Plates": [
-                ("Scallion Pancake", 550, "Flaky, with black-vinegar dip", ["vegan"], []),
-                ("Dan Dan Noodles", 1000, "Sesame, chili oil, minced pork", ["spicy"], SPICE),
-            ],
-        },
-    },
-    {
-        "city": "shelbyville",
-        "name": "Cluck Truck",
-        "cuisines": ["fried-chicken", "fast-food"],
-        "menu": {
-            "Sandwiches": [
-                (
-                    "Nashville Hot Sandwich",
-                    1050,
-                    "Cayenne-dredged, comeback sauce, pickles",
-                    ["spicy"],
-                    SPICE,
-                ),
-                ("Classic Crispy Sandwich", 950, "Buttermilk brine, mayo, slaw", [], ADDONS),
-            ],
-            "Tenders": [
-                ("Tender Basket", 900, "Three jumbo tenders, Texas toast", [], SPICE),
-            ],
-            "Sides": [
-                ("Waffle Fries", 450, "Crinkle-cut, seasoned salt", ["vegan"], []),
-            ],
-        },
-    },
-    {
-        "city": "shelbyville",
-        "name": "Bella Napoli",
-        "cuisines": ["pizza", "italian"],
-        "menu": {
-            "Pizzas": [
-                ("Napoletana", 1400, "Wood-fired, anchovies, capers, oregano", [], SIZE),
-                ("Quattro Formaggi", 1550, "Four-cheese white pie", ["vegetarian"], SIZE),
-                ("Diavola", 1500, "Spicy salami, Calabrian chili", ["spicy"], SIZE),
-            ],
-            "Antipasti": [
-                ("Burrata", 950, "Cream-filled mozzarella, grilled bread", ["vegetarian"], []),
-            ],
-        },
-    },
-    {
-        "city": "shelbyville",
-        "name": "Sweet Tooth",
-        "cuisines": ["desserts", "bakery"],
-        "menu": {
-            "Cakes": [
-                ("Chocolate Fudge Slice", 650, "Triple-layer, dark ganache", ["vegetarian"], []),
-                ("Basque Cheesecake", 700, "Burnt top, custard center", ["vegetarian"], []),
-            ],
-            "Cookies": [
-                ("Brown Butter Chocolate Chip", 350, "Baked hourly, sea salt", ["vegetarian"], []),
-            ],
-            "Shakes": [
-                (
-                    "Strawberry Milkshake",
-                    550,
-                    "Fresh strawberries, whipped cream",
-                    ["vegetarian"],
-                    SIZE,
-                ),
-            ],
+            "Plates": [("Hummus Plate", 220, "With warm pita and olive oil", ["vegan"], [])],
         },
     },
 ]
-CITIES = ["springfield", "shelbyville"]
+CITIES = ["islamabad", "rawalpindi"]
 
 
 class SeedError(RuntimeError):
@@ -733,9 +663,20 @@ async def _seed_branches(
 async def _ensure_stock(
     client: httpx.AsyncClient, admin: dict[str, str], restaurant_id: str, menu: dict[str, Any]
 ) -> None:
-    """Replay path: stock only items that are verifiably untouched
-    (available 0 at version 0 — never PUT by an admin, or missing entirely).
-    An admin's counts and capacity survive re-seeding."""
+    """Replay path: stock items that are missing, or sitting at zero.
+
+    This used to read `version == 0` to mean "never PUT by an admin", which
+    told it apart from an admin who had deliberately zeroed a row. ADR-0039
+    removed every `version` column, so that distinction no longer exists and
+    the seed crashed on the missing key — caught by the first `make seed`
+    after the Part A hardening pass.
+
+    What survives re-seeding is therefore any NON-ZERO count, which is the
+    case that matters: an admin's stock levels and capacity are left alone.
+    What no longer survives is a deliberate 86 — a re-seed restocks it. That
+    is a dev tool restoring a demo world, and the alternative is a seed that
+    cannot run at all.
+    """
     current = _expect(
         await client.get(f"/v1/inventory/restaurants/{restaurant_id}/stock", headers=admin),
         200,
@@ -744,7 +685,7 @@ async def _ensure_stock(
     menu_item_ids = [item["id"] for category in menu["categories"] for item in category["items"]]
     for item_id in menu_item_ids:
         row = by_id.get(item_id)
-        if row is None or (row["available"] == 0 and row["version"] == 0):
+        if row is None or row["available"] == 0:
             _expect(
                 await client.put(
                     f"/v1/inventory/restaurants/{restaurant_id}/stock/{item_id}",
@@ -760,10 +701,10 @@ DEMO_CUSTOMER = "customer@demo.smartfood.dev"
 # demo delivery has a real, visible drive.
 DEMO_ADDRESS = {
     "label": "home",
-    "line1": "12 Mango St",
-    "city": "springfield",
-    "lat": 39.8025,
-    "lon": -89.6478,
+    "line1": "House 12, Street 8, F-7/3",
+    "city": "islamabad",
+    "lat": 33.7105,
+    "lon": 73.0512,
 }
 
 # The demo couriers (dispatch milestone). Registered like any customer,

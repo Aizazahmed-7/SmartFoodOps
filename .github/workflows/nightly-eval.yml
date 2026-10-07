@@ -1,0 +1,98 @@
+# The evaluation rubric against the golden set (FR-104, NFR-31).
+#
+# Its own workflow and not a job in `ci`, for the reason report.py already
+# states: every case costs provider calls and wall-clock, and the signal is a
+# REGRESSION against a moving baseline rather than a broken build. As a PR
+# gate it would be the slowest and flakiest thing in the repo, and everyone
+# would learn to skip it.
+#
+# It runs with EVAL_STRICT=1, which is the part worth understanding. The
+# suite reports `n/a` rather than `pass` for a rubric it could not measure —
+# but a scheduled job that exits 0 with "not measured" printed above a green
+# check is a green check, and the green is what people remember. Strict turns
+# "nobody checked" into its own exit code (2), distinct from "something
+# regressed" (1), because those need different responses.
+#
+# Secrets required: OPENAI_API_KEY (+ OPENAI_BASE_URL for an OpenAI-compatible
+# vendor). WITHOUT THEM THIS JOB FAILS, deliberately — a repository that
+# cannot answer "is the assistant still grounded?" should say so out loud
+# rather than report health it has not measured.
+name: nightly-eval
+
+on:
+  schedule:
+    # 02:00 UTC — 07:00 in Islamabad, so a regression is waiting at the start
+    # of the working day rather than discovered at the end of it.
+    - cron: "0 2 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync workspace
+        run: uv sync --all-packages
+
+      - name: Bring up the AI plane
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          MODEL_GENERATE: ${{ vars.MODEL_GENERATE }}
+          MODEL_CHEAP: ${{ vars.MODEL_CHEAP }}
+        run: make up-ai
+
+      - name: Seed the corpus
+        run: make seed
+
+      - name: Wait for the index to be queryable
+        # The rubrics score retrieval through the live search path, so a run
+        # started before the first embed pass would score an empty index and
+        # report a regression that is really a race. `/readyz` is the shared
+        # ops surface every service gets from `mount_observability` — it
+        # answers 503 until the database does.
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "http://localhost:8013/readyz" >/dev/null 2>&1; then exit 0; fi
+            sleep 5
+          done
+          echo "assistant never became ready" >&2
+          exit 1
+
+      - name: Evaluate (strict)
+        # `shell: bash` is load-bearing, not tidiness. Actions' DEFAULT shell
+        # is `bash -e {0}` with NO pipefail, so `make eval | tee` takes
+        # tee's exit status — always 0. Every regression (1) and every
+        # unmeasured run (2) would be swallowed and the nightly would be
+        # green, which is precisely what strict mode exists to prevent; the
+        # `if: failure()` log step below would never fire either. Naming the
+        # shell explicitly is what adds `-o pipefail`.
+        shell: bash
+        env:
+          EVAL_STRICT: "1"
+          ASSISTANT_URL: http://localhost:8013
+          CATALOG_URL: http://localhost:8002
+        run: make eval | tee eval-report.txt
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval-report.txt
+
+      - name: Service logs on failure
+        if: failure()
+        run: |
+          docker compose -f deploy/compose/docker-compose.yml --profile apps \
+            logs --tail 200 ai-assistant
+
+      - name: Tear down
+        if: always()
+        run: make down

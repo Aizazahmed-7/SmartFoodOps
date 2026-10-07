@@ -1,4 +1,4 @@
-# SmartFoodOps — Flow Sequence Diagrams (as built, W3)
+# SmartFoodOps — Flow Sequence Diagrams (as built, W3 + Part B)
 
 Companion to [erd.md](erd.md): the ERD shows what is stored; this shows **how data travels, how every id is computed, and what gets written where** — with one example order (`ord_42`, 2x Family Chicken Biryani from Biryani House) threaded through all diagrams.
 
@@ -653,6 +653,89 @@ an item belonging to another brand simply does not come back; it lands in
 `missing_item_ids` and pricing rejects the cart. Ownership is structural
 there, not a check anyone can forget. The 86 collapses into the same boolean
 the pricing engine already reads: `available AND id NOT IN overrides`.
+
+---
+
+## 14. A guarded transition, in detail — where a milestone is stamped (B5, FR-81)
+
+Diagram 2 shows `transition()` as a single arrow. This is what is inside it,
+because B5's explanations are only as truthful as the timestamps underneath
+them, and the reason those can be trusted is *where* they are written.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Caller (kitchen API / workflow)
+    participant T as transitions.transition()
+    participant DB as order_db
+    participant OB as outbox
+    participant R as Redis (tracking)
+
+    C->>T: transition(ord_42, expected=PREPARING, target=READY, event=OrderReady)
+    Note over T: now = one timestamp, taken ONCE and reused —<br/>the status move, the milestone and the event<br/>must all agree about when this happened
+    rect rgb(0,0,0)
+        Note over T,OB: ONE TRANSACTION
+        T->>DB: UPDATE orders SET status='READY', ready_at=:now, updated_at=:now<br/>WHERE order_id=:id AND status='PREPARING' RETURNING order_id
+        Note over DB: MILESTONES[target] picks the column, so the stamp rides<br/>INSIDE the guard. A replayed or raced transition matches<br/>0 rows and therefore cannot re-stamp a moment that passed
+        alt 0 rows returned — ambiguous, so re-read to disambiguate
+            T->>DB: SELECT status WHERE order_id=:id
+            Note over T: status == target  → TransitionResult(applied=False), idempotent replay<br/>status is other  → raise IllegalTransition(.., actual=status)<br/>row absent       → raise IllegalTransition(.., actual="absent")
+        end
+        T->>DB: SELECT the row again — now carrying ready_at
+        T->>OB: INSERT outbox row: full state INCLUDING every milestone + placed_at
+        Note over OB: full-state means full state — a consumer joining the stream<br/>at OrderReady can time the kitchen without replaying the topic
+    end
+    Note over T,DB: COMMIT — status, milestone and event land together or not at all
+    T->>R: publish_status(ord_42, READY)
+    Note over R: POST-commit on purpose: a stream hint must never describe a<br/>write that rolled back, and Redis being down must never undo<br/>one that landed. The EVENT is transactional; the HINT is not
+    T-->>C: TransitionResult(applied=True)
+```
+
+**The one idea to take from this diagram.** Three different durability needs
+are served by three different mechanisms in the same twenty lines: the status
+and its milestone are one atomic UPDATE; the event is an outbox row in that
+same transaction; the live-tracking hint is a fire-and-forget publish after
+the commit. Each is placed by how much it would cost to be wrong.
+
+---
+
+## 15. Feedback capture — the corpus B6 summarises (FR-91)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Customer
+    participant API as order /v1/orders/{id}/feedback
+    participant DB as order_db
+
+    U->>API: PUT {rating: 5, comment: "the biryani was excellent"}
+    Note over U,API: PUT, not POST: one row per order, so re-sending is the same<br/>statement rather than a second opinion. A customer correcting a<br/>rating gets the correction, not a 409 saying their first answer<br/>was final
+    API->>DB: SELECT user_id, status, restaurant_id, brand_id FROM orders WHERE order_id=:id
+    alt order missing OR order.user_id != caller
+        API-->>U: 404 NOT_FOUND
+        Note over API: not 403 — a caller who did not place this order must not<br/>learn that it exists (api-standards: not-yours → not-found)
+    else status not in (DELIVERED, SETTLED)
+        API-->>U: 409 CONFLICT
+        Note over API: REFUNDED is excluded even though the food arrived — a refund<br/>means something a 1..5 scale cannot express, and those rows<br/>would poison the corpus FR-92 reads as "how is the kitchen"
+    end
+    API->>DB: INSERT INTO order_feedback (order_id, user_id, restaurant_id, brand_id, rating, comment)<br/>ON CONFLICT (order_id) DO UPDATE
+    Note over DB: order_id is the PRIMARY KEY, so "one review per order" is a<br/>schema fact, not a rule someone remembers. Changing your mind<br/>rewrites the row — and a summary is regenerated from whatever<br/>the rows currently say, the only version anyone can defend quoting.<br/>restaurant_id is SNAPSHOTTED, not joined: a branch may be<br/>repointed to another brand later (ADR-0028), but feedback about<br/>the food served that night belongs to the branch that served it
+    API-->>U: 200 — the stored feedback
+```
+
+`comment` is stored **verbatim and is never interpreted here**. It becomes
+model input in FR-92, where it is exactly the untrusted-corpus problem
+ADR-0043 names — so the defence belongs at *that* boundary, where the text
+meets a model, and not in a sanitiser here that would also mangle what
+someone actually wrote. (B6 found two real attacks against that corpus: a
+planted review that could surface "repeated reports of food poisoning" as a
+summary theme, and a verbatim quote that shed the negation preceding it.)
+
+No event is published here. Feedback is read by B6 over HTTP when a summary
+is requested, because a summary must reflect the corpus **as it stands at
+that moment** — a customer who edits their review must not still be quoted
+saying the old thing. An event stream would make the summariser's input a
+replay of history rather than the current truth.
 
 ---
 

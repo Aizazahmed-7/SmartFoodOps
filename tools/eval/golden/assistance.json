@@ -1,0 +1,35 @@
+[
+  {
+    "id": "heat-is-quoted-never-inferred",
+    "question": "how hot is the mutton karahi?",
+    "city": "islamabad",
+    "forbid": ["spicy", "medium heat", "quite hot"],
+    "mention_any": ["not listed", "does not list", "not specified", "no spice level", "hasn't listed", "has not listed"],
+    "why": "FR-78's constraint, on the case that actually tests it: the dish's DESCRIPTION says 'green chillies' while its declared tags say only 'halal'. A model answering from the prose calls it spicy and is wrong about what the restaurant said — which is the same failure ADR-0043 refuses allergen questions over, one notch less dangerous. 'hot' rather than 'spicy' in the question so the forbidden word is one the model has to volunteer."
+  },
+  {
+    "id": "a-declared-tag-is-reported-as-declared",
+    "question": "is the chicken biryani hot?",
+    "city": "islamabad",
+    "mention_any": ["spicy"],
+    "cite": true,
+    "why": "The other direction, and it has to pass too or the rule above is just a model that never answers. Chicken Biryani DOES declare `spicy`, so saying so is correct — a guard that suppressed it would trade a wrong answer for a useless one."
+  },
+  {
+    "id": "ingredients-come-from-the-description",
+    "question": "what is in the chicken biryani?",
+    "city": "islamabad",
+    "mention_any": ["basmati", "chicken", "onion"],
+    "cite": true,
+    "forbid": ["lamb", "prawn", "beef"],
+    "why": "The chunk carries the restaurant's own description, so this should need no invention at all. The forbidden proteins are ones a model reaching for 'biryani' might add from general knowledge rather than from this menu."
+  },
+  {
+    "id": "a-pairing-comes-from-what-people-order",
+    "question": "what goes with the chicken biryani?",
+    "city": "islamabad",
+    "cite": true,
+    "forbid": ["wine", "beer", "dessert"],
+    "why": "Retrieval finds dishes that MATCH the words, and 'naan' is not similar to 'biryani' — it is ordered with it. Without the co-order signal the model invents a pairing from whatever the candidate list happened to hold. The forbidden items are plausible accompaniments this menu does not sell, and one of them is not halal, which makes inventing it worse than merely wrong."
+  }
+]

@@ -119,7 +119,7 @@ Profiles: **core** (infra — rabbitmq joined in S10), **apps** (services), **ui
 
 | Profile | Component | Host port | Notes |
 |---|---|---|---|
-| core | postgres:15 | 5432 | One database per service, created by `initdb/` scripts |
+| core | pgvector/pgvector:0.8.6-pg15-trixie | 5432 | Postgres 15 + pgvector (ADR-0032). One database per service, created by `initdb/` scripts; `vector` pre-created in `assistant_db` |
 | core | redis:7 | 6380 | Host port (6379 squatted locally); in-network `redis:6379`. Single node; identical keys/TTLs/Lua as prod |
 | core | rabbitmq:3-management | 5672 / **15672** | Celery broker (S10 receipts). Management UI at :15672 (guest/guest) — watch the `receipts.render` / `receipts.send` queues live |
 | core | Kafka (KRaft, single broker) | **19092** | Dual listeners: `kafka:9092` in-network, `localhost:19092` from host — see §12 |
@@ -153,22 +153,41 @@ Profiles: **core** (infra — rabbitmq joined in S10), **apps** (services), **ui
 the order service; dispatch took 8012 — analytics claimed 8009 in W3;
 ai-assistant took 8013 in B0, deliberately leaving 8003/8004 alone.)
 
-**Postgres stays on `postgres:15`, and the pgvector swap is not a one-line tag change.**
-Found live in B0: `postgres:15` is Debian trixie (glibc **2.41**) while `pgvector/pgvector:pg15`
-is bookworm (glibc **2.36**). Postgres treats that as a *collation-version downgrade* and
-refuses — every existing database warns, and `template1` **errors**, which blocks
-`CREATE DATABASE` outright, so `initdb/01-databases.sh` fails with exit 3 and no new service
-database can be created at all. Symptom to recognise:
+**Postgres runs `pgvector/pgvector:0.8.6-pg15-trixie`, and the `-trixie` suffix is
+load-bearing.** The default `pgvector/pgvector:pg15` tag is bookworm (glibc **2.36**) while
+this volume was initialised by `postgres:15` under trixie (glibc **2.41**). Postgres treats
+that as a *collation-version downgrade* and refuses — every existing database warns, and
+`template1` **errors**, which blocks `CREATE DATABASE` outright, so
+`initdb/01-databases.sh` fails with exit 3 and no new service database can be created at
+all. Found live in B0 on the default tag. Symptom to recognise:
 
 ```
 ERROR:  template database "template1" has a collation version mismatch
 make: *** [up-ai] Error 3
 ```
 
-`assistant_db` exists from B0, but **without** the `vector` extension. Choosing the route —
-`REFRESH COLLATION VERSION` + `REINDEX`, a `make nuke` for a fresh volume, or a base-matched
-pgvector image — is [ADR-0032](adr/)'s job in B1, where vectors are first needed. Do not
-re-attempt the tag swap on an existing `pg-data` volume without picking one.
+[ADR-0032](adr/0032-vectors-live-in-the-shared-postgres.md) resolved it: pgvector publishes a
+**`-trixie` variant in lockstep with every release**, and B0 had tested only the default tag.
+`0.8.6-pg15-trixie` is PostgreSQL 15.19 on the identical glibc build (`2.41-12+deb13u3`), so
+the swap is a **drop-in on the existing `pg-data` — no `make nuke`, no re-seed**. Verified
+live: initdb convergence exits 0, every database including `template1` still reports
+`datcollversion = 2.41`, `pg_extension` carries `vector` 0.8.6, and `pg_am` carries `hnsw`.
+`assistant_db` gets the extension pre-created by `initdb` as superuser, exactly like
+`pg_trgm` for catalog.
+
+**Never move this image to a tag that does not name its distribution** (`:pg15`, `:latest`) —
+that is the downgrade, re-entered silently. If you ever do land on a volume whose glibc line
+disagrees with its image, `make nuke` is the route; `REFRESH COLLATION VERSION` + `REINDEX`
+is the escape hatch for a volume you must keep, with the warning that on a downgrade, text
+indexes built under the higher version are suspect until rebuilt. Untested on this box
+(ADR-0032 §2 made it unnecessary), so treat it as a shape, per database, `template1`
+included — reindex first, then record the new version:
+
+```bash
+docker compose exec postgres psql -U sfo -d catalog_db \
+  -c "REINDEX DATABASE catalog_db" \
+  -c "ALTER DATABASE catalog_db REFRESH COLLATION VERSION"
+```
 
 Ports 8003 and 8004 are deliberately unused — the cart is client state (ADR-0017), and pricing is a library (`libs/smartfood-pricing`, ADR-0015) running inside the Order workers and the `/v1/quote` endpoint.
 
