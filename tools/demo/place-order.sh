@@ -37,12 +37,12 @@ say "sign in (demo customer + restaurant owner)"
 CTOK=$(curl -s -X POST "$GATEWAY/v1/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$CUSTOMER\",\"password\":\"$PASSWORD\"}" | json "['access_token']")
 OTOK=$(curl -s -X POST "$GATEWAY/v1/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"owner-springfield-biryani-house@demo.smartfood.dev\",\"password\":\"$PASSWORD\"}" \
+  -d "{\"email\":\"owner-islamabad-biryani-house@demo.smartfood.dev\",\"password\":\"$PASSWORD\"}" \
   | json "['access_token']")
 ADDRESS_ID=$(curl -s "$GATEWAY/v1/me/addresses" -H "Authorization: Bearer $CTOK" | json "[0]['id']")
 
 say "pick the owner's restaurant + a modifier-free item"
-RESTAURANT_ID=$(curl -s "$GATEWAY/v1/restaurants?city=springfield" | python3 -c "
+RESTAURANT_ID=$(curl -s "$GATEWAY/v1/restaurants?city=islamabad" | python3 -c "
 import sys, json
 for r in json.load(sys.stdin)['restaurants']:
     if r['name'] == 'Biryani House':
@@ -104,7 +104,15 @@ say "a sim rider takes the job, drives the toy city, delivers"
 # Dispatch replaced the timer-courier: someone must actually carry the
 # food. ONESHOT=1 exits after one completed delivery; killed on script
 # exit either way.
-RIDERS=1 ONESHOT=1 uv run --package rider-sim python -m rider_sim.main &
+#
+# SPEED_MPS fast-forwards the drive. The default 12 m/s is a brisk scooter
+# and is what drills should use; Islamabad is a real city, so the scattered
+# start corners sit 2.5-6.3 km from a restaurant and an honest scooter needs
+# 3.5-9 minutes. That is a fine simulation and a terrible demo — and it is
+# why this line exists at all: the toy Springfield map used to be small
+# enough that nobody noticed. Nothing under test depends on the speed; only
+# the GPS trail gets coarser.
+RIDERS=1 ONESHOT=1 SPEED_MPS=60 uv run --package rider-sim python -m rider_sim.main &
 RIDER_SIM_PID=$!
 trap 'kill $RIDER_SIM_PID 2>/dev/null || true' EXIT
 poll_status "$CTOK" "$ORDER_ID" SETTLED 180

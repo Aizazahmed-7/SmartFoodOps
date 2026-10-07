@@ -1,0 +1,679 @@
+{
+  "uid": "smartfoodops-assistant",
+  "title": "SmartFoodOps \u2014 AI Assistant",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "timezone": "browser",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "FR-95 \u2014 the six metrics (assistant_facts)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "title": "Interactions per day",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT date_trunc('day', occurred_at) AS time, count(*) AS interactions\nFROM assistant_facts WHERE $__timeFilter(occurred_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ],
+      "description": "AI assistant usage. One row per turn, keyed by message_id, so a redelivered event converges instead of inflating this line."
+    },
+    {
+      "id": 3,
+      "title": "Questions by outcome",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT date_trunc('day', occurred_at) AS time, outcome AS metric, count(*) AS turns\nFROM assistant_facts WHERE $__timeFilter(occurred_at) GROUP BY 1, 2 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ],
+      "description": "Asked vs answered. Only `answered` answered anything: a refusal and a no_match are honest replies, and folding them in would make the rate rise as the assistant got less useful. Grouped, not hard-coded, so a new outcome appears on its own."
+    },
+    {
+      "id": 4,
+      "title": "Response time (ms) \u2014 generated vs cached",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT date_trunc('hour', occurred_at) AS time,\n  avg(duration_ms) FILTER (WHERE cache_tier = '') AS generated,\n  avg(duration_ms) FILTER (WHERE cache_tier <> '') AS cached\nFROM assistant_facts WHERE $__timeFilter(occurred_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ],
+      "description": "Split on purpose. The blended mean drifts with the cache hit rate rather than with the system getting faster, so it describes neither experience. The whole turn, retrieval included \u2014 a provider-only number would flatter us."
+    },
+    {
+      "id": 5,
+      "title": "Recommendation acceptance (window)",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT\n  count(*) FILTER (WHERE accepted) AS accepted,\n  count(*) AS turns_naming_items\nFROM (\n  SELECT EXISTS (\n    SELECT 1 FROM order_item_facts i\n    WHERE i.user_id = a.user_id AND i.menu_item_id = ANY(a.item_ids)\n      AND i.placed_at >= a.occurred_at AND i.placed_at < a.occurred_at + interval '24 hours'\n  ) AS accepted\n  FROM assistant_facts a\n  WHERE $__timeFilter(a.occurred_at) AND a.user_id <> '' AND cardinality(a.item_ids) > 0\n) s",
+          "format": "table",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ],
+      "description": "Scored PER TURN, not per item: one answer naming five dishes is one recommendation a customer acts on or does not, and per-item scoring would cap a perfect answer at 20%. Matched on what the answer CITED, inside 24h."
+    },
+    {
+      "id": 6,
+      "title": "Conversion after an interaction",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 17
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT\n  (SELECT count(*) FROM order_facts f\n    WHERE $__timeFilter(f.placed_at) AND f.user_id <> '' AND EXISTS (\n      SELECT 1 FROM assistant_facts a\n      WHERE a.user_id = f.user_id AND a.user_id <> ''\n        AND f.restaurant_id = ANY(a.restaurant_ids)\n        AND f.placed_at >= a.occurred_at AND f.placed_at < a.occurred_at + interval '24 hours'\n    )) AS attributed_orders,\n  (SELECT coalesce(sum(f.total_cents), 0) / 100.0 FROM order_facts f\n    WHERE $__timeFilter(f.placed_at) AND f.user_id <> '' AND f.settled_at IS NOT NULL AND EXISTS (\n      SELECT 1 FROM assistant_facts a\n      WHERE a.user_id = f.user_id AND a.user_id <> ''\n        AND f.restaurant_id = ANY(a.restaurant_ids)\n        AND f.placed_at >= a.occurred_at AND f.placed_at < a.occurred_at + interval '24 hours'\n    )) AS attributed_revenue",
+          "format": "table",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ],
+      "description": "Counted ORDER-side and distinct: three questions about one restaurant followed by one dinner are one order, and the revenue beside it must not be tripled. Revenue is settled money only. Correlation within a window \u2014 not a controlled measurement."
+    },
+    {
+      "id": 7,
+      "title": "Engagement",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 17
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT\n  round(count(*)::numeric / nullif(count(DISTINCT conversation_id), 0), 2) AS turns_per_conversation,\n  count(DISTINCT user_id) FILTER (WHERE user_id <> '') AS customers\nFROM assistant_facts WHERE $__timeFilter(occurred_at)",
+          "format": "table",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ],
+      "description": "Depth and reach. Returning customers are counted by distinct CONVERSATIONS, not turns: a long conversation is one visit that went well, two conversations are two occasions the assistant was worth opening. The empty user_id is excluded, matching the API's `_people()`: assistant_facts.user_id is NOT NULL with '' for anonymous, so counting it distinct makes every anonymous turn one synthetic extra customer \u2014 and the dashboard and the API would answer the same question differently."
+    },
+    {
+      "id": 8,
+      "title": "Grounding \u2014 candidates vs dropped",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "AnalyticsDB"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 17
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "AnalyticsDB"
+          },
+          "rawSql": "SELECT date_trunc('hour', occurred_at) AS time,\n  sum(candidates) AS candidates_retrieved, sum(ungrounded) AS dropped_ungrounded\nFROM assistant_facts WHERE $__timeFilter(occurred_at) GROUP BY 1 ORDER BY 1",
+          "format": "time_series",
+          "refId": "A",
+          "rawQuery": true
+        }
+      ],
+      "description": "What the validator dropped before the answer shipped. A rising line means retrieval is feeding the model things it cannot support \u2014 the leading indicator for AssistantUngroundedAnswer, which fires on what got through."
+    },
+    {
+      "id": 9,
+      "title": "Operational (Prometheus)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "panels": []
+    },
+    {
+      "id": 10,
+      "title": "Time to first token (NFR-21: p95 < 1.5s)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(assistant_time_to_first_token_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(assistant_time_to_first_token_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "B"
+        }
+      ],
+      "description": "What a customer feels. A streamed answer's HTTP duration is its connection LIFETIME, which is why stream routes never enter the HTTP latency histogram."
+    },
+    {
+      "id": 11,
+      "title": "Answer latency by task (NFR-21: generate p95 < 6s)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, task) (rate(assistant_response_seconds_bucket[5m])))",
+          "legendFormat": "{{task}} p95",
+          "refId": "A"
+        }
+      ],
+      "description": "Split by task: `explain` is templated and fast, `generate` is a model call. Averaging them lets the fast path hide the slow one."
+    },
+    {
+      "id": 12,
+      "title": "Cache hit rate by tier (NFR-24)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "sum by (tier) (rate(assistant_cache_total{result=\"hit\"}[10m])) / sum by (tier) (rate(assistant_cache_total[10m]))",
+          "legendFormat": "{{tier}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Load-bearing, not an optimisation: at the ceiling provider quota is the binding constraint and this is what keeps generations inside it."
+    },
+    {
+      "id": 13,
+      "title": "Provider failovers & refusals",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "sum by (to_provider) (rate(assistant_provider_failovers_total[10m]))",
+          "legendFormat": "failover -> {{to_provider}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "sum by (reason) (rate(assistant_budget_refusals_total[10m]))",
+          "legendFormat": "refused: {{reason}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "sum by (reason) (rate(assistant_safety_refusals_total[10m]))",
+          "legendFormat": "safety: {{reason}}",
+          "refId": "C"
+        }
+      ],
+      "description": "The degradation ladder, visible. One failover is the design working; a sustained rate means the primary is down and every answer pays the retry first."
+    },
+    {
+      "id": 14,
+      "title": "Knowledge freshness (NFR-28: p99 < 60s)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(assistant_knowledge_freshness_seconds_bucket[30m])))",
+          "legendFormat": "p99",
+          "refId": "A"
+        }
+      ],
+      "description": "Committed menu change -> visible to retrieval. A stale index does not fail loudly: it answers confidently about a menu the kitchen has already changed."
+    },
+    {
+      "id": 15,
+      "title": "Interaction-fact consumer lag",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "sum by (topic) (kafka_consumergroup_lag{consumergroup=\"analytics.assistant.v1\"})",
+          "legendFormat": "{{topic}}",
+          "refId": "A"
+        }
+      ],
+      "description": "The panel that decides whether every panel ABOVE it can be trusted. If this projection stalls nothing errors \u2014 the charts keep rendering and quietly describe a shorter window than their label claims."
+    },
+    {
+      "id": 16,
+      "title": "Cost governance (NFR-25)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "panels": []
+    },
+    {
+      "id": 17,
+      "title": "Cost per order (budget $0.004)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "assistant:usd_per_order < 1",
+          "legendFormat": "USD / order",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "vector(0.0024)",
+          "legendFormat": "runbook trigger (60%)",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "vector(0.004)",
+          "legendFormat": "budget",
+          "refId": "C"
+        }
+      ],
+      "description": "NFR-25's first-class line. Orders is the denominator, not turns: a cost-per-turn improves simply by having fewer turns. Prices come from the llm-costs.yml table \u2014 never from this panel \u2014 so the dashboard and the tripwire alert read the same source. Budget derivation: capacity-plan \u00a77. Bounded with `< 1`: with assistant spend and no placements in the window the ratio records +Inf, and one infinite point makes the whole range unreadable against the budget line."
+    },
+    {
+      "id": 18,
+      "title": "Spend rate by model and direction",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "assistant:spend_usd_per_second * 3600",
+          "legendFormat": "{{model}} / {{direction}}",
+          "refId": "A"
+        }
+      ],
+      "description": "USD per hour. Split by direction because the two halves are controlled by different knobs \u2014 a context cap bounds prompt tokens, max_output_tokens bounds completion \u2014 so a rise on one side names its own fix."
+    },
+    {
+      "id": 19,
+      "title": "Unpriced tokens (the cost line's blind spot)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 57
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "sum by (model, direction) (assistant:tokens_unpriced_per_second)",
+          "legendFormat": "{{model}} / {{direction}}",
+          "refId": "A"
+        }
+      ],
+      "description": "Tokens billed by a model with no row in the price table. Anything here means every cost number on this dashboard is CONFIDENTLY LOW rather than visibly broken: the unpriced model drops out of the join and the panels keep rendering a smaller number with no gap in it."
+    },
+    {
+      "id": 20,
+      "title": "Projected spend / 30d at the current rate",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 57
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "sum(assistant:spend_usd_per_second) * 86400 * 30",
+          "legendFormat": "USD / 30d",
+          "refId": "A"
+        }
+      ],
+      "description": "A straight extrapolation of the current rate, not a forecast \u2014 it moves with traffic and is only meaningful read beside the orders line."
+    },
+    {
+      "id": 21,
+      "title": "Tokens per order",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 57
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "(sum(rate(assistant_tokens_total[10m])) / sum(rate(order_placement_seconds_count{outcome=\"placed\"}[10m]))) < 1e6",
+          "legendFormat": "tokens / order",
+          "refId": "A"
+        }
+      ],
+      "description": "The price-independent half of cost per order (capacity-plan A21 models ~333). This is the number a prompt change or a cache regression moves; the cost line also moves when a vendor reprices, which is not an engineering regression. Bounded for the same reason as the cost line: no placements in the window records +Inf."
+    }
+  ]
+}
