@@ -144,7 +144,7 @@ async def test_seed_creates_everything_then_replays_clean(edge):
             display = [r["display_name"] for r in browse["restaurants"]]
             assert len(display) == len(set(display))  # no two cards look alike
 
-        browse = (await client.get("/v1/restaurants", params={"city": "springfield"})).json()
+        browse = (await client.get("/v1/restaurants", params={"city": "islamabad"})).json()
         biryani = next(r for r in browse["restaurants"] if r["name"] == "Biryani House")
         menu = (await client.get(f"/v1/menus/{biryani['id']}")).json()
         assert [c["name"] for c in menu["categories"]] == ["Mains", "Sides"]
@@ -155,10 +155,10 @@ async def test_seed_creates_everything_then_replays_clean(edge):
         assert mains[0]["modifier_groups"][0]["options"][1]["price_delta_cents"] == 300
 
         # The multi-select shape (checkbox UI path) made it through intact.
-        barn = next(r for r in browse["restaurants"] if r["name"] == "Burger Barn")
-        barn_menu = (await client.get(f"/v1/menus/{barn['id']}")).json()
-        smash = barn_menu["categories"][0]["items"][0]
-        groups = {g["name"]: g for g in smash["modifier_groups"]}
+        pizzeria = next(r for r in browse["restaurants"] if r["name"] == "Pizza Pilgrim")
+        pizza_menu = (await client.get(f"/v1/menus/{pizzeria['id']}")).json()
+        margherita = pizza_menu["categories"][0]["items"][0]
+        groups = {g["name"]: g for g in margherita["modifier_groups"]}
         assert set(groups) == {"Size", "Add-ons"}
         assert groups["Add-ons"]["min_select"] == 0
         assert groups["Add-ons"]["max_select"] == 3
@@ -168,7 +168,7 @@ async def test_seed_creates_everything_then_replays_clean(edge):
         login = await client.post(
             "/v1/auth/login",
             json={
-                "email": "owner-springfield-biryani-house@demo.smartfood.dev",
+                "email": "owner-islamabad-biryani-house@demo.smartfood.dev",
                 "password": PASSWORD,
             },
         )

@@ -58,12 +58,12 @@ say "sign in (demo customer + restaurant owner)"
 CTOK=$(curl -s -X POST "$GATEWAY/v1/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$CUSTOMER\",\"password\":\"$PASSWORD\"}" | json "['access_token']")
 OTOK=$(curl -s -X POST "$GATEWAY/v1/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"owner-springfield-biryani-house@demo.smartfood.dev\",\"password\":\"$PASSWORD\"}" \
+  -d "{\"email\":\"owner-islamabad-biryani-house@demo.smartfood.dev\",\"password\":\"$PASSWORD\"}" \
   | json "['access_token']")
 ADDRESS_ID=$(curl -s "$GATEWAY/v1/me/addresses" -H "Authorization: Bearer $CTOK" | json "[0]['id']")
 
 say "pick the owner's restaurant + a modifier-free item"
-RESTAURANT_ID=$(curl -s "$GATEWAY/v1/restaurants?city=springfield" | python3 -c "
+RESTAURANT_ID=$(curl -s "$GATEWAY/v1/restaurants?city=islamabad" | python3 -c "
 import sys, json
 for r in json.load(sys.stdin)['restaurants']:
     if r['name'] == 'Biryani House':
