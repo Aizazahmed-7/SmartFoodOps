@@ -176,13 +176,17 @@ class OrderActivities:
 
     @activity.defn(name=ActivityName.MARK_ACCEPTED)
     async def mark_accepted(self, order_id: str) -> None:
-        await self._transition(order_id, expected="CONFIRMED", target="ACCEPTED")
+        await self._transition(
+            order_id, expected="CONFIRMED", target="ACCEPTED", event=EventType.ORDER_ACCEPTED
+        )
 
     # ── delivery + settlement (S6) ─────────────────────────────────
 
     @activity.defn(name=ActivityName.MARK_PICKED_UP)
     async def mark_picked_up(self, order_id: str) -> None:
-        await self._transition(order_id, expected="READY", target="PICKED_UP")
+        await self._transition(
+            order_id, expected="READY", target="PICKED_UP", event=EventType.ORDER_PICKED_UP
+        )
 
     @activity.defn(name=ActivityName.MARK_DELIVERED)
     async def mark_delivered(self, order_id: str) -> None:

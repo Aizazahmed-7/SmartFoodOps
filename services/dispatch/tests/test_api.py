@@ -191,3 +191,46 @@ def test_order_outage_maps_to_503_with_retry_after(riders, deliveries):
         # deliver map the same outage the same way.
         assert client.post("/v1/rider/deliveries/ord_1/pickup", headers=RIDER).status_code == 503
         assert client.post("/v1/rider/deliveries/ord_1/deliver", headers=RIDER).status_code == 503
+
+
+# ── the explanation engine's read (FR-83) ──────────────────────────
+
+
+def test_delivery_state_carries_the_assignment_clock(client):
+    """`pickup_timeout_s` runs from the assignment, so `assigned_at` is the
+    fact this endpoint exists for — without it the resolver has an elapsed
+    time and no deadline."""
+    _online(client)
+    _offer(client)
+    offer_id = client.get("/v1/rider/me", headers=RIDER).json()["offer"]["offer_id"]
+    accepted = client.post(
+        f"/v1/rider/offers/{offer_id}/accept", json={"order_id": "ord_1"}, headers=RIDER
+    )
+    assert accepted.status_code == 200
+
+    r = client.get("/v1/internal/deliveries/ord_1", headers=SYSTEM)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "ASSIGNED"
+    assert body["assigned_at"] is not None
+    assert body["picked_up_at"] is None
+
+
+def test_an_offer_still_cascading_reports_offering_and_no_assignment(client):
+    _online(client)
+    _offer(client)
+    body = client.get("/v1/internal/deliveries/ord_1", headers=SYSTEM).json()
+    assert body["state"] == "OFFERING"
+    assert body["assigned_at"] is None
+
+
+def test_an_order_with_no_delivery_row_is_a_404(client):
+    """Ordinary for anything that has not reached READY — the caller reads
+    it as "no courier facts yet", not as an error."""
+    assert client.get("/v1/internal/deliveries/ord_nothing", headers=SYSTEM).status_code == 404
+
+
+@pytest.mark.parametrize("headers", [CUSTOMER, RIDER, {}])
+def test_the_delivery_state_read_is_system_only(client, headers):
+    r = client.get("/v1/internal/deliveries/ord_1", headers=headers)
+    assert r.status_code in (401, 403)

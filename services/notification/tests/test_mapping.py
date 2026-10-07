@@ -137,3 +137,21 @@ def test_null_brand_id_falls_back_to_the_branch():
     """Transitional payloads carry brand_id=None — the pre-brands address."""
     drafts = order_drafts("OrderConfirmed", _order_payload(brand_id=None))
     assert (drafts[0].recipient_type, drafts[0].recipient_id) == ("restaurant", "rst_1")
+
+
+def test_the_new_order_milestones_draft_nothing():
+    """Part A's vocabulary said "major states only (no per-transition
+    spam)". FR-81 adds four stage events to the same topic — and the
+    anti-spam intent is kept HERE, where it actually lives: a customer
+    gains no push from a kitchen changing gear. If someone later wants
+    "your food is being prepared", it is a product decision made in this
+    file, not a side effect of an event existing."""
+    payload = {
+        "restaurant_name": "Biryani House",
+        "user_id": "usr_1",
+        "restaurant_id": "rst_1",
+        "items": [],
+        "totals": {"total_cents": 3446, "currency": "USD"},
+    }
+    for event_type in ("OrderAccepted", "OrderPreparing", "OrderReady", "OrderPickedUp"):
+        assert order_drafts(event_type, payload) == []

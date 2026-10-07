@@ -32,7 +32,7 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import OrderRepo, decode_cursor, encode_cursor
-from ..db import OrderStatus
+from ..db import RATEABLE_STATUSES, OrderStatus
 from ..values import LineSnapshot, PlacementInput
 from .ports import (
     AddressNotFound,
@@ -50,6 +50,19 @@ log = get_logger("order.service")
 
 class OrderNotFound(Exception):
     pass
+
+
+class NotRateable(Exception):
+    """The order exists and is the caller's, but has not been delivered.
+
+    Separate from OrderNotFound on purpose: this one is safe to tell the
+    truth about, because the caller already owns the order. A customer who
+    rated too early deserves "not yet", not "no such order".
+    """
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(f"an order in {status} cannot be rated")
 
 
 class InvalidCursor(Exception):
@@ -335,6 +348,18 @@ class OrderService:
 
     # ── reads (S3) ─────────────────────────────────────────────────
 
+    async def feedback_for_restaurant(self, claim: str, *, limit: int = 200) -> list[Row[Any]]:
+        """The corpus FR-92 summarises, for one restaurant.
+
+        Unscoped by order, scoped hard by tenant. The caller is the
+        assistant acting as a service; the restaurant identity comes from
+        the admin's own claim and is checked here, in SQL, rather than
+        filtered afterwards.
+        """
+        assert self._sessions
+        async with self._sessions() as session:
+            return await OrderRepo(session).feedback_for_restaurant(claim=claim, limit=limit)
+
     async def recipients_of(self, order_id: str) -> Row[Any] | None:
         """Who to tell about this order — the unscoped system read behind
         `GET /v1/internal/orders/{id}/recipients` (ADR-0040). No ownership
@@ -343,6 +368,52 @@ class OrderService:
         assert self._sessions
         async with self._sessions() as session:
             return await OrderRepo(session).get_order_any(order_id)
+
+    async def submit_feedback(
+        self, *, user_id: str, order_id: str, rating: int, comment: str | None
+    ) -> None:
+        """Rate a delivered order (FR-91).
+
+        Two rules, both enforced here rather than at the edge:
+
+        **It must be yours.** The lookup is ownership-scoped, so another
+        customer's order id is indistinguishable from a made-up one — the
+        same 404 every read in this service gives.
+
+        **It must have arrived.** Rating food nobody has eaten is not
+        feedback, and a corpus containing it would make FR-92's summaries
+        describe something other than the meals. SETTLED counts: it is
+        DELIVERED plus money, and to the person who ate it they are the
+        same evening.
+        """
+        assert self._sessions
+        async with self._sessions() as session:
+            repo = OrderRepo(session)
+            order = await repo.get_order(user_id=user_id, order_id=order_id)
+            if order is None:
+                raise OrderNotFound
+            if order.status not in RATEABLE_STATUSES:
+                raise NotRateable(order.status)
+            await repo.upsert_feedback(
+                order_id=order_id,
+                user_id=user_id,
+                restaurant_id=order.restaurant_id,
+                brand_id=order.brand_id,
+                rating=rating,
+                comment=comment,
+                now=datetime.now(UTC),
+            )
+            await session.commit()
+
+    async def feedback_for(self, user_id: str, order_id: str) -> Row[Any] | None:
+        """The customer's own rating, so the page can show what they said
+        rather than offering to collect it twice."""
+        assert self._sessions
+        async with self._sessions() as session:
+            repo = OrderRepo(session)
+            if await repo.get_order(user_id=user_id, order_id=order_id) is None:
+                raise OrderNotFound
+            return await repo.get_feedback(order_id)
 
     async def get_order(self, user_id: str, order_id: str) -> dict[str, Any]:
         assert self._sessions

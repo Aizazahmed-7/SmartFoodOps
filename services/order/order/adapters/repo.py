@@ -14,7 +14,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import order_cancellations, order_items, orders, outbox
+from ..db import order_cancellations, order_feedback, order_items, orders, outbox
 
 
 def encode_cursor(placed_at: datetime, order_id: str) -> str:
@@ -232,3 +232,73 @@ class OrderRepo:
             payload=payload,
             now=now,
         )
+
+    # ── feedback (FR-91) ───────────────────────────────────────────
+
+    async def upsert_feedback(
+        self,
+        *,
+        order_id: str,
+        user_id: str,
+        restaurant_id: str,
+        brand_id: str | None,
+        rating: int,
+        comment: str | None,
+        now: datetime,
+    ) -> None:
+        """One row per order, rewritten if the customer changes their mind.
+
+        Upsert rather than insert-or-409: a retried submit and a corrected
+        rating are the same gesture to the person making it, and refusing
+        the second would teach them their first answer was final when the
+        schema says nothing of the kind.
+        """
+        values = {
+            "order_id": order_id,
+            "user_id": user_id,
+            "restaurant_id": restaurant_id,
+            "brand_id": brand_id,
+            "rating": rating,
+            "comment": comment,
+            "submitted_at": now,
+        }
+        insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
+        statement = insert(order_feedback).values(**values)
+        await self._s.execute(
+            statement.on_conflict_do_update(
+                index_elements=["order_id"],
+                set_={
+                    "rating": statement.excluded.rating,
+                    "comment": statement.excluded.comment,
+                    "submitted_at": statement.excluded.submitted_at,
+                },
+            )
+        )
+
+    async def get_feedback(self, order_id: str) -> Row[Any] | None:
+        result = await self._s.execute(
+            sa.select(order_feedback).where(order_feedback.c.order_id == order_id)
+        )
+        return result.one_or_none()
+
+    async def feedback_for_restaurant(self, *, claim: str, limit: int) -> list[Row[Any]]:
+        """One restaurant's own feedback, newest first (FR-92).
+
+        Scoped in the WHERE clause against BOTH columns: the claim may name
+        a brand or a branch (ADR-0028), and a summary that could read
+        another tenant's rows is the failure FR-92 calls unrepresentable.
+        There is no unscoped variant of this read to call by mistake.
+
+        Newest first and capped, with no cursor: the corpus a summary is
+        built from is the recent one, and paging it would mean summarising
+        a window nobody chose. A console that later wants older rows gets a
+        cursor then, tested then.
+        """
+        where = sa.or_(order_feedback.c.restaurant_id == claim, order_feedback.c.brand_id == claim)
+        result = await self._s.execute(
+            sa.select(order_feedback)
+            .where(where)
+            .order_by(order_feedback.c.submitted_at.desc(), order_feedback.c.order_id.desc())
+            .limit(limit)
+        )
+        return list(result.all())

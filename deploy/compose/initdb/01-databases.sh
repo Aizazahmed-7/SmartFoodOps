@@ -41,11 +41,34 @@ create_db notification_db notification_svc
 create_db analytics_db analytics_svc
 create_db assistant_db assistant_svc
 
-# NOTE: `CREATE EXTENSION vector` is deliberately NOT here yet. It needs an
-# image that ships pgvector, and the obvious one is a glibc downgrade this
-# volume rejects (see the postgres block in docker-compose.yml). B0 needs no
-# vectors; ADR-0032 picks the route in B1 and adds the pre-create here then,
-# exactly like pg_trgm above.
+# `vector` and `pg_trgm` both need superuser, exactly like pg_trgm for
+# catalog above: pre-create them here so the assistant's migrations
+# (CREATE EXTENSION IF NOT EXISTS) no-op as assistant_svc, which holds no
+# superuser rights and is not getting any. ADR-0032. The image that ships
+# pgvector is pinned to a TRIXIE-based tag — see the postgres block in
+# docker-compose.yml for why that suffix matters.
+#
+# pg_trgm is the hybrid retriever's fuzzy half (B2): the lexical leg lives
+# HERE rather than in catalog, because catalog's HybridSearch adapter calls
+# the assistant — calling back for the lexical leg would be a cycle.
+#
+# hnsw.iterative_scan is a CORRECTNESS setting, not a tuning one. pgvector
+# applies a WHERE clause as a POST-filter on the ANN walk, so under a
+# selective filter — a price band, a tag, one restaurant — a query silently
+# returns fewer rows than it asked for. Measured 2026-09-21 on 20k chunks
+# with a filter matching 400: LIMIT 10 returned EIGHT rows at the default,
+# and ten with iterative_scan on. `strict_order` because RRF fuses by rank,
+# so rows arriving out of distance order would feed the fusion a rank the
+# index never meant.
+#
+# Set here, as SUPERUSER, and not in a migration: until pgvector's library
+# is loaded these are PLACEHOLDER parameters, and Postgres requires
+# superuser to set a placeholder it cannot classify — the service role owns
+# the database and still gets "permission denied to set parameter".
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -d assistant_db \
+  -c "CREATE EXTENSION IF NOT EXISTS vector" \
+  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm" \
+  -c "ALTER DATABASE assistant_db SET hnsw.iterative_scan = strict_order"
 
 # Read-only role for Grafana's business dashboard (S7). SELECT and nothing
 # else: a dashboard is a guest in the database — it may look, never touch.

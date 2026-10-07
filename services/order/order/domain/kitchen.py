@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from smartfood_kafka import EventType
 from smartfood_otel import get_logger
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -165,12 +166,16 @@ class KitchenService:
 
     async def set_preparing(self, restaurant_id: str, order_id: str) -> OrderStatus:
         await self._owned(restaurant_id, order_id)
-        await self._move(order_id, expected="ACCEPTED", target="PREPARING")
+        await self._move(
+            order_id, expected="ACCEPTED", target="PREPARING", event=EventType.ORDER_PREPARING
+        )
         return "PREPARING"
 
     async def set_ready(self, restaurant_id: str, order_id: str) -> OrderStatus:
         await self._owned(restaurant_id, order_id)
-        await self._move(order_id, expected="PREPARING", target="READY")
+        await self._move(
+            order_id, expected="PREPARING", target="READY", event=EventType.ORDER_READY
+        )
         # Signal AFTER the commit, on fresh applies AND replays: a request
         # that moved the row but died before signalling heals on retry.
         try:
@@ -194,8 +199,17 @@ class KitchenService:
             raise OrderNotFound  # not-found and not-yours are the same 404
         return row
 
-    async def _move(self, order_id: str, *, expected: OrderStatus, target: OrderStatus) -> None:
+    async def _move(
+        self,
+        order_id: str,
+        *,
+        expected: OrderStatus,
+        target: OrderStatus,
+        event: EventType | None = None,
+    ) -> None:
         try:
-            await transition(self._sessions, order_id, expected=expected, target=target)
+            await transition(
+                self._sessions, order_id, expected=expected, target=target, event=event
+            )
         except IllegalTransition as exc:
             raise KitchenStateConflict(exc.actual) from None
