@@ -4,6 +4,7 @@ Adapters implement these against real infrastructure; tests substitute
 fakes; the domain layer stays free of httpx/redis imports.
 """
 
+from contextvars import ContextVar
 from typing import Any, Protocol
 
 
@@ -21,6 +22,23 @@ class GrantUnavailable(GrantError):
 
 class GrantsPort(Protocol):
     async def grant_restaurant_admin(self, *, user_id: str, restaurant_id: str) -> None: ...
+
+
+SEARCH_PATH: ContextVar[str] = ContextVar("search_path", default="lexical")
+"""Which `SearchPort` implementation answered THIS request.
+
+Lives here rather than on an adapter for two reasons. The layer contract
+forbids `api/` importing `adapters/`, and the route is what stamps the
+header — but more importantly a `ContextVar` is request-scoped where an
+attribute on the adapter is not: the adapter is built once at startup and
+shared by every concurrent request, so one request's fallback could
+overwrite another's value between the call and the route reading it.
+
+That matters because the eval suite refuses to score a response not stamped
+`hybrid`. A header that can report the wrong path would let the lexical
+fallback be graded as the retriever — the exact regression the stamp was
+added to prevent. Defaults to `lexical` so an unset value fails closed.
+"""
 
 
 class SearchPort(Protocol):

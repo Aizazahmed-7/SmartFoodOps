@@ -39,3 +39,22 @@ async def restaurant_metrics(
         # to — same shape as not-found, no existence leaks.
         raise ApiError(ErrorCode.NOT_FOUND, "no restaurant for this account", 404)
     return await _svc(request).restaurant_metrics(ctx.restaurant_id, days)
+
+
+@router.get("/v1/internal/analytics/ai")
+async def ai_metrics(ctx: SystemOnly, request: Request, days: Days = 7) -> dict[str, Any]:
+    """FR-95. Its own surface rather than more keys on `ops_metrics`: the
+    windows that make sense differ, and the FR-43 payload has dashboards
+    and tests shaped to it."""
+    return await _svc(request).ai_metrics(days)
+
+
+@router.get("/v1/restaurant/analytics/ai")
+async def restaurant_ai_metrics(
+    ctx: RestaurantAdmin, request: Request, days: Days = 14
+) -> dict[str, Any]:
+    """FR-98. Claim-scoped exactly like the FR-55 view above, and for the
+    same reason: there is no /{restaurant_id} to probe."""
+    if not ctx.restaurant_id:
+        raise ApiError(ErrorCode.NOT_FOUND, "no restaurant for this account", 404)
+    return await _svc(request).restaurant_ai_metrics(ctx.restaurant_id, days)

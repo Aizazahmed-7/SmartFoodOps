@@ -58,6 +58,11 @@ class OpenAiLlm:
         retry: RetryPolicy | None = None,
     ) -> None:
         self._key = api_key
+        # base_url carries the API version segment (OpenAI-SDK convention:
+        # `.../v1` for OpenAI, `.../v1beta/openai` for Gemini's compat shim),
+        # so this adapter appends only the operation. Hardcoding `/v1` here
+        # would lock out every OpenAI-compatible vendor whose version segment
+        # is spelled differently.
         self._base = base_url.rstrip("/")
         self._http = http
         self._retry = retry or RetryPolicy()
@@ -96,7 +101,7 @@ class OpenAiLlm:
         try:
             payload = await post_json(
                 self._http,
-                f"{self._base}/v1/chat/completions",
+                f"{self._base}/chat/completions",
                 headers=self._headers(),
                 body=self._body(model, messages, max_output_tokens, stream=False),
                 timeout_s=timeout_s,
@@ -127,7 +132,7 @@ class OpenAiLlm:
         try:
             response = await open_stream(
                 self._http,
-                f"{self._base}/v1/chat/completions",
+                f"{self._base}/chat/completions",
                 headers=self._headers(),
                 body=self._body(model, messages, max_output_tokens, stream=True),
                 timeout_s=timeout_s,

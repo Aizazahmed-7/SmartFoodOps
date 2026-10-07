@@ -4,12 +4,24 @@ import { expect, Page, test } from "@playwright/test";
 // Dispatch replaced the timer-courier: a sim rider must carry the food or
 // the story never reaches SETTLED. ONESHOT exits after one delivery; killed
 // either way when the suite ends.
+//
+// SPEED_MPS matches tools/demo/place-order.sh and for the same reason: the
+// seed moved to Islamabad, where the scattered start corners sit 2.5-6.3 km
+// from a restaurant. An honest 12 m/s scooter needs 3.5-9 minutes, which is
+// a fine simulation and longer than any assertion here should wait.
 let riderSim: ChildProcess | undefined;
 test.beforeAll(() => {
   riderSim = spawn(
     "uv",
-    ["run", "--package", "rider-sim", "python", "-m", "rider_sim.main"],
-    { cwd: "..", env: { ...process.env, RIDERS: "1", ONESHOT: "1" }, stdio: "ignore" },
+    ["run", "--package", "rider-sim", "python", "-u", "-m", "rider_sim.main"],
+    {
+      cwd: "..",
+      env: { ...process.env, RIDERS: "1", ONESHOT: "1", SPEED_MPS: "60" },
+      // Inherited, not ignored: when this story fails at the courier step
+      // the only question that matters is what the rider was doing, and a
+      // silenced simulator turns that into guesswork.
+      stdio: "inherit",
+    },
   );
 });
 test.afterAll(() => {
@@ -20,7 +32,7 @@ test.afterAll(() => {
  * owner of Biryani House. Fixture credentials, checked into the repo. */
 const CUSTOMER = { email: "customer@demo.smartfood.dev", password: "demo1234demo" };
 const OWNER = {
-  email: "owner-springfield-biryani-house@demo.smartfood.dev",
+  email: "owner-islamabad-biryani-house@demo.smartfood.dev",
   password: "demo1234demo",
 };
 
@@ -43,7 +55,15 @@ async function signIn(page: Page, who: { email: string; password: string }) {
  * cannot exist. */
 async function fillCart(page: Page) {
   await page.goto("/");
-  await page.getByText("Biryani House").click();
+  // City first, then the BRANCH — neither left to a default. The seed
+  // builds two cities and rider-sim's courier start corners are all in the
+  // Islamabad box, so an order at the Rawalpindi branch sits at READY
+  // forever: it is outside dispatch's 3 km offer radius and no courier is
+  // ever offered it. `getByText("Biryani House")` matched whichever branch
+  // card rendered first, and this story then spent its budget blaming the
+  // courier for a geography problem.
+  await page.getByRole("button", { name: "Islamabad" }).click();
+  await page.getByText("Biryani House — Main").click();
   await expect(page.getByRole("heading", { name: "Mutton Karahi" })).toBeVisible();
   // Retry the whole add-gesture until the STORE proves it landed: the
   // click may race hydration, and the item may or may not open an options
@@ -112,6 +132,14 @@ test("the two-window story: place, kitchen drives, courier delivers, settles", a
   // The saga reserves stock and clears payment without any human.
   await expect(cPage.getByText("CONFIRMED")).toBeVisible({ timeout: 30_000 });
 
+  // FR-83: the order page explains where the order is, from the resolver
+  // rather than from any copy in this app.
+  await expect(cPage.getByTestId("order-explanation")).toHaveAttribute(
+    "data-reason",
+    /awaiting_restaurant|kitchen_not_started|payment_in_progress/,
+    { timeout: 30_000 },
+  );
+
   // Window 2: the owner's kitchen feed. browser.newContext() inherits
   // NOTHING from the config's `use` block — baseURL must be restated or
   // every goto("/…") in this context misbehaves (a lesson this suite paid
@@ -131,9 +159,24 @@ test("the two-window story: place, kitchen drives, courier delivers, settles", a
   await card.getByRole("button", { name: "Start preparing" }).click();
   await card.getByRole("button", { name: "Food is ready" }).click({ timeout: 20_000 });
 
+  // The same order, a different stage, a different sentence — and the one
+  // fact an order status alone never conveys: the food is cooked and
+  // sitting there.
+  await expect(cPage.getByTestId("order-explanation")).toHaveAttribute(
+    "data-reason",
+    /awaiting_courier|courier_on_the_way|in_transit|delivered/,
+    { timeout: 40_000 },
+  );
+
   // Window 1 again: the simulated courier (20s + 30s timers) finishes the
   // job; capture and settlement follow with no further clicks anywhere.
   await expect(cPage.getByText(/DELIVERED|SETTLED/)).toBeVisible({ timeout: 90_000 });
+
+  // B6/FR-91: the order arrived, so it can now be rated. Part A captured
+  // no feedback at all, and this control is the entire corpus the
+  // restaurant's summaries will later be built from.
+  await cPage.getByTestId("rate-4").click();
+  await expect(cPage.getByText("Your rating")).toBeVisible({ timeout: 10_000 });
 
   await partner.close();
 });
@@ -146,8 +189,19 @@ test("the declined card becomes order state, never an error page", async ({ page
 
   // The 402 lives inside the saga: the order card reports the decline as a
   // lifecycle outcome with honest copy — not a toast, not a 500.
-  // exact: the tag reads "CANCELLED"; the banner CONTAINS "cancelled" too,
-  // and matching both is a strict-mode violation once both have rendered.
+  // exact: the tag reads "CANCELLED"; the explanation CONTAINS "cancelled"
+  // too, and matching both is a strict-mode violation once both rendered.
   await expect(page.getByText("CANCELLED", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText("your card was declined")).toBeVisible();
+
+  // FR-86 through the real stack. Asserted on the REASON, not the prose:
+  // this copy is server-owned and a model may rewrite its wording, so a
+  // substring assertion is an assertion about one sample. (It was
+  // "payment was declined"; a rewrite made it "payment was unfortunately
+  // declined" and the test failed while the system was correct.)
+  const explanation = page.getByTestId("order-explanation");
+  await expect(explanation).toHaveAttribute("data-reason", "cancelled_payment_declined", {
+    timeout: 30_000,
+  });
+  // The money sentence IS stable: it is substituted after any rewrite.
+  await expect(explanation).toContainText("won't be charged");
 });

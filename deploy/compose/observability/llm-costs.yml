@@ -1,0 +1,72 @@
+# The price table, and everything derived from it (NFR-25).
+#
+# Prices live HERE and nowhere else. Not in a panel expression, not in an
+# alert threshold, not in a dashboard variable — because the tripwire is a
+# Prometheus alert and an alert cannot read a Grafana variable. One file the
+# dashboard and the alert both join against is the only arrangement where
+# "what we charge ourselves" has a single editable source of truth.
+#
+# >>> THE PRICES BELOW ARE PLACEHOLDERS <<<
+# They are the right SHAPE and the wrong NUMBERS. Set each one from the
+# vendor's current published price list before trusting a cost panel, and
+# re-check when a model id changes — a model whose price is missing here
+# contributes ZERO to spend, which is the one failure mode of this design
+# and the reason `assistant:tokens_unpriced` below exists to catch it.
+groups:
+  - name: llm-prices
+    interval: 1m
+    rules:
+      # USD per 1,000,000 tokens, per model and direction. A constant
+      # recorded as a series: that is what makes it joinable.
+      #
+      # `vector(...)` and not a bare number, which is NOT a style choice. A
+      # recording rule whose expression yields a scalar records NOTHING, and
+      # reports health=ok while doing it — no error, no samples, and a cost
+      # dashboard that reads a confident zero. `vector()` lifts the constant
+      # into the instant vector a rule can actually store.
+      - record: llm:usd_per_1m_tokens
+        expr: vector(0.10)
+        labels: { model: "gemini-3.1-flash-lite", direction: "prompt" }
+      - record: llm:usd_per_1m_tokens
+        expr: vector(0.40)
+        labels: { model: "gemini-3.1-flash-lite", direction: "completion" }
+      - record: llm:usd_per_1m_tokens
+        expr: vector(0.10)
+        labels: { model: "gemini-flash-lite-latest", direction: "prompt" }
+      - record: llm:usd_per_1m_tokens
+        expr: vector(0.40)
+        labels: { model: "gemini-flash-lite-latest", direction: "completion" }
+
+  - name: llm-spend
+    interval: 1m
+    rules:
+      # Spend rate per model/direction. `group_left` on (model, direction)
+      # keeps a token series that has NO price row out of the result
+      # entirely — silently, which is why the unpriced counter below is not
+      # optional.
+      - record: assistant:spend_usd_per_second
+        expr: |
+          sum by (model, direction) (rate(assistant_tokens_total[10m]))
+            * on (model, direction) group_left llm:usd_per_1m_tokens
+            / 1e6
+
+      # Tokens being billed by a vendor that this table cannot price. An
+      # unpriced model does not make the cost line wrong-ish, it makes it
+      # CONFIDENTLY LOW — the panel keeps rendering a number and quietly
+      # stops counting a whole model. `unless` is the whole trick.
+      - record: assistant:tokens_unpriced_per_second
+        expr: |
+          sum by (model, direction) (rate(assistant_tokens_total[10m]))
+            unless on (model, direction) llm:usd_per_1m_tokens
+
+      - record: assistant:spend_usd_per_hour
+        expr: sum(assistant:spend_usd_per_second) * 3600
+
+      # The NFR-25 line: AI plane cost per order placed. Orders is the
+      # denominator rather than turns on purpose — the question a business
+      # asks is what the assistant costs per unit of the thing that makes
+      # money, and a cost-per-turn improves simply by having fewer turns.
+      - record: assistant:usd_per_order
+        expr: |
+          sum(assistant:spend_usd_per_second)
+            / sum(rate(order_placement_seconds_count{outcome="placed"}[10m]))

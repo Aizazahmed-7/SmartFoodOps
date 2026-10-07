@@ -30,8 +30,12 @@ from .motion import meters_between, step_toward
 PASSWORD = "demo1234demo"
 ARRIVE_M = 40.0  # close enough to tap — half a street on the toy map
 
-# Scattered start corners inside the Springfield box (seed's CITY_BOXES).
-START_SPOTS = [(39.7855, -89.6655), (39.8145, -89.6345), (39.7860, -89.6350)]
+# Scattered start corners inside the ISLAMABAD box (seed's CITY_BOXES).
+# They must sit in the same city the seed builds, or every courier is
+# thousands of kilometres from every restaurant, dispatch's 3 km offer
+# radius never matches, and an order sits at READY forever — which is
+# exactly what happened when the seed moved to Pakistan and this did not.
+START_SPOTS = [(33.6935, 73.0335), (33.7265, 73.0645), (33.6940, 73.0650)]
 
 
 @dataclass

@@ -11,10 +11,15 @@
  */
 import type { ReactNode } from "react";
 
-// MUST mirror tools/seed/seed/main.py CITY_BOXES first box — the FE shows
-// it as Rawalpindi (src/cities.ts); coordinates are the contract, the city
-// NAME is display-level only.
-export const CITY = { south: 39.78, west: -89.67, north: 39.82, east: -89.63 };
+// MUST mirror tools/seed/seed/main.py CITY_BOXES first box — Islamabad's
+// F-sectors (src/cities.ts lists it first for the same reason). Coordinates
+// are the contract; the city NAME is display-level only.
+//
+// This lagged the seed's move to Pakistan and nothing caught it, because
+// `project()` has no valid range — an out-of-box point returns a huge
+// number instead of an error, so every pin rendered silently off-canvas and
+// the courier map was an empty street grid for every order.
+export const CITY = { south: 33.69, west: 73.03, north: 33.73, east: 73.067 };
 
 const LAT_SPAN = CITY.north - CITY.south;
 const LON_SPAN = CITY.east - CITY.west;

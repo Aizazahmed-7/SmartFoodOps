@@ -131,6 +131,10 @@ Live today:
 | GET `/v1/notifications` | auth | – | READ | notification | keyset cursor + unread count |
 | POST `/v1/notifications/{id}/read` | auth | – | WRITE | notification | ownership is the WHERE clause; not-yours = 404 |
 | POST `/v1/notifications/read-all` | auth | – | WRITE | notification | naturally idempotent — re-POST is safe |
+| POST `/v1/assistant/messages` | auth (customer or restaurant_admin) | optional — a retry streams the turn already running (FR-67), never a second generation | WRITE | ai-assistant | **202, not 200**: the turn runs detached and the answer does not exist yet. Body carries `message_id`, a single-use `ticket`, and the `/sse/assistant/{id}` path |
+| POST `/v1/assistant/messages/{id}/ticket` | auth (customer or restaurant_admin) | – | WRITE | ai-assistant | A fresh ticket for a stream in flight. Without it `EventSource` cannot resume at all — its own reconnect reuses the spent ticket. Not-yours and not-found are both 404 |
+| GET `/v1/assistant/messages/{id}/items` | auth (customer or restaurant_admin) | – | READ | ai-assistant | The dishes the answer cited, priced NOW through catalog's snapshot (FR-60). Separate from the stream: the prose is final, the price is not |
+| GET `/sse/assistant/{id}` | **ticket** (not JWT) | – | READ | ai-assistant | Bypasses the edge, like `/sse/track/`. `EventSource` cannot set headers and a JWT in a query string soaks into access logs, so the single-use ticket is the auth. Resumes from `Last-Event-ID` or `?after=` |
 
 Route-table prefixes already wired in `edge_bff/routing.py` but whose upstream endpoints are not yet built: `/v1/restaurants`, `/v1/menus` (catalog, public_read), `/v1/inventory` (auth), `/v1/orders`, `/v1/quote` (order, auth).
 
