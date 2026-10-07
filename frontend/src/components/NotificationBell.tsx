@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "react-router-dom";
 import { getNotifyTicket, listNotifications, markAllNotificationsRead, markNotificationRead } from "../api/client";
 import type { NotificationRow } from "../api/types";
-import { useAuth } from "../state/auth";
+import { useAuth, hasRole } from "../state/auth";
 
 export default function NotificationBell() {
   const { claims } = useAuth();
@@ -89,7 +89,7 @@ export default function NotificationBell() {
 
   const openItem = (n: NotificationRow) => {
     if (!n.read_at) markRead.mutate(n.id);
-    navigate(claims?.role === "restaurant_admin" ? "/partner/dashboard" : `/orders/${n.order_id}`);
+    navigate(hasRole(claims, "restaurant_admin") ? "/partner/dashboard" : `/orders/${n.order_id}`);
     setOpen(false);
   };
 

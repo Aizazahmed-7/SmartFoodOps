@@ -76,16 +76,23 @@ class Canary:
                 if i.get("available", True)
                 and not any(g.get("min_select", 0) > 0 for g in i.get("modifier_groups", []))
             )
+            lines = [{"item_id": item, "qty": 1}]
+            # Quote, then consent to the quoted total (ADR-0036). The canary
+            # exercises the real client sequence on purpose — a synthetic
+            # placement that skipped the quote would not catch a break in it.
+            quote = await self._json(
+                "POST", "/v1/quote", headers=auth, json={"restaurant_id": rid, "lines": lines}
+            )
             placed = await self._json(
                 "POST",
                 "/v1/orders",
                 headers={**auth, "Idempotency-Key": f"canary-{uuid.uuid4().hex}"},
                 json={
                     "restaurant_id": rid,
-                    "menu_version": menu["version"],
+                    "expected_total_cents": quote["totals"]["total_cents"],
                     "address_id": address,
                     "card_token": "tok_ok",
-                    "lines": [{"item_id": item, "qty": 1}],
+                    "lines": lines,
                 },
             )
             order_id = placed["order_id"]

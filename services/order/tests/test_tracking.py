@@ -12,8 +12,8 @@ from order.config import Settings
 from order.main import create_app
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
-STRANGER = headers_for(AuthContext(sub="usr_2", role="customer"))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
+STRANGER = headers_for(AuthContext(sub="usr_2", roles=frozenset({"customer"})))
 
 
 class FakeTracking:
@@ -89,10 +89,7 @@ async def _seed(app, order_id="ord_t1", user="usr_1", status="CONFIRMED"):
                     restaurant_id="rst_1",
                     restaurant_name_snapshot="Biryani House",
                     status=status,
-                    aggregate_version=3,
                     payment_method="CARD",
-                    card_token="tok_ok",
-                    menu_version=1,
                     pricing_snapshot={"currency": "USD", "total_cents": 1000},
                     delivery_address_snapshot={},
                     request_hash="h",
@@ -246,10 +243,7 @@ async def test_transition_publishes_after_commit():
                     restaurant_id="r",
                     restaurant_name_snapshot="n",
                     status="PLACED",
-                    aggregate_version=0,
                     payment_method="CARD",
-                    card_token="t",
-                    menu_version=1,
                     pricing_snapshot={},
                     delivery_address_snapshot={},
                     request_hash="h",

@@ -5,11 +5,13 @@ from smartfood_auth import AuthContext, headers_for
 
 def admin(restaurant_id: str) -> dict[str, str]:
     return headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=restaurant_id)
+        AuthContext(
+            sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=restaurant_id
+        )
     )
 
 
-SYSTEM = headers_for(AuthContext(sub="svc:order-worker", role="system"))
+SYSTEM = headers_for(AuthContext(sub="svc:order-worker", roles=frozenset({"system"})))
 
 
 def test_set_stock_creates_then_updates(client):
@@ -19,15 +21,15 @@ def test_set_stock_creates_then_updates(client):
         headers=admin("rst_1"),
     )
     assert r.status_code == 200
-    assert r.json() == {"item_id": "itm_a", "available": 40, "version": 0}
+    assert r.json() == {"item_id": "itm_a", "available": 40}
 
     r = client.put(
         "/v1/inventory/restaurants/rst_1/stock/itm_a",
         json={"available": 15},
         headers=admin("rst_1"),
     )
-    assert r.json()["available"] == 15
-    assert r.json()["version"] == 1  # update path bumps
+    # The update path, not a second insert: same row, new count.
+    assert r.json() == {"item_id": "itm_a", "available": 15}
 
 
 def test_list_stock_scoped_and_ordered(client):
@@ -75,7 +77,7 @@ def test_same_item_id_keeps_independent_rows_per_branch(client):
         headers=SYSTEM,
     )
     assert r.status_code == 200
-    assert r.json() == {"item_id": "itm_a", "available": 1, "version": 0}
+    assert r.json() == {"item_id": "itm_a", "available": 1}
     # and the original branch's row is untouched
     rows = client.get("/v1/inventory/restaurants/rst_1/stock", headers=admin("rst_1")).json()
     assert rows["items"][0]["available"] == 9
@@ -90,7 +92,7 @@ def test_stock_bounds_and_role_gate(client):
         ).status_code
         == 422
     )
-    customer = {"X-Auth-Sub": "usr_c", "X-Auth-Role": "customer"}
+    customer = {"X-Auth-Sub": "usr_c", "X-Auth-Roles": "customer"}
     assert (
         client.put(
             "/v1/inventory/restaurants/rst_1/stock/itm_a",

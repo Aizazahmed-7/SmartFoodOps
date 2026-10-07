@@ -20,14 +20,13 @@ from smartfood_kafka import EventType
 class Draft:
     recipient_type: Literal["customer", "restaurant"]
     recipient_id: str
-    kind: str
     title: str
     body: str
 
 
 # The payment events that mint anything at all. The consumer checks this
-# BEFORE the recipients-projection lookup, so a no-op PaymentAuthorized/
-# PaymentCaptured can never trip a spurious ProjectionLag.
+# BEFORE starting a workflow, so a no-op PaymentAuthorized/PaymentCaptured
+# never costs a Temporal execution (ADR-0040).
 NOTIFYING_PAYMENT_EVENTS = frozenset({EventType.REFUND_PROCESSED})
 
 
@@ -78,14 +77,12 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
             Draft(
                 "restaurant",
                 restaurant_id,
-                "order_confirmed",
                 "New order to accept",
                 f"{items}, {total} — accept or reject before the timer cancels it.",
             ),
             Draft(
                 "customer",
                 user_id,
-                "order_confirmed",
                 "Order confirmed",
                 f"{name} has been notified and should accept shortly.",
             ),
@@ -94,14 +91,13 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
     if event_type == EventType.ORDER_CANCELLED:
         reason = payload.get("cancel_reason") or ""
         body = _CANCEL_BODIES.get(reason, _CANCEL_FALLBACK).format(name=name)
-        drafts = [Draft("customer", user_id, "order_cancelled", "Order cancelled", body)]
+        drafts = [Draft("customer", user_id, "Order cancelled", body)]
         if reason == "customer_cancelled":
             # The kitchen only hears about cancels it could be cooking for.
             drafts.append(
                 Draft(
                     "restaurant",
                     restaurant_id,
-                    "order_cancelled",
                     "Order cancelled by the customer",
                     "Stop preparing it — the slot and stock are released.",
                 )
@@ -113,7 +109,6 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
                 Draft(
                     "restaurant",
                     restaurant_id,
-                    "order_cancelled",
                     "No rider available",
                     "We couldn't find a courier in time — the order was cancelled "
                     "and the slot released.",
@@ -126,7 +121,6 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
             Draft(
                 "customer",
                 user_id,
-                "order_delivered",
                 "Order delivered",
                 f"Your order from {name} has arrived — enjoy!",
             )
@@ -136,15 +130,16 @@ def order_drafts(event_type: str, payload: dict[str, Any]) -> list[Draft]:
 
 
 def payment_drafts(event_type: str, payload: dict[str, Any], *, user_id: str) -> list[Draft]:
-    """Payment payloads have no user_id (keyed by order) — the caller joins
-    it in via the order_recipients projection."""
+    """Payment payloads have no user_id (keyed by order). The caller is
+    RefundNotificationWorkflow's write activity, which has just resolved it
+    from order (ADR-0040) — the copy still lives here with every other
+    notification's."""
     if event_type == EventType.REFUND_PROCESSED:
         total = money(payload["amount_cents"], payload["currency"])
         return [
             Draft(
                 "customer",
                 user_id,
-                "refund_processed",
                 "Refund on its way",
                 f"{total} is heading back to your card.",
             )

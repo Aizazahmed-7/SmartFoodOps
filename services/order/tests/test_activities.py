@@ -7,7 +7,7 @@ import pytest
 import sqlalchemy as sa
 from order.activities import OrderActivities
 from order.adapters.repo import OrderRepo
-from order.db import metadata, order_items, orders, outbox
+from order.db import metadata, order_cancellations, order_items, orders, outbox
 from order.domain.ports import PaymentStateConflict
 from order.domain.transitions import transition
 from order.values import (
@@ -77,9 +77,7 @@ async def _setup():
             user_id="usr_1",
             restaurant_id="rst_1",
             restaurant_name="Biryani House",
-            card_token="tok_ok",
             request_hash="hash-of-K-1",
-            menu_version=3,
             pricing_snapshot={
                 "subtotal_cents": 3000,
                 "discount_cents": 0,
@@ -117,7 +115,7 @@ def _price():
         restaurant_id="rst_1",
         amount_cents=3446,
         currency="USD",
-        card_token="tok_ok",
+        card_token="tok_ok",  # the live path: workflow input → Payment
         lines=[LineSpec(item_id="itm_a", qty=2)],
     )
 
@@ -129,9 +127,8 @@ def _placement(order_id="ord_2", key="K-2"):
         user_id="usr_1",
         restaurant_id="rst_1",
         restaurant_name="Biryani House",
-        card_token="tok_ok",
-        menu_version=3,
         currency="USD",
+        card_token="tok_ok",
         amount_cents=3446,
         placed_at=datetime.now(UTC).isoformat(),
         lines=[
@@ -163,7 +160,7 @@ async def test_create_order_writes_the_row_lines_and_event():
             await s.execute(sa.select(order_items).where(order_items.c.order_id == "ord_2"))
         ).all()
         event = (await s.execute(sa.select(outbox).where(outbox.c.aggregate_id == "ord_2"))).one()
-    assert (order.status, order.aggregate_version) == ("PLACED", 0)
+    assert order.status == "PLACED"
     assert order.restaurant_name_snapshot == "Biryani House"
     assert order.request_hash == "hash-of-K-2"  # the body this order answers for
     assert len(items) == 1 and items[0].name_snapshot == "Chicken Biryani"
@@ -194,6 +191,9 @@ async def test_create_order_run_twice_makes_exactly_one_order():
                 .where(outbox.c.aggregate_id == "ord_2")
             )
         ).scalar_one()
+    # Load-bearing since ADR-0035: event ids are random, so a second
+    # OrderPlaced would NOT collide on the outbox PK. The orders PK inside
+    # _insert_placement is the entire guard — this is what proves it.
     assert (count, events) == (1, 1)  # one order, one OrderPlaced fact
 
 
@@ -258,7 +258,7 @@ async def test_full_cancel_path_writes_reason_and_event():
     async with sessions() as s:
         # the reason lands at BEGIN — the CANCELLING window must already
         # carry it (the kitchen's decision matrix classifies from it)
-        mid = (await s.execute(sa.select(orders.c.cancel_reason))).scalar_one()
+        mid = (await s.execute(sa.select(order_cancellations.c.reason))).scalar_one()
     assert mid == "payment_declined"
     await acts.void_authorization("ord_1")
     await acts.release_reservation("ord_1")
@@ -267,7 +267,7 @@ async def test_full_cancel_path_writes_reason_and_event():
     assert ("void", "ord_1") in payment.calls
     assert ("release", "ord_1", "cancelled") in inventory.calls
     async with sessions() as s:
-        row = (await s.execute(sa.select(orders.c.cancel_reason))).scalar_one()
+        row = (await s.execute(sa.select(order_cancellations.c.reason))).scalar_one()
         types = [e.event_type for e in (await s.execute(sa.select(outbox))).all()]
     assert row == "payment_declined"
     assert EventType.ORDER_CANCELLED in types
@@ -280,6 +280,12 @@ async def test_mark_accepted_from_confirmed():
     await acts.confirm_order("ord_1")
     await acts.mark_accepted("ord_1")
     assert await _status(sessions) == "ACCEPTED"
+    async with sessions() as s:
+        types = [e.event_type for e in (await s.execute(sa.select(outbox))).all()]
+    # FR-81: the saga's own accept now announces itself. Without this the
+    # explanation engine cannot tell "the restaurant never accepted" from
+    # "the restaurant accepted and the kitchen has not started".
+    assert EventType.ORDER_ACCEPTED in types
 
 
 async def _to_ready(acts, sessions):
@@ -302,6 +308,7 @@ async def test_pickup_and_delivered_stage_the_delivery_event():
     assert await _status(sessions) == "DELIVERED"
     async with sessions() as s:
         types = [e.event_type for e in (await s.execute(sa.select(outbox))).all()]
+    assert EventType.ORDER_PICKED_UP in types  # FR-81
     assert EventType.ORDER_DELIVERED in types
 
 
@@ -365,7 +372,7 @@ async def test_try_begin_cancel_wins_from_kitchen_states_and_stamps_reason():
     assert await acts.try_begin_cancel("ord_1", CancelReason.CUSTOMER_CANCELLED) == "ok"
     assert await _status(sessions) == "CANCELLING"
     async with sessions() as s:
-        reason = (await s.execute(sa.select(orders.c.cancel_reason))).scalar_one()
+        reason = (await s.execute(sa.select(order_cancellations.c.reason))).scalar_one()
     assert reason == "customer_cancelled"
     # at-least-once replay: still "ok", no error
     assert await acts.try_begin_cancel("ord_1", CancelReason.CUSTOMER_CANCELLED) == "ok"

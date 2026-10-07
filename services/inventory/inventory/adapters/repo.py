@@ -55,8 +55,8 @@ class InventoryRepo:
         result = await self._s.execute(
             stock.update()
             .where((stock.c.item_id == item_id) & (stock.c.restaurant_id == restaurant_id))
-            .values(available=available, version=stock.c.version + 1, updated_at=now)
-            .returning(stock.c.available, stock.c.version)
+            .values(available=available, updated_at=now)
+            .returning(stock.c.available)
         )
         return result.one_or_none()
 
@@ -74,7 +74,6 @@ class InventoryRepo:
                     "item_id": item_id,
                     "restaurant_id": restaurant_id,
                     "available": available,
-                    "version": 0,
                     "updated_at": now,
                 },
                 # Composite key (ADR-0028): the same base item_id legitimately
@@ -94,7 +93,7 @@ class InventoryRepo:
                 & (stock.c.restaurant_id == restaurant_id)
                 & (stock.c.available >= qty)
             )
-            .values(available=stock.c.available - qty, version=stock.c.version + 1)
+            .values(available=stock.c.available - qty)
         )
         return cast(CursorResult[Any], result).rowcount == 1
 
@@ -102,7 +101,7 @@ class InventoryRepo:
         result = await self._s.execute(
             stock.update()
             .where((stock.c.item_id == item_id) & (stock.c.restaurant_id == restaurant_id))
-            .values(available=stock.c.available + qty, version=stock.c.version + 1)
+            .values(available=stock.c.available + qty)
         )
         return cast(CursorResult[Any], result).rowcount == 1
 
@@ -119,7 +118,7 @@ class InventoryRepo:
         result = await self._s.execute(
             _insert_ignoring_conflict(
                 restaurant_load,
-                {"restaurant_id": restaurant_id, "active": 0, "capacity": capacity, "version": 0},
+                {"restaurant_id": restaurant_id, "active": 0, "capacity": capacity},
                 ["restaurant_id"],
                 self._s.bind.dialect.name if self._s.bind is not None else "sqlite",
             )
@@ -130,7 +129,7 @@ class InventoryRepo:
         result = await self._s.execute(
             restaurant_load.update()
             .where(restaurant_load.c.restaurant_id == restaurant_id)
-            .values(capacity=capacity, version=restaurant_load.c.version + 1)
+            .values(capacity=capacity)
         )
         return cast(CursorResult[Any], result).rowcount == 1
 
@@ -179,7 +178,6 @@ class InventoryRepo:
                 restaurant_id=restaurant_id,
                 lines=lines,
                 status="active",
-                version=0,
                 created_at=now,
                 expires_at=expires_at,
             )
@@ -192,8 +190,8 @@ class InventoryRepo:
         result = await self._s.execute(
             reservations.update()
             .where((reservations.c.order_id == order_id) & (reservations.c.status == "active"))
-            .values(status=target_status, version=reservations.c.version + 1)
-            .returning(reservations.c.restaurant_id, reservations.c.lines, reservations.c.version)
+            .values(status=target_status)
+            .returning(reservations.c.restaurant_id, reservations.c.lines)
         )
         return result.one_or_none()
 
@@ -213,7 +211,6 @@ class InventoryRepo:
         *,
         aggregate_type: str,
         aggregate_id: str,
-        version: int,
         event_type: str,
         payload: dict[str, Any],
         now: datetime,
@@ -223,7 +220,6 @@ class InventoryRepo:
             outbox,
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
-            version=version,
             event_type=event_type,
             payload=payload,
             now=now,

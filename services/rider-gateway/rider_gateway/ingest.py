@@ -94,7 +94,6 @@ class LocationIngest:
                     "event_type": str(EventType.RIDER_LOCATION),
                     "aggregate_type": "rider",
                     "aggregate_id": rider_id,
-                    "aggregate_version": 0,
                     "occurred_at": now,
                     "cell_id": self._cell,
                     "payload": json.dumps(

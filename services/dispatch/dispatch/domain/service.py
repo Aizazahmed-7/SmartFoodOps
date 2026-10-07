@@ -348,6 +348,30 @@ class DispatchService:
             "dropoff": {"lat": row.get("dropoff_lat"), "lon": row.get("dropoff_lon")},
         }
 
+    async def delivery_state(self, order_id: str) -> dict[str, Any] | None:
+        """The delivery's state and when the courier took it (FR-83).
+
+        Unscoped, unlike `courier_position`: the caller is the explanation
+        engine acting as a service, and it has already established that the
+        asker owns the order against Order's own record. A second ownership
+        clause here would need the customer's identity passed in, which is
+        how a system read starts quietly becoming a user read.
+
+        `assigned_at` is the fact worth exposing. `pickup_timeout_s` runs
+        from the assignment, so without it the resolver has an elapsed time
+        and no deadline, and would either stay silent or blame a courier
+        for the minutes before they were offered the job.
+        """
+        row = await asyncio.to_thread(self._deliveries.get, order_id)
+        if row is None:
+            return None
+        return {
+            "order_id": order_id,
+            "state": str(row.get("state")),
+            "assigned_at": row.get("assigned_at"),
+            "picked_up_at": row.get("picked_up_at"),
+        }
+
     # ── plumbing ───────────────────────────────────────────────────
 
     async def _push(self, rider_id: str, frame: dict[str, Any]) -> None:

@@ -17,7 +17,9 @@ from .test_consumer import StockProvisioningHandler, _catalog_event, _service
 
 def _admin(restaurant_id: str) -> dict[str, str]:
     return headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id=restaurant_id)
+        AuthContext(
+            sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id=restaurant_id
+        )
     )
 
 
@@ -73,7 +75,7 @@ async def test_set_stock_lost_insert_race_takes_the_update_path(monkeypatch):
 
     monkeypatch.setattr(InventoryRepo, "insert_stock", racing_insert)
     row = await svc.set_stock("rst_1", "itm_a", 7)
-    assert (row.available, row.version) == (7, 1)  # loser's UPDATE over the winner's 99
+    assert row.available == 7  # the loser's UPDATE landed over the winner's 99
 
 
 # ── the branch→brand lookup adapter ────────────────────────────────

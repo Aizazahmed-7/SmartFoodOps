@@ -13,14 +13,16 @@ class Restaurant:
     id: str
     owner_user_id: str
     name: str
-    city: str
     cuisines: list[str]
-    status: str  # open | paused
     lat: float | None
     lon: float | None
     hours: dict[str, Any] | None
-    timezone: str
-    version: int
+    # None on a BRAND, always set on a branch: these live on branch_metadata
+    # since 0009, and a brand has no row there. A brand is a menu template,
+    # not a place — it has no address, no schedule and nothing to pause.
+    city: str | None
+    status: str | None  # open | paused
+    timezone: str | None
     kind: str = "branch"  # brand | branch (ADR-0028)
     brand_id: str | None = None  # parent brand for branches; None for brands
     branch_label: str | None = None  # "Downtown" — unique within the brand

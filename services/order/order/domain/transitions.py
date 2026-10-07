@@ -10,8 +10,10 @@ anything else → IllegalTransition, which is non-retryable by definition —
 retrying an illegal move can never make it legal.
 
 Event staging joins the SAME transaction (invariant 1): the announcement
-commits with the state change or not at all, and the event id is derived
-from the post-bump aggregate_version (deterministic identity).
+commits with the state change or not at all. The event id used to be derived
+from the post-bump aggregate_version; ids are random now (ADR-0035) and the
+outbox carries no version at all (ADR-0038). The bump survives here only as
+`orders.aggregate_version`, which the payload still reports.
 """
 
 from dataclasses import dataclass
@@ -37,7 +39,39 @@ class IllegalTransition(Exception):
 @dataclass(frozen=True)
 class TransitionResult:
     applied: bool  # False = idempotent replay (already at target)
-    version: int
+
+
+MILESTONES: dict[str, str] = {
+    "PAYMENT_CLEARED": "payment_cleared_at",
+    "CONFIRMED": "confirmed_at",
+    "ACCEPTED": "accepted_at",
+    "PREPARING": "preparing_at",
+    "READY": "ready_at",
+    "PICKED_UP": "picked_up_at",
+}
+"""target status → the column that remembers when it was reached (FR-81).
+
+Stamped inside the guarded UPDATE and nowhere else, which is the whole
+reason it can be trusted: `WHERE status = :expected` means a replayed or
+raced transition matches 0 rows, so the stamp cannot be overwritten by a
+redelivery arriving minutes later. A milestone is a FACT about a moment, and
+the only code allowed to write it is the code that caused the moment.
+
+PAYMENT_CLEARED earns one because it is the moment money starts existing:
+`authorize_payment` moves VALIDATED -> PAYMENT_CLEARED only on a successful
+authorization, so this stamp IS the evidence that a card hold exists. An
+explanation that tells a cancelled customer whether they were charged has
+to read this and not `confirmed_at`, which is one transition too late.
+
+CONFIRMED earns one for a specific reason: `accept_timeout_s` runs from it,
+so it is the start of the only budgeted window before the kitchen. Timing
+that window from `placed_at` instead would charge the restaurant for the
+saga's reserve-and-authorize round trip.
+
+Statuses absent here have no column on purpose. PLACED already has
+`placed_at`; the terminal moves (DELIVERED, SETTLED, CANCELLED) announce
+themselves as events that carry `occurred_at`, so a consumer can time them
+without the row growing a column per state."""
 
 
 def _now() -> datetime:
@@ -56,45 +90,44 @@ async def transition(
     """One guarded move, one transaction, optionally one event."""
     now = _now()
     async with sessions() as session:
-        values: dict[str, Any] = {
-            "status": target,
-            "aggregate_version": orders.c.aggregate_version + 1,
-            "updated_at": now,
-        }
-        if cancel_reason is not None:
-            values["cancel_reason"] = cancel_reason
+        values: dict[str, Any] = {"status": target, "updated_at": now}
+        milestone = MILESTONES.get(target)
+        if milestone is not None:
+            values[milestone] = now
         result = await session.execute(
             orders.update()
             .where((orders.c.order_id == order_id) & (orders.c.status == expected))
             .values(**values)
-            .returning(orders.c.aggregate_version)
+            .returning(orders.c.order_id)
         )
         row = result.one_or_none()
         if row is None:
             # 0 rows is ambiguous — re-read to disambiguate.
             current = (
                 await session.execute(
-                    sa.select(orders.c.status, orders.c.aggregate_version).where(
-                        orders.c.order_id == order_id
-                    )
+                    sa.select(orders.c.status).where(orders.c.order_id == order_id)
                 )
             ).one_or_none()
             if current is not None and current.status == target:
-                return TransitionResult(applied=False, version=current.aggregate_version)
+                return TransitionResult(applied=False)
             actual = current.status if current is not None else "absent"
             raise IllegalTransition(order_id, expected, target, actual)
 
-        version = cast(int, row.aggregate_version)
+        if cancel_reason is not None:
+            # Same transaction as the status move: a CANCELLING row without
+            # its reason would leave the kitchen's decision matrix unable to
+            # classify replies during the unwind.
+            await OrderRepo(session).record_cancellation(order_id, cancel_reason, now)
         if event is not None:
-            payload = await _full_state(session, order_id, target, version, now, cancel_reason)
+            payload = await _full_state(session, order_id, target, now, cancel_reason)
             await OrderRepo(session).stage_event(
-                order_id=order_id, version=version, event_type=event, payload=payload, now=now
+                order_id=order_id, event_type=event, payload=payload, now=now
             )
         await session.commit()
     # Post-commit on purpose: the stream hint must never describe a write
     # that rolled back, and its failure must never undo one that landed.
     await tracking.publish_status(order_id, target)
-    return TransitionResult(applied=True, version=version)
+    return TransitionResult(applied=True)
 
 
 async def record_rider(
@@ -143,19 +176,17 @@ async def begin_cancel_from(
     (fresh apply, or an at-least-once replay finding it there — only this
     order's own workflow ever writes CANCELLING, so a replay is always
     ours); False = the courier won the race, cancellation refused."""
+    now = _now()
     async with sessions() as session:
         result = await session.execute(
             orders.update()
             .where((orders.c.order_id == order_id) & (orders.c.status.in_(allowed)))
-            .values(
-                status="CANCELLING",
-                cancel_reason=reason,
-                aggregate_version=orders.c.aggregate_version + 1,
-                updated_at=_now(),
-            )
-            .returning(orders.c.aggregate_version)
+            .values(status="CANCELLING", updated_at=now)
+            .returning(orders.c.order_id)
         )
         applied = result.one_or_none() is not None
+        if applied:
+            await OrderRepo(session).record_cancellation(order_id, reason, now)
         await session.commit()
         if applied:
             await tracking.publish_status(order_id, "CANCELLING")
@@ -170,7 +201,6 @@ async def _full_state(
     session: AsyncSession,
     order_id: str,
     status: OrderStatus,
-    version: int,
     now: datetime,
     cancel_reason: str | None,
 ) -> dict[str, Any]:
@@ -191,8 +221,6 @@ async def _full_state(
         "brand_id": order.brand_id,
         "restaurant_name": order.restaurant_name_snapshot,
         "status": status,
-        "aggregate_version": version,
-        "menu_version": order.menu_version,
         "items": [
             {
                 "menu_item_id": item.menu_item_id,
@@ -207,5 +235,19 @@ async def _full_state(
         "delivery_address": order.delivery_address_snapshot,
         "cancel_reason": cancel_reason,
         "rider_id": order.rider_id,
+        # The whole timeline, not just this moment (FR-81). Full-state means
+        # full state: a consumer that joins the stream at OrderReady must be
+        # able to tell how long the kitchen took without replaying from the
+        # beginning of the topic. The row was re-read AFTER the UPDATE in
+        # this same transaction, so the milestone this event announces is
+        # already among these.
+        "milestones": {
+            column: _iso(getattr(order, column, None)) for column in MILESTONES.values()
+        },
+        "placed_at": order.placed_at.isoformat(),
         "occurred_at": now.isoformat(),
     }
+
+
+def _iso(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()

@@ -105,9 +105,7 @@ class OrderActivities:
                     restaurant_id=placement.restaurant_id,
                     brand_id=placement.brand_id,
                     restaurant_name=placement.restaurant_name,
-                    card_token=placement.card_token,
                     request_hash=placement.request_hash,
-                    menu_version=placement.menu_version,
                     pricing_snapshot=placement.pricing_snapshot,
                     address_snapshot=placement.address_snapshot,
                     lines=lines,
@@ -115,7 +113,6 @@ class OrderActivities:
                 )
                 await repo.stage_event(
                     order_id=placement.order_id,
-                    version=0,
                     event_type=EventType.ORDER_PLACED,
                     payload={
                         "order_id": placement.order_id,
@@ -124,7 +121,6 @@ class OrderActivities:
                         "brand_id": placement.brand_id,
                         "restaurant_name": placement.restaurant_name,
                         "status": "PLACED",
-                        "menu_version": placement.menu_version,
                         "items": lines,
                         "totals": placement.pricing_snapshot,
                         "delivery_address": placement.address_snapshot,
@@ -180,13 +176,17 @@ class OrderActivities:
 
     @activity.defn(name=ActivityName.MARK_ACCEPTED)
     async def mark_accepted(self, order_id: str) -> None:
-        await self._transition(order_id, expected="CONFIRMED", target="ACCEPTED")
+        await self._transition(
+            order_id, expected="CONFIRMED", target="ACCEPTED", event=EventType.ORDER_ACCEPTED
+        )
 
     # ── delivery + settlement (S6) ─────────────────────────────────
 
     @activity.defn(name=ActivityName.MARK_PICKED_UP)
     async def mark_picked_up(self, order_id: str) -> None:
-        await self._transition(order_id, expected="READY", target="PICKED_UP")
+        await self._transition(
+            order_id, expected="READY", target="PICKED_UP", event=EventType.ORDER_PICKED_UP
+        )
 
     @activity.defn(name=ActivityName.MARK_DELIVERED)
     async def mark_delivered(self, order_id: str) -> None:

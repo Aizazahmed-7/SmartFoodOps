@@ -31,7 +31,7 @@ async def test_authorize_ok_and_declined_are_values():
         == "ok"
     )
     assert calls["requests"][0].url.path == "/v1/internal/payments/ord_1/authorize"
-    assert calls["requests"][0].headers["x-auth-role"] == "system"
+    assert calls["requests"][0].headers["x-auth-roles"] == "system"
 
     client, _ = make([(402, {"error": {"code": "PAYMENT_DECLINED"}})])
     assert (

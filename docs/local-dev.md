@@ -71,7 +71,7 @@ $ make up-obs        # otel-collector, Jaeger, Prometheus, Grafana (W3)
 
 Jaeger (http://localhost:16686) → search tag `order_id={order_id}`. The trace stitches edge-bff → order → Temporal activities → Kafka consumers, because outbox rows carry `traceparent` and the publisher lifts it into Kafka headers.
 
-**6. Inspect the raw event.** `make up-ui` starts Redpanda Console (http://localhost:8085). Browse `orders.events` and open the Avro-decoded `OrderPlaced` fact — note `event_id`, `aggregate_version`, `cell_id: c1`.
+**6. Inspect the raw event.** `make up-ui` starts Redpanda Console (http://localhost:8085). Browse `orders.events` and open the Avro-decoded `OrderPlaced` fact — note `event_id`, `aggregate_type`, `cell_id: c1`.
 
 **7. Start fake riders and watch dispatch** *(W3 — dispatch and `rider-sim` are not built yet)*.
 
@@ -129,6 +129,7 @@ Profiles: **core** (infra — rabbitmq joined in S10), **apps** (services), **ui
 | core | mock-psp | 9080 | Failure-injection knobs, §9 |
 | core | mock-mailer | 9081 | Receipt emails land here: `GET /mailer/outbox`. Knobs: `FAIL_RATE`, `POST /admin/fail_next`, magic `*@bounce.invalid` |
 | apps | receipt-renderer / receipt-sender | 9109 / 9110 (in-network) | Celery workers (S10) — bare /metrics ports, scraped by Prometheus |
+| apps | notification-worker | — | Temporal worker for RefundNotificationWorkflow (ADR-0040). Without it the API consumes refund events and SKIPS them — the bell stays silent rather than the loop failing |
 | core | nginx gateway (emulates ALB path rules) | **8080** | The single client entrypoint |
 | cdc *(W3)* | Kafka Connect + Debezium | 8083 | Only needed for `OUTBOX_MODE=debezium` (§5) |
 | obs *(W3)* | otel-collector | 4317 | OTLP gRPC |
@@ -146,10 +147,28 @@ Profiles: **core** (infra — rabbitmq joined in S10), **apps** (services), **ui
 | edge-bff | 8000 | inventory | 8005 | notification | 8008 |
 | identity | 8001 | order | 8006 | analytics | 8009 |
 | catalog | 8002 | payment | 8007 | rider-gateway | 8010 |
-| dispatch | 8012 | | | | |
+| dispatch | 8012 | ai-assistant | 8013 | | |
 
 (8011 stays reserved for a dedicated tracking-gateway if SSE ever leaves
-the order service; dispatch took 8012 — analytics claimed 8009 in W3.)
+the order service; dispatch took 8012 — analytics claimed 8009 in W3;
+ai-assistant took 8013 in B0, deliberately leaving 8003/8004 alone.)
+
+**Postgres stays on `postgres:15`, and the pgvector swap is not a one-line tag change.**
+Found live in B0: `postgres:15` is Debian trixie (glibc **2.41**) while `pgvector/pgvector:pg15`
+is bookworm (glibc **2.36**). Postgres treats that as a *collation-version downgrade* and
+refuses — every existing database warns, and `template1` **errors**, which blocks
+`CREATE DATABASE` outright, so `initdb/01-databases.sh` fails with exit 3 and no new service
+database can be created at all. Symptom to recognise:
+
+```
+ERROR:  template database "template1" has a collation version mismatch
+make: *** [up-ai] Error 3
+```
+
+`assistant_db` exists from B0, but **without** the `vector` extension. Choosing the route —
+`REFRESH COLLATION VERSION` + `REINDEX`, a `make nuke` for a fresh volume, or a base-matched
+pgvector image — is [ADR-0032](adr/)'s job in B1, where vectors are first needed. Do not
+re-attempt the tag swap on an existing `pg-data` volume without picking one.
 
 Ports 8003 and 8004 are deliberately unused — the cart is client state (ADR-0017), and pricing is a library (`libs/smartfood-pricing`, ADR-0015) running inside the Order workers and the `/v1/quote` endpoint.
 
@@ -169,8 +188,9 @@ The full stack is ≈ 8–9 GB, so **slim mode is the default**, not the excepti
 | `make dev SVC=order` | Run one service **natively on the host**, `uvicorn --reload`, wired to compose infra | +~150 MB |
 | `make up-apps ONLY="payment inventory"` | Add just the containerized neighbors your flow needs | ~4 GB typical |
 | `make up-m2` | The W2 order-lifecycle set: core + temporal, mock-psp, identity, catalog, edge-bff, inventory, order, order-worker, payment (~6–7 GB) |
-| `make up-m3` | The `up-m2` set + notification, analytics, and the receipts pipeline (rabbitmq, localstack S3, mock-mailer, receipt-renderer, receipt-sender) |
+| `make up-m3` | The `up-m2` set + notification, notification-worker, analytics, and the receipts pipeline (rabbitmq, localstack S3, mock-mailer, receipt-renderer, receipt-sender) |
 | `make up-m4` | The `up-m3` set + dispatch and rider-gateway (DynamoDB tables self-create on LocalStack); `make riders` starts simulated couriers |
+| `make up-ai` *(B0)* | The W1 core + `ai-assistant` — deliberately **not** a superset of `up-m4`: the full m4 set plus the AI plane does not fit in a 7.7 GB VM (~5 GB) |
 | `make up-cdc` *(W3)* | Add the `cdc` profile (Kafka Connect + Debezium) — needed for `OUTBOX_MODE=debezium` (§5) | +1–1.5 GB |
 | `make up-obs` *(W3)* | Add the `obs` profile (otel-collector, Jaeger, Prometheus, Grafana) | — |
 | `make up-ui` | Add the `ui` profile (Redpanda Console) | — |

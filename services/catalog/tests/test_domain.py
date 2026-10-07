@@ -5,7 +5,6 @@ import sqlalchemy as sa
 from catalog.adapters.repo import CatalogRepo
 from catalog.db import metadata, outbox
 from catalog.domain.service import CatalogService
-from smartfood_outbox import event_id
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -42,26 +41,36 @@ async def test_every_mutation_leaves_the_three_writes(grants, cache):
     svc, sessions = await _service(grants, cache)
     r, _ = await _create(svc)
     await svc.update_restaurant(r.id, {"name": "Biryani Palace"}, None)
-    await svc.set_status(r.id, "paused")
+    branch_id = (await svc.list_branches(r.id))[0].id
+    # Pause is a BRANCH action since 0009 — a brand has no status to set.
+    await svc.set_status(branch_id, "paused")
 
     async with sessions() as s:
-        rows = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
+        rows = (await s.execute(sa.select(outbox).order_by(outbox.c.occurred_at))).all()
 
-    # Every brand mutation fans out (ADR-0028): the brand's aggregate AND its
-    # first branch's aggregate each get a gapless event stream.
+    # Every BRAND mutation fans out (ADR-0028); a branch mutation does not.
+    # So the brand sees two events and the branch sees three: its two
+    # inherited from the fan-out plus its own pause.
     events = [e for e in rows if e.aggregate_id == r.id]
     branch_events = [e for e in rows if e.aggregate_id != r.id]
-    assert [e.aggregate_version for e in events] == [1, 2, 3]  # bump per mutation, no gaps
-    assert [e.event_type for e in events] == [
+    # Ordered by occurred_at: each mutation is its own transaction with its
+    # own clock, so the sequence is well defined without a version column
+    # (ADR-0038). One event per mutation per aggregate, no gaps.
+    assert [e.event_type for e in events] == ["RestaurantCreated", "RestaurantUpdated"]
+    assert [e.event_type for e in branch_events] == [
         "RestaurantCreated",
         "RestaurantUpdated",
         "RestaurantPaused",
     ]
-    assert [e.event_type for e in branch_events] == [e.event_type for e in events]
     assert all(e.payload["brand_id"] == r.id for e in branch_events)
     assert branch_events[1].payload["name"] == "Biryani Palace"  # the copy propagated
-    # Deterministic identity: anyone can recompute the id of a fact.
-    assert events[0].id == event_id("restaurant", r.id, 1, "RestaurantCreated")
+    # The pause landed on the branch's payload and nowhere else.
+    assert branch_events[2].payload["status"] == "paused"
+    assert all(e.payload["status"] is None for e in events)  # a brand has none
+    assert (events[0].aggregate_type, events[0].event_type) == (
+        "restaurant",
+        "RestaurantCreated",
+    )
     assert all(e.published_at is None for e in rows)  # staged, drained in W3
     # Snapshots stand alone (compacted topic): each carries full state —
     # INCLUDING the owner on EVERY event, not just the birth one. Identity's
@@ -69,8 +78,10 @@ async def test_every_mutation_leaves_the_three_writes(grants, cache):
     # in favor of any later event on the same key.
     assert all(e.payload["owner_user_id"] == "usr_1" for e in rows)
     assert events[1].payload["name"] == "Biryani Palace"
-    assert events[2].payload["status"] == "paused"
-    assert events[2].payload["cuisines"] == ["bbq", "pakistani"]
+    # Full state on the LAST event of each aggregate — the one compaction
+    # keeps. Cuisines ride on both; status only exists on the branch's.
+    assert events[-1].payload["cuisines"] == ["bbq", "pakistani"]
+    assert branch_events[-1].payload["cuisines"] == ["bbq", "pakistani"]
 
 
 async def test_concurrent_onboarding_race_adopts_winner(grants, cache, monkeypatch):
@@ -127,12 +138,16 @@ async def test_every_event_carries_full_state(grants, cache):
             }
         ],
     )
-    await svc.set_status(r.id, "paused")  # a PROFILE event, after menu edits
+    # A PROFILE event after menu edits. It has to be the BRANCH's pause
+    # since 0009, and the branch is also where the base menu is inherited —
+    # so this still proves a profile event carries the whole menu.
+    branch_id = (await svc.list_branches(r.id))[0].id
+    await svc.set_status(branch_id, "paused")
 
     async with sessions() as s:
-        rows = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
+        rows = (await s.execute(sa.select(outbox).order_by(outbox.c.occurred_at))).all()
 
-    events = [e for e in rows if e.aggregate_id == r.id]
+    events = [e for e in rows if e.aggregate_id == branch_id]
     assert [e.event_type for e in events] == [
         "RestaurantCreated",
         "CategoryAdded",
@@ -194,37 +209,44 @@ async def test_delete_item_leaves_no_orphan_rows(grants, cache):
             assert count == 0  # children die with the item — no orphans
 
 
-async def test_render_retries_on_torn_read(grants, cache, monkeypatch):
-    """READ COMMITTED can tear: version read at N, rows read at N+1. Caching
-    that would serve a doc whose version lies about its rows — the renderer
-    must detect the move and re-read."""
-    from catalog.db import restaurants
-
-    svc, sessions = await _service(grants, cache)
+async def test_the_render_opens_its_snapshot_before_any_read(grants, cache, monkeypatch):
+    """`begin_snapshot` must be the FIRST statement in the transaction.
+    Postgres cannot change the isolation level once a statement has run, so
+    a query added above it would silently downgrade the whole render to READ
+    COMMITTED — and nothing else would notice (ADR-0037)."""
+    svc, _ = await _service(grants, cache)
     r, _ = await _create(svc)
 
-    real = CatalogRepo.get_menu_rows
-    calls = {"n": 0}
+    trace: list[str] = []
+    real_snapshot = CatalogRepo.begin_snapshot
+    real_restaurant = CatalogRepo.get_restaurant
+    real_menu_rows = CatalogRepo.get_menu_rows
 
-    async def tearing(self, restaurant_id):
-        calls["n"] += 1
-        rows = await real(self, restaurant_id)
-        if calls["n"] == 1:  # a concurrent edit lands mid-read
-            await self._s.execute(restaurants.update().values(version=restaurants.c.version + 1))
-        return rows
+    async def snap(self):
+        trace.append("snapshot")
+        return await real_snapshot(self)
 
-    monkeypatch.setattr(CatalogRepo, "get_menu_rows", tearing)
-    menu = await svc.get_menu(r.id)
-    assert calls["n"] == 2  # first pass torn → re-rendered
-    assert menu["version"] == r.version + 1  # served (and cached) post-edit state
+    async def restaurant(self, restaurant_id):
+        trace.append("read")
+        return await real_restaurant(self, restaurant_id)
+
+    async def menu_rows(self, scope_ids):
+        trace.append("read")
+        return await real_menu_rows(self, scope_ids)
+
+    monkeypatch.setattr(CatalogRepo, "begin_snapshot", snap)
+    monkeypatch.setattr(CatalogRepo, "get_restaurant", restaurant)
+    monkeypatch.setattr(CatalogRepo, "get_menu_rows", menu_rows)
+    await svc.get_menu(r.id)
+    assert trace[0] == "snapshot", trace
+    assert trace.count("snapshot") == 1  # one transaction, one snapshot
+    assert "read" in trace  # and it really did read inside it
 
 
-async def test_pricing_read_retries_on_torn_read(grants, cache, monkeypatch):
-    """Same tear hazard as the renderer, higher stakes: a price edit landing
-    mid-read must not hand pricing a mixed-version view."""
-    from catalog.db import restaurants
-
-    svc, sessions = await _service(grants, cache)
+async def test_the_pricing_read_opens_its_snapshot_before_any_read(grants, cache, monkeypatch):
+    """Same ordering rule on the money path, where a torn read would price
+    one line from the old menu and another from the new."""
+    svc, _ = await _service(grants, cache)
     r, _ = await _create(svc)
     cat = await svc.add_category(r.id, name="Mains", rank=0)
     item = await svc.add_item(
@@ -242,20 +264,50 @@ async def test_pricing_read_retries_on_torn_read(grants, cache, monkeypatch):
         modifier_groups=[],
     )
 
-    real = CatalogRepo.get_pricing_rows
-    calls = {"n": 0}
+    trace: list[str] = []
+    real_snapshot = CatalogRepo.begin_snapshot
+    real_pricing = CatalogRepo.get_pricing_rows
 
-    async def tearing(self, restaurant_id, item_ids):
-        calls["n"] += 1
-        rows = await real(self, restaurant_id, item_ids)
-        if calls["n"] == 1:  # concurrent price edit mid-read
-            await self._s.execute(restaurants.update().values(version=restaurants.c.version + 1))
-        return rows
+    async def snap(self):
+        trace.append("snapshot")
+        return await real_snapshot(self)
 
-    monkeypatch.setattr(CatalogRepo, "get_pricing_rows", tearing)
+    async def pricing(self, scope_ids, item_ids):
+        trace.append("read")
+        return await real_pricing(self, scope_ids, item_ids)
+
+    monkeypatch.setattr(CatalogRepo, "begin_snapshot", snap)
+    monkeypatch.setattr(CatalogRepo, "get_pricing_rows", pricing)
     body = await svc.pricing_read(r.id, [item["id"]])
-    assert calls["n"] == 2  # re-read after the version moved
-    assert body["restaurant"]["version"] == item["version"] + 1
+    assert trace == ["snapshot", "read"], trace
+    assert body["items"][0]["price_cents"] == 1200
+
+
+async def test_begin_snapshot_asks_postgres_for_repeatable_read():
+    """The Postgres arm, unreachable from the sqlite suite (which needs no
+    isolation change — one connection, no interleaving writer). Asserts the
+    exact level: a valid-but-weaker one would be accepted silently and only
+    surface as a torn read in production."""
+    from typing import Any, cast
+
+    class _Dialect:
+        name = "postgresql"
+
+    class _Bind:
+        dialect = _Dialect()
+
+    class _Session:
+        bind = _Bind()
+
+        def __init__(self) -> None:
+            self.captured: dict[str, Any] | None = None
+
+        async def connection(self, execution_options=None):
+            self.captured = execution_options
+
+    session = _Session()
+    await CatalogRepo(cast(Any, session)).begin_snapshot()
+    assert session.captured == {"isolation_level": "REPEATABLE READ"}
 
 
 async def test_singleflight_loser_adopts_winners_menu(grants):
@@ -285,20 +337,6 @@ async def test_singleflight_loser_adopts_winners_menu(grants):
 
     svc = CatalogService(cast(Any, None), grants, WinnerAppears(), _NullSearch())
     assert await svc.get_menu("rst_x") == doc
-
-
-async def test_event_ids_are_deterministic_and_distinct():
-    assert event_id("restaurant", "rst_1", 1, "RestaurantCreated") == event_id(
-        "restaurant", "rst_1", 1, "RestaurantCreated"
-    )
-    ids = {
-        event_id("restaurant", "rst_1", 1, "RestaurantCreated"),
-        event_id("restaurant", "rst_1", 2, "RestaurantCreated"),
-        event_id("restaurant", "rst_2", 1, "RestaurantCreated"),
-        event_id("restaurant", "rst_1", 1, "RestaurantPaused"),
-        event_id("order", "rst_1", 1, "RestaurantCreated"),
-    }
-    assert len(ids) == 5
 
 
 async def test_staged_events_carry_the_traceparent(grants, cache):

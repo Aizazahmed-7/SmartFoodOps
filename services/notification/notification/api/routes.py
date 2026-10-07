@@ -27,7 +27,15 @@ def _svc(request: Request) -> NotificationService:
 
 
 def _recipient(ctx: AuthContext) -> tuple[str, str]:
-    if ctx.role == Role.RESTAURANT_ADMIN and ctx.restaurant_id:
+    """Owner-wins, unchanged by multi-role: a user who holds the owner role
+    reads the RESTAURANT bell, everyone else their own.
+
+    Deliberately NOT "both bells" (review 2026-09-10). A user holding
+    customer AND restaurant_admin arguably has two inboxes, but serving them
+    means _recipient returns a list, the ticket authorizes several channels,
+    and the SSE stream subscribes to more than one — a notification redesign,
+    recorded as a follow-up rather than smuggled into the identity change."""
+    if str(Role.RESTAURANT_ADMIN) in ctx.roles and ctx.restaurant_id:
         return "restaurant", ctx.restaurant_id
     return "customer", ctx.sub
 

@@ -72,7 +72,6 @@ class BrowseEvents:
                     "event_type": "MenuViewed",
                     "aggregate_type": "browse",
                     "aggregate_id": restaurant_id,
-                    "aggregate_version": 0,
                     "occurred_at": now,
                     "cell_id": self._cell_id,
                     "payload": json.dumps(

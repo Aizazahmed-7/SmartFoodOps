@@ -269,8 +269,17 @@ export default function PartnerDashboard() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-2xl font-bold">{data.display_name ?? data.name}</h1>
-        <span className={`tag ${paused ? "bg-red-950 text-red-300" : "bg-emerald-950 text-emerald-300"}`}>
-          {paused ? "paused" : "open"} · menu v{data.version}
+        {/* A brand has no open/paused state (catalog 0009) — showing "open"
+            for a menu template would be a lie the API no longer tells. */}
+        <span
+          className={`tag ${
+            !onBranch
+              ? "bg-slate-800 text-slate-300"
+              : paused
+                ? "bg-red-950 text-red-300"
+                : "bg-emerald-950 text-emerald-300"
+          }`}>
+          {onBranch ? (paused ? "paused" : "open") : "base menu"}
         </span>
         {onBranch && (
           <button className={paused ? "btn-primary" : "btn-danger"}

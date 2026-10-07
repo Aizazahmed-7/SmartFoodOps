@@ -10,9 +10,9 @@ from smartfood_auth import AuthContext, headers_for
 
 from .test_service import FakeBus, FakeCourier, FakeGeo, RecordingEvents
 
-SYSTEM = headers_for(AuthContext(sub="svc:order-worker", role="system"))
-RIDER = headers_for(AuthContext(sub="r1", role="rider", rider_id="r1"))
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
+SYSTEM = headers_for(AuthContext(sub="svc:order-worker", roles=frozenset({"system"})))
+RIDER = headers_for(AuthContext(sub="r1", roles=frozenset({"rider"}), rider_id="r1"))
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
 
 PICKUP = {"lat": 39.7912, "lon": -89.6644}
 DROPOFF = {"lat": 39.8025, "lon": -89.6478}
@@ -121,7 +121,7 @@ def test_foreign_taps_map_to_409(client):
     client.post(
         f"/v1/rider/offers/{offer['offer_id']}/accept", json={"order_id": "ord_1"}, headers=RIDER
     )
-    intruder = headers_for(AuthContext(sub="r9", role="rider", rider_id="r9"))
+    intruder = headers_for(AuthContext(sub="r9", roles=frozenset({"rider"}), rider_id="r9"))
     assert client.post("/v1/rider/deliveries/ord_1/pickup", headers=intruder).status_code == 409
     assert (
         client.post("/v1/rider/deliveries/ord_1/deliver", headers=RIDER).status_code == 409
@@ -152,7 +152,7 @@ def test_courier_dot_is_ownership_scoped(client):
     )
     mine = client.get("/v1/deliveries/ord_1/courier", headers=CUSTOMER)
     assert mine.status_code == 200 and mine.json()["state"] == "ASSIGNED"
-    intruder = headers_for(AuthContext(sub="usr_2", role="customer"))
+    intruder = headers_for(AuthContext(sub="usr_2", roles=frozenset({"customer"})))
     assert client.get("/v1/deliveries/ord_1/courier", headers=intruder).status_code == 404
     assert client.get("/v1/deliveries/ord_ghost/courier", headers=CUSTOMER).status_code == 404
 
@@ -191,3 +191,46 @@ def test_order_outage_maps_to_503_with_retry_after(riders, deliveries):
         # deliver map the same outage the same way.
         assert client.post("/v1/rider/deliveries/ord_1/pickup", headers=RIDER).status_code == 503
         assert client.post("/v1/rider/deliveries/ord_1/deliver", headers=RIDER).status_code == 503
+
+
+# ── the explanation engine's read (FR-83) ──────────────────────────
+
+
+def test_delivery_state_carries_the_assignment_clock(client):
+    """`pickup_timeout_s` runs from the assignment, so `assigned_at` is the
+    fact this endpoint exists for — without it the resolver has an elapsed
+    time and no deadline."""
+    _online(client)
+    _offer(client)
+    offer_id = client.get("/v1/rider/me", headers=RIDER).json()["offer"]["offer_id"]
+    accepted = client.post(
+        f"/v1/rider/offers/{offer_id}/accept", json={"order_id": "ord_1"}, headers=RIDER
+    )
+    assert accepted.status_code == 200
+
+    r = client.get("/v1/internal/deliveries/ord_1", headers=SYSTEM)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "ASSIGNED"
+    assert body["assigned_at"] is not None
+    assert body["picked_up_at"] is None
+
+
+def test_an_offer_still_cascading_reports_offering_and_no_assignment(client):
+    _online(client)
+    _offer(client)
+    body = client.get("/v1/internal/deliveries/ord_1", headers=SYSTEM).json()
+    assert body["state"] == "OFFERING"
+    assert body["assigned_at"] is None
+
+
+def test_an_order_with_no_delivery_row_is_a_404(client):
+    """Ordinary for anything that has not reached READY — the caller reads
+    it as "no courier facts yet", not as an error."""
+    assert client.get("/v1/internal/deliveries/ord_nothing", headers=SYSTEM).status_code == 404
+
+
+@pytest.mark.parametrize("headers", [CUSTOMER, RIDER, {}])
+def test_the_delivery_state_read_is_system_only(client, headers):
+    r = client.get("/v1/internal/deliveries/ord_1", headers=headers)
+    assert r.status_code in (401, 403)

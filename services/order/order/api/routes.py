@@ -5,6 +5,7 @@ idempotency outcomes mapped onto the api-standards code catalog. No
 business logic lives here."""
 
 import time
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -17,7 +18,7 @@ from smartfood_pricing import (
     InvalidSelection,
     ItemUnavailable,
     Line,
-    MenuVersionChanged,
+    PriceChanged,
     RestaurantClosed,
     Selection,
 )
@@ -37,6 +38,7 @@ from ..domain.service import (
     HashMismatch,
     InvalidCursor,
     NotCancellable,
+    NotRateable,
     OrderNotFound,
     OrderService,
     Placed,
@@ -93,12 +95,14 @@ def _map_pricing_errors(exc: Exception) -> ApiError:
     quote and placement)."""
     if isinstance(exc, RestaurantNotFound):
         return ApiError(ErrorCode.NOT_FOUND, "unknown restaurant", 404)
-    if isinstance(exc, MenuVersionChanged):
+    if isinstance(exc, PriceChanged):
         return ApiError(
             ErrorCode.PRICE_CHANGED,
-            "menu changed — re-quote and confirm the new total",
+            "the total changed — re-quote and confirm the new total",
             409,
-            details=[{"field": "menu_version", "issue": f"menu is now at version {exc.current}"}],
+            details=[
+                {"field": "expected_total_cents", "issue": f"total is now {exc.current} cents"}
+            ],
         )
     if isinstance(exc, RestaurantClosed):
         return ApiError(ErrorCode.RESTAURANT_CLOSED, "restaurant is not taking orders", 409)
@@ -124,7 +128,7 @@ def _map_pricing_errors(exc: Exception) -> ApiError:
 
 _PRICING_ERRORS = (
     RestaurantNotFound,
-    MenuVersionChanged,
+    PriceChanged,
     RestaurantClosed,
     ItemUnavailable,
     InvalidSelection,
@@ -146,10 +150,15 @@ async def quote(body: QuoteIn, ctx: Purchaser, request: Request) -> dict[str, An
 
 
 class PlaceOrderIn(QuoteIn):
-    """The quote body + the placement pins: version consent, address by ID,
-    card by token. Never prices, never address content (api-standards §3)."""
+    """The quote body + the placement pins: price consent, address by ID,
+    card by token. Never prices, never address content (api-standards §3).
 
-    menu_version: int = Field(ge=0)
+    `expected_total_cents` is the total the customer was SHOWN and is
+    consenting to — not a price the client gets to assert. The server
+    reprices from its own snapshot and refuses on mismatch (ADR-0036); a
+    client sending a wrong number gets a 409, never a discount."""
+
+    expected_total_cents: int = Field(ge=0)
     address_id: str = Field(min_length=1, max_length=64)
     card_token: str = Field(pattern=r"^tok_[a-z0-9_]{2,32}$")
 
@@ -179,7 +188,7 @@ async def place_order(
             idem_key=idempotency_key,
             request_hash=body_hash(await request.body()),
             restaurant_id=body.restaurant_id,
-            menu_version=body.menu_version,
+            expected_total_cents=body.expected_total_cents,
             lines=_to_lines(body.lines),
             address_id=body.address_id,
             card_token=body.card_token,
@@ -230,6 +239,71 @@ async def place_order(
     raise ApiError(
         ErrorCode.IDEMPOTENCY_KEY_REUSE, "this key was used with a different request body", 422
     )
+
+
+class FeedbackIn(StrictModel):
+    """1-5 and an optional sentence.
+
+    The scale is bounded in the schema AND in the database (a CHECK), which
+    is one more place than strictly necessary and the right number: FR-92
+    averages this column and a 0 or a 7 would move a restaurant's score
+    without anyone having meant it.
+    """
+
+    rating: Annotated[int, Field(ge=1, le=5)]
+    comment: Annotated[str | None, Field(default=None, max_length=1000)]
+
+
+def _feedback_out(row: Any) -> dict[str, Any]:
+    return {
+        "order_id": row.order_id,
+        "rating": row.rating,
+        "comment": row.comment,
+        "submitted_at": row.submitted_at.isoformat(),
+    }
+
+
+@router.put("/v1/orders/{order_id}/feedback")
+async def submit_feedback(
+    order_id: str, body: FeedbackIn, ctx: Purchaser, request: Request
+) -> dict[str, Any]:
+    """Rate a delivered order (FR-91).
+
+    PUT, not POST: one row per order, and re-sending is the same statement
+    rather than a second opinion. A customer correcting a rating gets the
+    correction, not a 409 telling them their first answer was final.
+
+    `comment` is stored verbatim and is NEVER interpreted here. It becomes
+    model input in FR-92, where it is the untrusted-corpus problem ADR-0043
+    already names — the defence belongs at that boundary, not in a sanitiser
+    here that would also mangle what someone actually wrote.
+    """
+    try:
+        await _svc(request).submit_feedback(
+            user_id=ctx.sub, order_id=order_id, rating=body.rating, comment=body.comment
+        )
+    except OrderNotFound:
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown order", 404) from None
+    except NotRateable as exc:
+        raise ApiError(
+            ErrorCode.ORDER_STATE_CONFLICT,
+            f"an order in {exc.status} cannot be rated yet",
+            409,
+        ) from None
+    return {"order_id": order_id, "rating": body.rating, "comment": body.comment}
+
+
+@router.get("/v1/orders/{order_id}/feedback")
+async def read_feedback(order_id: str, ctx: Purchaser, request: Request) -> dict[str, Any]:
+    """What this customer already said, so the page can show it back rather
+    than asking twice. 404 covers both "not yours" and "never rated"."""
+    try:
+        row = await _svc(request).feedback_for(ctx.sub, order_id)
+    except OrderNotFound:
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown order", 404) from None
+    if row is None:
+        raise ApiError(ErrorCode.NOT_FOUND, "no feedback for this order", 404)
+    return _feedback_out(row)
 
 
 @router.post("/v1/orders/{order_id}/cancel")
@@ -299,6 +373,103 @@ async def list_orders(
 
 
 # ── internal (never in the edge allowlist — unreachable from outside) ──
+
+
+class RecipientsOut(StrictModel):
+    """Who to tell about an order. Deliberately the two ids and nothing
+    else: Notification asks this because payment events are keyed by order
+    and carry no user_id (ADR-0040), and a wider read would invite callers
+    to depend on order's shape for things the event already carries."""
+
+    user_id: str
+    restaurant_id: str
+
+
+@router.get("/v1/internal/restaurants/{restaurant_id}/feedback")
+async def restaurant_feedback(
+    restaurant_id: str,
+    ctx: SystemOnly,
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=200)] = 200,
+) -> dict:
+    """One restaurant's own feedback, for FR-92's summaries.
+
+    SystemOnly and scoped by the path, which together are the whole
+    tenancy story: the assistant passes the restaurant from the admin's own
+    claim, and the SQL filters on it. A caller cannot widen the read by
+    omitting a parameter, because there is no unscoped variant.
+
+    `comment` is returned verbatim. It is customer-written text and
+    therefore untrusted (ADR-0043); sanitising it here would corrupt what
+    someone actually said, and the defence belongs where it becomes model
+    input — which is exactly where it is applied.
+    """
+    rows = await _svc(request).feedback_for_restaurant(restaurant_id, limit=limit)
+    return {
+        "restaurant_id": restaurant_id,
+        "feedback": [
+            {
+                "order_id": row.order_id,
+                "rating": row.rating,
+                "comment": row.comment,
+                "submitted_at": row.submitted_at.isoformat(),
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/v1/internal/orders/{order_id}/timeline")
+async def order_timeline(order_id: str, ctx: SystemOnly, request: Request) -> dict:
+    """The stamped moments of one order's life (FR-83).
+
+    Everything here is a fact `transition()` wrote inside its guarded
+    UPDATE (ADR-0046), so a null is "never reached, or never recorded" and
+    is never rounded to a number. The explanation engine reads this rather
+    than the customer-facing order view because it needs the milestones,
+    which that view does not carry — and because it is a service, not a
+    person, and must not go through a per-user cache.
+
+    `user_id` is returned so the caller can check the asker owns the order.
+    Ownership is NOT enforced here: the caller holds the customer's
+    identity and this endpoint holds the order's, and putting the
+    comparison where both are known beats passing a subject in and hoping.
+    """
+    row = await _svc(request).recipients_of(order_id)
+    if row is None:
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown order", 404)
+    return {
+        "order_id": order_id,
+        "user_id": row.user_id,
+        "restaurant_id": row.restaurant_id,
+        "status": row.status,
+        "cancel_reason": row.cancel_reason,
+        "placed_at": row.placed_at.isoformat(),
+        "payment_cleared_at": _iso(row.payment_cleared_at),
+        "confirmed_at": _iso(row.confirmed_at),
+        "accepted_at": _iso(row.accepted_at),
+        "preparing_at": _iso(row.preparing_at),
+        "ready_at": _iso(row.ready_at),
+        "picked_up_at": _iso(row.picked_up_at),
+        # The deadlines THIS order is actually running under, not a copy
+        # of them. An explanation engine that hardcoded 600 would keep
+        # telling customers the old story after an operator widened the
+        # window for a holiday — and the two would drift silently, which
+        # is the worst kind of drift.
+        "budget": request.app.state.timer_budget,
+    }
+
+
+def _iso(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+@router.get("/v1/internal/orders/{order_id}/recipients")
+async def order_recipients(order_id: str, ctx: SystemOnly, request: Request) -> RecipientsOut:
+    row = await _svc(request).recipients_of(order_id)
+    if row is None:
+        raise ApiError(ErrorCode.NOT_FOUND, "unknown order", 404)
+    return RecipientsOut(user_id=row.user_id, restaurant_id=row.restaurant_id)
 
 
 class CourierIn(StrictModel):

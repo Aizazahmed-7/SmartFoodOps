@@ -36,31 +36,12 @@ restaurants = sa.Table(
     # double-onboarding race (swapped in by migration 0007).
     sa.Column("owner_user_id", sa.Text, nullable=False, index=True),
     sa.Column("name", sa.Text, nullable=False),
-    sa.Column("city", sa.Text, nullable=False, index=True),
-    sa.Column("lat", sa.Float, nullable=True),
-    sa.Column("lon", sa.Float, nullable=True),
-    sa.Column("status", sa.Text, nullable=False, server_default="open"),
-    sa.CheckConstraint(f"status IN {RESTAURANT_STATUSES!r}", name="ck_restaurants_status"),
-    sa.Column("hours", sa.JSON, nullable=True),  # {"mon": ["11:00", "23:00"], ...}
-    # Hours are wall-clock local, so they are meaningless without the zone
-    # they are read in (smartfood_pricing.is_open_at does the arithmetic).
-    sa.Column("timezone", sa.Text, nullable=False, server_default="America/Chicago"),
-    # cache version.
-    sa.Column("version", sa.Integer, nullable=False, server_default="0"),
+    # city/lat/lon/status/hours/timezone/brand_id/branch_label moved to
+    # branch_metadata in 0009 — see the note below that table.
     # brand | branch. The server_default is the legacy backfill: every
     # pre-brands row is a location (migration 0007 minted their brands).
     sa.Column("kind", sa.Text, nullable=False, server_default="branch"),
     sa.CheckConstraint(f"kind IN {RESTAURANT_KINDS!r}", name="ck_restaurants_kind"),
-    # A brand has no parent; a branch always has one (post-0007 invariant).
-    sa.CheckConstraint(
-        "(kind = 'brand' AND brand_id IS NULL) OR (kind = 'branch' AND brand_id IS NOT NULL)",
-        name="ck_restaurants_kind_parent",
-    ),
-    sa.Column("brand_id", sa.Text, sa.ForeignKey("restaurants.id"), nullable=True, index=True),
-    # Human label within the brand ("Downtown"); display_name composes
-    # "{name} — {label}". Unique per brand: the branch-create idempotency key.
-    sa.Column("branch_label", sa.Text, nullable=True),
-    sa.Index("uq_restaurants_branch_label", "brand_id", "branch_label", unique=True),
     # One brand per owner — brand rows only, so branches (which copy the
     # owner) never collide. Both dialects the unit/live suites use honor
     # the partial predicate.
@@ -73,6 +54,62 @@ restaurants = sa.Table(
     ),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
+)
+
+# ── the branch/brand column split (review 2026-09-09) ─────────────
+# A brand has no address, no opening hours and no timezone, so on the single
+# table those were meaningless NULLs on every brand row — and city/timezone
+# were NOT NULL, which forced migration 0007 to copy the first branch's city
+# onto the brand. `restaurants.city` was therefore a lie: "whichever branch
+# happened to be first". Here they are unrepresentable on a brand instead.
+#
+# brand_id and branch_label move TOGETHER because UNIQUE(brand_id,
+# branch_label) is one index and an index cannot span two tables. `kind`
+# deliberately stays on `restaurants`: it is derivable (no metadata row means
+# brand), but the one-brand-per-owner partial unique index below needs it as
+# a column, and a partial-index predicate cannot contain a subquery.
+#
+# The invariant this CANNOT declare: "every branch has exactly one metadata
+# row". The PK gives at-most-one; SQL has no declarative form for
+# at-least-one (a CHECK cannot contain a subquery). `insert_restaurant`
+# writes both rows in one transaction and is the ONLY writer — the grep-ban
+# in tests/test_no_raw_restaurant_inserts.py is what keeps it the only one,
+# and the read path raises rather than rendering a metadata-less branch.
+# Same invariant shape, and same treatment, as identity's riders/user_roles.
+# The columns branch_metadata owns — the single source for both the repo's
+# write split and the domain's "a brand has no address" guard, so the two can
+# never disagree about which table answers for a field.
+BRANCH_OWNED_COLUMNS: tuple[str, ...] = (
+    "city",
+    "lat",
+    "lon",
+    "status",
+    "hours",
+    "timezone",
+    "brand_id",
+    "branch_label",
+)
+
+branch_metadata = sa.Table(
+    "branch_metadata",
+    metadata,
+    sa.Column("restaurant_id", sa.Text, sa.ForeignKey("restaurants.id"), primary_key=True),
+    sa.Column("brand_id", sa.Text, sa.ForeignKey("restaurants.id"), nullable=False, index=True),
+    sa.Column("branch_label", sa.Text, nullable=False),
+    sa.Column("city", sa.Text, nullable=False),
+    sa.Column("lat", sa.Float, nullable=True),
+    sa.Column("lon", sa.Float, nullable=True),
+    sa.Column("status", sa.Text, nullable=False, server_default="open"),
+    sa.CheckConstraint(f"status IN {RESTAURANT_STATUSES!r}", name="ck_branch_metadata_status"),
+    sa.Column("hours", sa.JSON, nullable=True),
+    # Hours are wall-clock local, so they are meaningless without the zone
+    # they are read in (smartfood_pricing.is_open_at does the arithmetic).
+    sa.Column("timezone", sa.Text, nullable=False, server_default="America/Chicago"),
+    sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
+    # Moved wholesale from `restaurants`: the branch-create idempotency key.
+    sa.Index("uq_branch_metadata_label", "brand_id", "branch_label", unique=True),
+    # The browse filter's index moves with the column it filters.
+    sa.Index("ix_branch_metadata_city", "city"),
 )
 
 # Presence-only per-branch 86 of a BASE item: a row means "this branch is

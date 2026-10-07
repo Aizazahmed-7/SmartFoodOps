@@ -8,7 +8,6 @@ from inventory.adapters.repo import InventoryRepo
 from inventory.db import metadata, outbox
 from inventory.domain.models import ReservationLine
 from inventory.domain.service import InventoryService
-from smartfood_outbox import event_id
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -38,18 +37,20 @@ async def test_set_stock_stages_full_state_event():
     await svc.set_stock("rst_1", "itm_a", 25)
     await svc.set_stock("rst_1", "itm_a", 30)
     async with sessions() as s:
-        events = (await s.execute(sa.select(outbox).order_by(outbox.c.aggregate_version))).all()
+        events = (await s.execute(sa.select(outbox).order_by(outbox.c.occurred_at))).all()
     assert [e.event_type for e in events] == ["StockAdjusted", "StockAdjusted"]
     assert events[0].payload == {
         "item_id": "itm_a",
         "restaurant_id": "rst_1",
         "available": 25,
-        "version": 0,
     }
     assert events[1].payload["available"] == 30
     # Aggregate = (branch, item): a shared base item has an independent
-    # ledger per branch (ADR-0028) — item_id alone would collide ids.
-    assert events[1].id == event_id("stock", "rst_1:itm_a", 1, "StockAdjusted")
+    # ledger per branch (ADR-0028). Asserted on the column directly — it is
+    # also the Kafka partition key, so it is what keeps a branch's bumps in
+    # order (it used to be asserted through the derived id, ADR-0035).
+    assert (events[1].aggregate_type, events[1].aggregate_id) == ("stock", "rst_1:itm_a")
+    assert events[1].event_type == "StockAdjusted"
 
 
 async def _win_race_then_collide(sessions, restaurant_id: str, capacity: int):

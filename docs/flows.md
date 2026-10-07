@@ -37,7 +37,7 @@ untagged: they are the return leg of the tagged call above them.
 | Workflow ids          | `ord::{order_id}` / `dlv::{order_id}`                                 | `ord::ord_42`                            | Identity, not randomness → `REJECT_DUPLICATE` makes every re-start a no-op    |
 | Consumer dedupe       | `(consumer_group, event_id)` row, or the deterministic PK itself      | —                                        | "Have I seen this fact?" answerable only because facts have stable names      |
 
-`aggregate_version` bumps on **every** guarded transition, but only some transitions stage events — so published versions are monotone **with gaps** (this order publishes at 0, 3, 8, 9).
+Only some transitions stage events, so the published stream is sparser than the status history — an order moves through more states than it announces. Versions used to number those moves (this order published at 0, 3, 8, 9); no table carries one now (ADR-0039), and per-aggregate ordering comes from the Kafka topic key.
 
 ---
 
@@ -58,22 +58,22 @@ sequenceDiagram
     participant DB as order_db
 
     FE->>E: [HTTP] POST /v1/orders + Bearer JWT<br/>Idempotency-Key K = uuid per body-hash, from localStorage
-    Note over E: verify JWT once via JWKS<br/>STRIP client identity headers<br/>STAMP X-Auth-Sub usr_1, X-Auth-Role customer
+    Note over E: verify JWT once via JWKS<br/>STRIP client identity headers<br/>STAMP X-Auth-Sub usr_1, X-Auth-Roles customer
     E->>O: [HTTP] forward with stamped headers
     O->>DB: [DB] SELECT orders WHERE order_id = derived id<br/>row + hash match → 202 replay, current status — STOP<br/>row + hash differs → 422 reuse — STOP<br/>no row → continue (fresh placement)
     O->>I: [HTTP] GET internal address adr_1 for usr_1<br/>system headers sub=svc:order + traceparent
     I-->>O: address → delivery_address_snapshot
     O->>C: [HTTP] GET internal pricing snapshot for rst_9
-    C-->>O: menu snapshot at menu_version 7
-    Note over O: price_order with expected version 7<br/>version moved → 409 PRICE_CHANGED, synchronously<br/>ok → PricedOrder total_cents 3446
+    C-->>O: menu snapshot — prices, availability, open_now
+    Note over O: price_order with expected_total_cents 3446 — the total the<br/>customer was SHOWN (ADR-0036) — server reprices and compares<br/>total moved → 409 PRICE_CHANGED, synchronously<br/>ok → PricedOrder total_cents 3446
     Note over O: order_id = ord_ + uuid5 of "usr_1:K" → ord_42<br/>DERIVED, not random — a retry re-derives THIS id
     O->>T: [TEMPORAL] execute_update_with_start_workflow — ONE RPC<br/>start ord::ord_42, USE_EXISTING + REJECT_DUPLICATE<br/>update await_placement
     T->>W: [TEMPORAL] workflow task → activity create_order
     rect rgb(0,0,0)
         Note over W,DB: ONE TRANSACTION — the three writes
-        W->>DB: [DB] INSERT orders: status PLACED, aggregate_version 0,<br/>menu_version 7, request_hash, pricing/address/name snapshots
+        W->>DB: [DB] INSERT orders: status PLACED,<br/>request_hash, pricing/address/name snapshots
         W->>DB: [DB] INSERT order_items: name, unit_price 1200,<br/>option Family +600, line_total 3600
-        W->>DB: [DB] INSERT outbox: OrderPlaced<br/>id = uuid5 of "order:ord_42:0:OrderPlaced"
+        W->>DB: [DB] INSERT outbox: OrderPlaced<br/>id = random uuid4 (ADR-0035) — the orders PK above is<br/>what makes a retried activity idempotent, not the event id
         W->>DB: [DB] COMMIT
     end
     W-->>T: PlacementAck ord_42 PLACED — the update resolves
@@ -107,29 +107,29 @@ sequenceDiagram
     W->>INV: [HTTP] POST internal reservation for ord_42
     Note over INV: ONE TX — occupy capacity slot where active below capacity,<br/>per line UPDATE stock SET available=available-2<br/>WHERE available >= 2 — the oversell guard.<br/>INSERT reservation PK ord_42, status active,<br/>expires_at now+1800s — the reaper's death clock.<br/>Event StockReserved id = uuid5 of "reservation:ord_42:0:StockReserved"
     INV-->>W: 201 created — replay returns 200, same reservation
-    W->>DB: [DB] transition PLACED→VALIDATED, v0→1, no event
+    W->>DB: [DB] transition PLACED→VALIDATED, no event
     rect rgb(0,0,0)
         Note over W,PAY: ONE ACTIVITY — authorize_payment.<br/>The call AND the write that records its answer
         W->>PAY: [HTTP] authorize 3446 — money key "ord_42:auth"
         Note over PAY: a hold, not a movement — payments row AUTHORIZED,<br/>ledger untouched. Retries reuse the SAME PSP key,<br/>so ambiguous outcomes converge (FR-22)
         PAY-->>W: 200 AUTHORIZED
-        W->>DB: [DB] transition VALIDATED→PAYMENT_CLEARED, v1→2, no event.<br/>NOT a second round trip from the workflow — it is the tail of<br/>this activity: the instant money is held, a void is owed, so<br/>that fact is written before the activity is allowed to finish
+        W->>DB: [DB] transition VALIDATED→PAYMENT_CLEARED, no event.<br/>NOT a second round trip from the workflow — it is the tail of<br/>this activity: the instant money is held, a void is owed, so<br/>that fact is written before the activity is allowed to finish
     end
-    W->>DB: [DB] confirm_order — a SEPARATE activity:<br/>PAYMENT_CLEARED→CONFIRMED, v2→3, plus event<br/>OrderConfirmed id = uuid5 of "order:ord_42:3:OrderConfirmed"
+    W->>DB: [DB] confirm_order — a SEPARATE activity:<br/>PAYMENT_CLEARED→CONFIRMED, plus event<br/>OrderConfirmed — id is a random uuid4 (ADR-0035)
     Note over W,DB: Why two, not one VALIDATED→CONFIRMED write:<br/>(1) PAYMENT_CLEARED is the only state meaning "money held, order not yet<br/>confirmed" — what the unwind reads to decide void AND release —<br/>(2) expected= makes each write a compare-and-swap, so a cancel landing<br/>between them fails confirm_order instead of overwriting the cancel —<br/>(3) retrying the confirmation must never re-call the PSP
     Note over W: wait_condition — restaurant_decision signal<br/>OR cancel_requested OR 180s timer
     K->>W: [TEMPORAL] signal restaurant_decision accept
     W->>D: [TEMPORAL] start child dlv::ord_42, REQUEST_CANCEL policy —<br/>BEFORE mark_accepted, so ACCEPTED in DB implies child exists
-    W->>DB: [DB] transition to ACCEPTED, v3→4
-    K->>DB: [DB] preparing v4→5, ready v5→6 — direct transition calls
+    W->>DB: [DB] transition to ACCEPTED
+    K->>DB: [DB] preparing, then ready — direct transition calls
     K->>D: [TEMPORAL] signal food_ready — sent post-commit, re-sent on replay
     Note over D: pickup timer, then dropoff timer —<br/>the simulated courier — dispatch milestone replaces this
-    D->>DB: [DB] transition to PICKED_UP, v6→7
-    D->>DB: [DB] transition to DELIVERED, v7→8, plus event OrderDelivered at v8
+    D->>DB: [DB] transition to PICKED_UP
+    D->>DB: [DB] transition to DELIVERED, plus event OrderDelivered
     W->>PAY: [HTTP] capture — money key "ord_42:capture"
     Note over PAY: amount from the STORED auth row, never the caller.<br/>Ledger pair — debit customer 3446, credit platform_cash 3446
     W->>INV: [HTTP] commit reservation — active→consumed,<br/>slot freed, stock stays sold
-    W->>DB: [DB] transition to SETTLED, v8→9, plus event OrderSettled at v9
+    W->>DB: [DB] transition to SETTLED, plus event OrderSettled
 ```
 
 ---
@@ -148,15 +148,15 @@ sequenceDiagram
     participant N as notification
 
     W->>INV: [HTTP] reserve → 201 — stock 100→98, slot occupied
-    W->>DB: [DB] PLACED→VALIDATED, v0→1
+    W->>DB: [DB] PLACED→VALIDATED
     W->>PAY: [HTTP] authorize — money key "ord_42:auth"
     Note over PAY: DECLINED row stored + the 402 body stored —<br/>a replayed authorize returns the SAME 402
     PAY-->>W: 402 PAYMENT_DECLINED → value "declined"
     Note over W: no exception — the value routes the workflow<br/>to the unwind. No void — nothing was held.
-    W->>DB: [DB] BEGIN_CANCEL — VALIDATED→CANCELLING, v1→2,<br/>cancel_reason stamped NOW = payment_declined
+    W->>DB: [DB] BEGIN_CANCEL — VALIDATED→CANCELLING,<br/>plus an order_cancellations row: payment_declined,<br/>cancelled_at stamped NOW — the DECISION moment
     W->>INV: [HTTP] release reservation, reason cancelled
     Note over INV: guarded active→released — stock 98→100,<br/>slot freed. A second release is a no-op.
-    W->>DB: [DB] finish_cancel — CANCELLING→CANCELLED, v2→3,<br/>plus event OrderCancelled at v3, cancel_reason inside
+    W->>DB: [DB] finish_cancel — CANCELLING→CANCELLED,<br/>plus event OrderCancelled, cancel_reason inside.<br/>The cancellation row is NOT rewritten — first writer wins
     N-->>N: [KAFKA] via Kafka, mints the customer notification —<br/>"Your card was declined, order never reached Biryani House"
     Note over W,N: FE poll shows CANCELLED + reason copy —<br/>the bell badges the durable record
 ```
@@ -181,7 +181,7 @@ sequenceDiagram
         INV--xW: [HTTP] unreachable — Name or service not known
     end
     Note over W: deadline reached. The last failure is a RETRYABLE error,<br/>not a non_retryable fault — so the workflow reads it as<br/>RAN OUT OF TIME, not IllegalTransition, and unwinds cleanly
-    W->>DB: [DB] begin_cancel — PLACED→CANCELLING, v0→1,<br/>cancel_reason system_timeout stamped NOW
+    W->>DB: [DB] begin_cancel — PLACED→CANCELLING,<br/>plus an order_cancellations row: system_timeout,<br/>cancelled_at stamped NOW
     Note over W: the reserve MAY have half-landed on a lost attempt,<br/>so release anyway — no void, nothing could be authorized at PLACED.<br/>Both undos are idempotent no-ops if the acquire never happened
     loop retry FOREVER — compensations are never deadline-bounded
         W->>INV: [HTTP] release_reservation
@@ -190,7 +190,7 @@ sequenceDiagram
     Note over W,INV: inventory comes back
     W->>INV: [HTTP] release_reservation
     INV-->>W: released — active→released, or a no-op if never reserved
-    W->>DB: [DB] finish_cancel — CANCELLING→CANCELLED, v1→2,<br/>plus event OrderCancelled at v2, cancel_reason inside
+    W->>DB: [DB] finish_cancel — CANCELLING→CANCELLED,<br/>plus event OrderCancelled, cancel_reason inside
     N-->>N: [KAFKA] via Kafka — "We couldn't reach Biryani House in time,<br/>your order was cancelled. Your card was not charged."
 ```
 
@@ -413,7 +413,7 @@ sequenceDiagram
     SND->>I: [HTTP] GET /v1/internal/users/usr_1 — resolve the<br/>CURRENT email at SEND time (events carry no PII) —<br/>system-authed, 404 → park (no_recipient), 5xx → retry
     I-->>SND: {email} — never logged, never stored
     SND->>M: [HTTP] POST /mailer/send {to, subject, body,<br/>attachment_key} — the reference, never the bytes
-    M-->>SND: 202 {message_id}<br/>(5xx → autoretry with backoff+jitter —<br/>4xx → PARK: failed_at set, no retries — poison)
+    M-->>SND: 202 {message_id}<br/>(5xx → autoretry with backoff+jitter —<br/>4xx → PARK: status=parked, no retries — poison)
     SND->>DB: [DB] INSERT delivery_log — existence = sent
     Note over Q,DB: BEAT (every 5m): sweep_unsent_receipts —<br/>receipts LEFT JOIN delivery_log, older than the<br/>grace window, not parked → re-enqueue the chain.<br/>A lost nudge costs one sweep interval, never the receipt.
 ```
@@ -427,7 +427,7 @@ Where the money-document guarantees live:
 | Worker killed mid-task | acks_late → RabbitMQ redelivers; render overwrites, send checks the log |
 | Mailer 5xx / unreachable | `MailerUnavailable` → autoretry, deterministic exponential backoff, max 8 |
 | Identity 5xx / unreachable | `ContactsUnavailable` → same autoretry — the lookup happens inside the retryable task on purpose |
-| Mailer 4xx (bad recipient) | `MailerRejected` → `failed_at` parks it OUT of the sweeper; clearing it is the replay lever |
+| Mailer 4xx (bad recipient) | `MailerRejected` → `status='parked'` takes it out of the sweeper's partial index; setting it back to `pending` is the replay lever |
 | Identity 404 (no such user) | `UnknownRecipient` → parked the same way (`no_recipient`) — a data bug a human must see |
 | Crash between send and record | the one residual: ONE duplicate email — chosen over claim-first, which turns the same crash into a receipt that never arrives |
 
@@ -510,7 +510,149 @@ sequenceDiagram
     KF->>OD: [KAFKA] brand_id in every branch payload heals legacy rows<br/>(orders, order_facts, menu_views: SET brand_id WHERE IS NULL)<br/>— the cutover storm was exactly this, replayed for 22 brands
 ```
 
-Why the pinned `menu_version` never learned about brands: a cart pins the BRANCH's version; any base edit moves that same number through the fan-out, so placement's `MenuVersionChanged` → 409 `PRICE_CHANGED` re-confirm fires exactly as it always did.
+Why brands needed no placement change: a cart never pinned a version at all after ADR-0036 — it consents to the total from its live quote, and a base edit only refuses the cart if it moved *that cart's* total. (Before 0036 the cart pinned the BRANCH's version, and any base edit moved that number through the fan-out, so every in-flight cart at every branch was refused.)
+
+The read side of the same inheritance — how `base ∪ local − overrides` is actually computed — is diagram 13.
+
+---
+
+## 13. Brands — rendering a branch's effective menu (`GET /v1/menus/{rid}`)
+
+The mirror of diagram 12: that one pays the fan-out cost at WRITE time, this
+one assembles the inherited menu at READ time. "Render" here means one
+specific thing — **turning five flat result sets into one nested tree**.
+Categories → items → modifier groups → options is a tree; SQL returns lists.
+Closing that gap without N+1 (a query per parent row) and without a 5-way
+JOIN (which multiplies rows: one item × 3 options × 2 tags = 6 duplicates)
+is the entire job.
+
+Brands add exactly two things to it: the scope is `IN (brand_id, branch_id)`
+instead of one id, and a set-subtraction flips locally-86'd base items to
+unavailable. Everything else is the same render the platform had before
+brands existed.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant FE as Customer app
+    participant C as catalog
+    participant R as Redis
+    participant CDB as catalog_db
+
+    FE->>C: [HTTP] GET /v1/menus/rst_10 — the Airport BRANCH
+    C->>R: [REDIS] GET catalog:menu:rst_10 — key is per BRANCH,<br/>the blob is the already-computed effective menu
+    alt cache hit — the common path
+        R-->>C: the finished tree
+        C-->>FE: 200 — zero SQL. Inheritance costs NOTHING on a hit.
+    else miss — render it
+        C->>R: [REDIS] SET NX lock:menu:rst_10, 3s — singleflight:<br/>one renderer per restaurant — losers wait 50ms and re-check
+        Note over C,CDB: THE RENDER — 9 queries, FLAT in menu size
+        C->>CDB: [DB] 1. SELECT restaurants WHERE id = rst_10
+        CDB-->>C: kind=branch, brand_id=brd_9, version=7
+        C->>CDB: [DB] 2. SELECT restaurant_cuisines — _read builds the FULL<br/>domain model, but this path discards cuisines.<br/>KNOWN REDUNDANCY — see the note below the diagram
+        Note over C: _menu_scope: brand_id is not null, so scope = brd_9 + rst_10.<br/>THE HIERARCHY IS A COLUMN ON THE ROW WE JUST READ —<br/>no self-join, no recursive CTE, depth-1 by construction
+        C->>CDB: [DB] 3. SELECT item_id FROM branch_item_overrides<br/>WHERE branch_id = rst_10
+        CDB-->>C: the 86 set — itm_pulao
+        C->>CDB: [DB] 4. SELECT menu_categories WHERE restaurant_id IN scope
+        C->>CDB: [DB] 5. SELECT menu_items WHERE restaurant_id IN scope<br/>← the IN-list IS the base ∪ local union.<br/>86'd rows COME BACK: they render greyed, not missing
+        C->>CDB: [DB] 6. SELECT item_tags WHERE item_id IN the found ids
+        C->>CDB: [DB] 7. SELECT modifier_groups WHERE item_id IN the found ids
+        C->>CDB: [DB] 8. SELECT modifier_options WHERE group_id IN the found ids
+        Note over C: [LOCAL] the stitch — see the pipeline below.<br/>Five flat lists become one tree, in memory
+        C->>CDB: [DB] 9. re-read version — moved? the doc TORE under<br/>READ COMMITTED: re-render. Bounded at 3 tries.<br/>Stale is display-only, mixed-version is not
+        C->>R: [REDIS] SET catalog:menu:rst_10, TTL 300s
+        C-->>FE: 200 — effective menu + version
+        C->>C: [LOCAL] MenuViewed telemetry, fire-and-forget (diagram 7)
+    end
+```
+
+### The query budget — and why it is 9, not 1
+
+Nine on a miss, **flat in menu size** — that flatness is the property that
+matters, not the constant. Two of the nine are worth knowing:
+
+- **Query 2 is dead weight on this path.** `_read` builds the whole
+  `Restaurant` domain model, and `_profile` genuinely needs `cuisines` for
+  the compacted-topic event payload — but neither the menu doc nor the
+  pricing snapshot emits cuisines. A `_read` variant that skips them takes
+  the menu render to 8 and, more importantly, `pricing_read` from 7 to 6 on
+  the **uncached money path** — every checkout pays that one.
+- **Query 9 is the tearing guard, not a read.** It re-reads only the version
+  column. Merging it into the render is not possible: its whole job is to
+  observe a value *after* the other reads finished.
+
+Collapsing 3–8 into a single `jsonb_agg` tree query is achievable in
+PostgreSQL and was considered and declined. `db.py` must stay
+sqlite-compatible for the unit suite, so a PG-only render would follow the
+`search.py` precedent — stubbed sessions in unit tests, correctness proven
+only by the live smoke. That trade is acceptable for search, where ranking
+is fuzzy anyway; it is not acceptable for the most-read endpoint in the
+platform, whose output feeds `available` and `source` semantics. It would
+also move CPU from the tier that scales cheapest (catalog pods) to the one
+that scales hardest (Postgres).
+
+### The stitch — five flat lists into one tree
+
+```mermaid
+flowchart TB
+    A["restaurants row rst_10<br/>kind=branch, brand_id = brd_9"] --> B["_menu_scope = brd_9 + rst_10<br/>a brand or a legacy row scopes to its own id alone"]
+    A --> O["override set for rst_10<br/>itm_pulao — skipped entirely when brand_id is null"]
+    B --> C["categories WHERE restaurant_id IN scope<br/>cat_rice·brd_9 · cat_drinks·brd_9 · cat_local·rst_10"]
+    B --> D["items WHERE restaurant_id IN scope — base ∪ local<br/>itm_biryani·brd_9 · itm_pulao·brd_9 · itm_lassi·brd_9<br/>itm_kebab·rst_10 · itm_wrap·rst_10"]
+    D --> E["tags, modifier_groups, modifier_options<br/>fetched by the item ids just found"]
+    E --> F["BUCKET BY PARENT ID — this is what replaces N+1<br/>groups_by_item · options_by_group · tags_by_item<br/>one pass to index, then O(1) lookups"]
+    F --> G["PER ITEM, three lines do all the brand work:<br/>source = local if item.restaurant_id equals rst_10, else base<br/>available = false if the id is in the override set<br/>append into items_by_category, keyed by category_id"]
+    O --> G
+    G --> H["EMIT — walk the rank-ordered categories,<br/>attach each item bucket. Tree assembled."]
+    C --> H
+```
+
+Trace the five items through that middle box — this table is the whole feature:
+
+| item | owner | `source` | 86'd here? | `available` | lands in |
+| ---- | ----- | -------- | ---------- | ----------- | -------- |
+| itm_biryani | brd_9 | `base` | no | true | cat_rice |
+| itm_pulao | brd_9 | `base` | **yes** | **false** | cat_rice |
+| itm_lassi | brd_9 | `base` | no | true | cat_drinks |
+| itm_kebab | rst_10 | `local` | no | true | **cat_rice** |
+| itm_wrap | rst_10 | `local` | no | true | cat_local |
+
+Three things that table makes visible:
+
+1. **`source` is computed, not stored** — `item.restaurant_id == restaurant.id`. It tells the owner dashboard which items are editable here (`local`) versus inherited from the brand (`base`).
+2. **The 86 is a set-membership test, not a SQL anti-join** — because the item must still appear, greyed out. An anti-join would delete it from the response.
+3. **Bucketing is by `category_id` regardless of who owns the category** — so `itm_kebab`, a branch-local item filed under a brand category, sits in Rice Dishes right next to the inherited Biryani. Base and local intermix naturally.
+
+### The same code, three callers
+
+`_menu_scope` is the only place that knows about inheritance, which is why
+nothing else needed a brand/branch special case:
+
+| Read | Scope | Overrides | Result |
+| ---- | ----- | --------- | ------ |
+| `GET /v1/menus/rst_10` (Airport) | `brd_9, rst_10` | `itm_pulao` | base − Pulao + Kebab + Wrap |
+| `GET /v1/menus/rst_9` (Main) | `brd_9, rst_9` | none | the plain base menu, all `source: base` |
+| `GET /v1/menus/brd_9` (the brand) | `brd_9` | skipped — no `brand_id` | the base menu the owner edits |
+| legacy pre-brands row | its own id | skipped | byte-identical to pre-ADR-0028 behaviour |
+
+Note the guard is `if restaurant.brand_id is not None`, **never** `if kind ==
+'brand'` — the parent pointer is the discriminator that matters, which is
+exactly why legacy rows needed no backfill to keep working.
+
+**No branch ever stores a copy of the base menu.** It is computed per render
+and cached per branch — that is the trade ADR-0028 made: pay at read time
+(absorbed by the cache) rather than own N materialized copies and a
+reconciliation problem forever.
+
+### The money path is the same scope, different guarantees
+
+`GET /v1/internal/restaurants/{rid}/snapshot` (diagram 1, step 4) calls the
+identical `_menu_scope` but **bypasses every cache** — money math reads truth
+— and selects only the requested item ids. The scope lives in the `WHERE`, so
+an item belonging to another brand simply does not come back; it lands in
+`missing_item_ids` and pricing rejects the cart. Ownership is structural
+there, not a check anyone can forget. The 86 collapses into the same boolean
+the pricing engine already reads: `available AND id NOT IN overrides`.
 
 ---
 

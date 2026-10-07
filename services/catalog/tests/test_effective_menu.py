@@ -4,8 +4,7 @@ Rows are hand-inserted (the write surfaces land with the cutover slice)."""
 
 from datetime import UTC, datetime
 
-from catalog.adapters.repo import CatalogRepo
-from catalog.db import branch_item_overrides, restaurants
+from catalog.db import branch_item_overrides, branch_metadata, restaurants
 from catalog.domain.service import CatalogService
 
 from .test_domain import _NullSearch, _service
@@ -30,18 +29,27 @@ async def _insert_row(
                 id=rid,
                 owner_user_id=owner,
                 name=name,
-                city=city,
-                status="open",
-                hours=None,
-                timezone="America/Chicago",
-                version=0,
                 kind=kind,
-                brand_id=brand_id,
-                branch_label=label,
                 created_at=_NOW,
                 updated_at=_NOW,
             )
         )
+        if kind == "branch":
+            # Not optional even though no constraint forces it: a branch with
+            # no metadata row renders only its local items and looks fine,
+            # so the fixture has to build the same pair the repo does.
+            await s.execute(
+                branch_metadata.insert().values(
+                    restaurant_id=rid,
+                    brand_id=brand_id,
+                    branch_label=label,
+                    city=city,
+                    status="open",
+                    hours=None,
+                    timezone="America/Chicago",
+                    updated_at=_NOW,
+                )
+            )
         await s.commit()
 
 
@@ -168,32 +176,19 @@ async def test_browse_tag_filter_sees_inherited_items_minus_overrides(grants, ca
     assert {r["id"] for r in tagged["restaurants"]} == {"rst_dt"}
 
 
-# ── torn-read guard through a branch scope ─────────────────────────
+# ── snapshot consistency through a branch scope ────────────────────
 
 
-async def test_branch_render_retries_when_the_branch_version_moves(grants, cache, monkeypatch):
-    """The fan-out (cutover slice) bumps a BRANCH version when its base
-    changes; the renderer's re-check must catch that motion mid-read."""
-    svc, sessions, _, _ = await _brand_world(grants, cache)
-
-    real = CatalogRepo.get_menu_rows
-    calls = {"n": 0}
-
-    async def tearing(self, scope_ids):
-        calls["n"] += 1
-        rows = await real(self, scope_ids)
-        if calls["n"] == 1:  # a base edit's fan-out lands mid-render
-            await self._s.execute(
-                restaurants.update()
-                .where(restaurants.c.id == "rst_dt")
-                .values(version=restaurants.c.version + 1)
-            )
-        return rows
-
-    monkeypatch.setattr(CatalogRepo, "get_menu_rows", tearing)
+async def test_branch_render_reads_the_brand_and_its_own_rows_in_one_snapshot(grants, cache):
+    """A branch render spans BOTH restaurants rows (its own and its brand's)
+    and both menus. The base-edit fan-out touches all of them, so this is the
+    read most exposed to tearing — it must run inside one snapshot rather
+    than re-checking a version afterwards (ADR-0037)."""
+    svc, _sessions, base_item, local_item = await _brand_world(grants, cache)
     doc = await svc.get_menu("rst_dt")
-    assert calls["n"] == 2  # first pass torn → re-rendered
     assert doc["brand_id"] == "brd_1"
+    ids = [i["id"] for c in doc["categories"] for i in c["items"]]
+    assert base_item in ids and local_item in ids  # both scopes, one snapshot
 
 
 async def test_null_search_is_a_search_port(grants, cache):

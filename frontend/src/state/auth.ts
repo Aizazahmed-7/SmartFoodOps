@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Claims } from "../api/types";
+import type { Claims, Role } from "../api/types";
 
 // The ADR-0020 client contract: a half-finished onboarding is persisted and
 // silently replayed on every app load until the grant lands.
@@ -18,6 +18,14 @@ interface AuthState {
   setTokens: (access: string, refresh: string) => void;
   setPendingOnboarding: (p: PendingOnboarding | null) => void;
   logout: () => void;
+}
+
+/** Does this session hold `role`? Ordering the calls at a branch IS the
+ *  precedence rule — check restaurant_admin before rider before customer.
+ *  Falsy for a pre-multi-role token still sitting in localStorage; that
+ *  self-corrects at the next refresh (access tokens live 15 minutes). */
+export function hasRole(claims: Claims | null, role: Role): boolean {
+  return claims?.roles?.includes(role) ?? false;
 }
 
 export function decodeClaims(token: string): Claims {

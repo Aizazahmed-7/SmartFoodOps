@@ -72,7 +72,6 @@ class DispatchEvents:
                     "event_type": str(event_type),
                     "aggregate_type": aggregate_type,
                     "aggregate_id": aggregate_id,
-                    "aggregate_version": 0,
                     "occurred_at": now,
                     "cell_id": self._cell_id,
                     "payload": json.dumps({**payload, "occurred_at": now.isoformat()}),

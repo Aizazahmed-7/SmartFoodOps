@@ -31,9 +31,12 @@ def test_build_queries_filter_permutations():
 
     full = build_queries("springfield", "pakistani", "halal")
     for leg in full.values():  # filters constrain every leg identically
-        assert "r.city = :city" in leg
+        assert "bm.city = :city" in leg  # city moved to branch_metadata
         assert "rc.cuisine = :cuisine" in leg
         assert "it.tag = :tag AND mi.available" in leg
+        # Every leg must JOIN what its filters reference, or the SQL is
+        # invalid — and this file never executes, so nothing else says so.
+        assert "branch_metadata bm" in leg
 
     # Fuzzy + FTS present where they belong:
     assert "word_similarity(:q, r.name)" in full["restaurants"]

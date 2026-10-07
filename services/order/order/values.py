@@ -49,7 +49,6 @@ class PlacementInput:
     restaurant_id: str
     restaurant_name: str
     card_token: str
-    menu_version: int
     currency: str
     amount_cents: int
     placed_at: str

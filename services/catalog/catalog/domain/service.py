@@ -20,7 +20,6 @@ import json
 import time
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -32,6 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.repo import CatalogRepo
+from ..db import BRANCH_OWNED_COLUMNS
 from .models import Restaurant
 from .ports import CachePort, GrantsPort, SearchPort
 
@@ -90,6 +90,24 @@ class BranchLimitReached(CatalogError):
     the base-edit fan-out transaction (ADR-0028)."""
 
 
+class BranchOwnedField(CatalogError):
+    """A brand PATCH tried to change a field the BRANCH owns (lat, lon,
+    hours, timezone) — those live on branch_metadata, which a brand has no
+    row in. Without this the UPDATE would match zero rows and the PATCH
+    would return 200 having changed nothing."""
+
+    def __init__(self, field: str):
+        self.field = field
+        super().__init__(field)
+
+
+class BranchOnlyAction(CatalogError):
+    """A brand was given an action only a branch can take (pause/resume).
+    A brand has no `status` to set — it is a menu template, not a place.
+    The partner console already hides the control for brand scope; this is
+    the API saying the same thing to anything that asks directly."""
+
+
 class BrandOwnedField(CatalogError):
     """A branch PATCH tried to change a field the brand owns (name,
     cuisines) — edit the brand; copies propagate."""
@@ -129,6 +147,15 @@ class CatalogService:
         row = await repo.get_restaurant(restaurant_id)
         if row is None:
             raise RestaurantNotFound
+        if row.kind == "branch" and row.metadata_id is None:
+            # A branch with no branch_metadata row. SQL cannot forbid this
+            # (see db.py), so it is caught HERE instead of rendered: without
+            # the guard brand_id reads NULL, _menu_scope treats the branch as
+            # a brand, and the customer gets the local items with no base
+            # menu — wrong, and silent. 404 keeps it out of the customer's
+            # face; the log is what makes it ops-visible.
+            log.error("branch is missing its metadata row", restaurant=restaurant_id)
+            raise RestaurantNotFound
         cuisines = await repo.get_cuisines(restaurant_id)
         return Restaurant(
             id=row.id,
@@ -141,7 +168,6 @@ class CatalogService:
             lon=row.lon,
             hours=row.hours,
             timezone=row.timezone,
-            version=row.version,
             kind=row.kind,
             brand_id=row.brand_id,
             branch_label=row.branch_label,
@@ -294,17 +320,16 @@ class CatalogService:
         now: datetime,
         extra: dict[str, Any] | None = None,
     ) -> Restaurant:
-        """One aggregate's bump + full-state event, inside the caller's tx."""
+        """One aggregate's touch + full-state event, inside the caller's tx."""
         menu = await self._menu_snapshot(repo, restaurant)
-        version = await repo.bump_version(restaurant.id, now)
+        await repo.touch(restaurant.id, now)
         await repo.stage_event(
             restaurant_id=restaurant.id,
-            version=version,
             event_type=event_type,
             payload={**self._profile(restaurant), "menu": menu, **(extra or {})},
             now=now,
         )
-        return replace(restaurant, version=version)
+        return restaurant
 
     async def _publish(
         self,
@@ -315,12 +340,11 @@ class CatalogService:
     ) -> tuple[Restaurant, list[str]]:
         """Version bump + outbox event with a full-state payload, inside the
         caller's tx. For a BRANCH: one aggregate, as ever. For a BRAND, the
-        fan-out (ADR-0028): every branch's version bumps and every branch
-        stages its own full-EFFECTIVE-state event too — which is exactly why
-        menu_version pinning, cache keying and inventory provisioning never
-        had to learn about inheritance. All of it commits together with the
-        caller's data writes or not at all. Returns the target at its new
-        version plus every menu-cache id the caller must invalidate
+        fan-out (ADR-0028): every branch stages its own full-EFFECTIVE-state
+        event too — which is exactly why cache keying and inventory
+        provisioning never had to learn about inheritance. All of it commits
+        together with the caller's data writes or not at all. Returns the
+        target plus every menu-cache id the caller must invalidate
         post-commit (bounded by MAX_BRANCHES)."""
         restaurant = await self._read(repo, restaurant_id)
         now = _now()
@@ -445,8 +469,13 @@ class CatalogService:
                     raise BrandOwnedField("name")
                 if cuisines is not None:
                     raise BrandOwnedField("cuisines")
+            else:
+                # And the mirror: place-shaped fields belong to the branch.
+                # Ordered so the error names the same field every time.
+                for field in sorted(set(changes) & set(BRANCH_OWNED_COLUMNS)):
+                    raise BranchOwnedField(field)
             if changes:
-                await repo.update_restaurant(restaurant_id, changes)
+                await repo.update_restaurant(restaurant_id, changes, _now())
             if cuisines is not None:
                 await repo.set_cuisines(restaurant_id, cuisines)
             if target.kind == "brand" and "name" in changes:
@@ -485,8 +514,16 @@ class CatalogService:
             existing = await repo.get_branch_by_label(brand_id, branch_label)
             if existing is not None:
                 return await self._read(repo, existing.id), False
-            if len(await repo.get_branches(brand_id)) >= MAX_BRANCHES:
+            siblings = await repo.get_branches(brand_id)
+            if len(siblings) >= MAX_BRANCHES:
                 raise BranchLimitReached
+            # An omitted timezone used to inherit the BRAND's, and a brand no
+            # longer has one (0009). The brand's value was itself a copy of
+            # its first branch's — onboarding writes the same value to both,
+            # and 0007 copied the legacy branch's up — so reading the first
+            # sibling is the faithful translation, not a new rule. Free: the
+            # cap check above already fetched them.
+            inherited = siblings[0].timezone if siblings else self._default_timezone
             try:
                 branch_id = await repo.insert_restaurant(
                     owner_user_id=brand.owner_user_id,
@@ -495,7 +532,7 @@ class CatalogService:
                     lat=lat,
                     lon=lon,
                     hours=hours,
-                    timezone=timezone or brand.timezone,
+                    timezone=timezone or inherited,
                     now=_now(),
                     kind="branch",
                     brand_id=brand_id,
@@ -544,7 +581,7 @@ class CatalogService:
             branch, affected = await self._publish(repo, branch_id, EventType.ITEM_UPDATED)
             await session.commit()
         await self._invalidate_menus(affected)
-        return {"item_id": item_id, "available": available, "version": branch.version}
+        return {"item_id": item_id, "available": available}
 
     async def converge_brand_events(self) -> int:
         """The cutover storm (runs at boot, after migrations): every brand
@@ -571,9 +608,20 @@ class CatalogService:
     async def set_status(self, restaurant_id: str, status: str) -> Restaurant:
         async with self._sessions() as session:
             repo = CatalogRepo(session)
-            rowcount = await repo.update_restaurant(restaurant_id, {"status": status})
-            if rowcount == 0:
-                raise RestaurantNotFound
+            # Read FIRST so a brand gets a straight answer. Since 0009 the
+            # status column lives on branch_metadata, which a brand has no
+            # row in — without this the UPDATE would match nothing and the
+            # owner would get "unknown restaurant" for a brand that exists.
+            # Costs no extra round trip: _publish below re-reads anyway.
+            target = await self._read(repo, restaurant_id)
+            if target.kind == "brand":
+                raise BranchOnlyAction
+            # No rowcount check: _read has already established that the row
+            # exists, is a branch, and HAS a metadata row — and nothing in
+            # this service deletes either row, so the UPDATE cannot miss.
+            # A `if rowcount == 0` here would imply a race that no writer
+            # can cause. Reinstate it the day a delete path is added.
+            await repo.update_restaurant(restaurant_id, {"status": status}, _now())
             event = (
                 EventType.RESTAURANT_PAUSED if status == "paused" else EventType.RESTAURANT_RESUMED
             )
@@ -591,12 +639,10 @@ class CatalogService:
             if await repo.get_restaurant(restaurant_id) is None:
                 raise RestaurantNotFound
             category_id = await repo.insert_category(restaurant_id, name=name, rank=rank)
-            restaurant, affected = await self._publish(
-                repo, restaurant_id, EventType.CATEGORY_ADDED
-            )
+            _, affected = await self._publish(repo, restaurant_id, EventType.CATEGORY_ADDED)
             await session.commit()
         await self._invalidate_menus(affected)
-        return {"id": category_id, "name": name, "rank": rank, "version": restaurant.version}
+        return {"id": category_id, "name": name, "rank": rank}
 
     async def update_category(
         self, restaurant_id: str, category_id: str, changes: dict[str, Any]
@@ -610,12 +656,10 @@ class CatalogService:
                 raise CategoryNotFound
             row = await repo.get_category(restaurant_id, category_id)
             assert row is not None  # just updated it inside this tx
-            restaurant, affected = await self._publish(
-                repo, restaurant_id, EventType.CATEGORY_UPDATED
-            )
+            _, affected = await self._publish(repo, restaurant_id, EventType.CATEGORY_UPDATED)
             await session.commit()
         await self._invalidate_menus(affected)
-        return {"id": row.id, "name": row.name, "rank": row.rank, "version": restaurant.version}
+        return {"id": row.id, "name": row.name, "rank": row.rank}
 
     async def delete_category(self, restaurant_id: str, category_id: str) -> dict[str, Any]:
         async with self._sessions() as session:
@@ -625,12 +669,10 @@ class CatalogService:
             if await repo.count_category_items(restaurant_id, category_id) > 0:
                 raise CategoryNotEmpty  # explicit: move/delete items first
             await repo.delete_category(restaurant_id, category_id)
-            restaurant, affected = await self._publish(
-                repo, restaurant_id, EventType.CATEGORY_DELETED
-            )
+            _, affected = await self._publish(repo, restaurant_id, EventType.CATEGORY_DELETED)
             await session.commit()
         await self._invalidate_menus(affected)
-        return {"status": "deleted", "version": restaurant.version}
+        return {"status": "deleted"}
 
     # ── menu: items ────────────────────────────────────────────────
 
@@ -657,7 +699,7 @@ class CatalogService:
             restaurant, affected = await self._publish(repo, restaurant_id, EventType.ITEM_ADDED)
             await session.commit()
         await self._invalidate_menus(affected)
-        return {**item, "version": restaurant.version}
+        return item
 
     async def update_item(
         self,
@@ -687,10 +729,10 @@ class CatalogService:
                 await repo.delete_item_modifiers(item_id)
                 await repo.insert_modifier_groups(item_id, modifier_groups)
             item = await self._read_item(repo, restaurant_id, item_id)
-            restaurant, affected = await self._publish(repo, restaurant_id, EventType.ITEM_UPDATED)
+            _, affected = await self._publish(repo, restaurant_id, EventType.ITEM_UPDATED)
             await session.commit()
         await self._invalidate_menus(affected)
-        return {**item, "version": restaurant.version}
+        return item
 
     async def delete_item(self, restaurant_id: str, item_id: str) -> dict[str, Any]:
         async with self._sessions() as session:
@@ -702,10 +744,10 @@ class CatalogService:
             await repo.delete_item_modifiers(item_id)
             await repo.delete_item_tags(item_id)
             await repo.delete_item(item_id)
-            restaurant, affected = await self._publish(repo, restaurant_id, EventType.ITEM_DELETED)
+            _, affected = await self._publish(repo, restaurant_id, EventType.ITEM_DELETED)
             await session.commit()
         await self._invalidate_menus(affected)
-        return {"status": "deleted", "version": restaurant.version}
+        return {"status": "deleted"}
 
     # ── menu: the cached read path (docs §7 rows 3/5) ──────────────
 
@@ -741,7 +783,6 @@ class CatalogService:
                 "display_name": restaurant.display_name,
                 "brand_id": restaurant.brand_id,
                 "status": restaurant.status,
-                "version": restaurant.version,
                 **menu,
             }
             await self._cache.set(_menu_key(restaurant_id), json.dumps(doc), MENU_TTL_SECONDS)
@@ -750,7 +791,6 @@ class CatalogService:
             log.info(
                 "menu rendered",
                 restaurant_id=restaurant_id,
-                version=restaurant.version,
                 duration_ms=round((time.perf_counter() - started) * 1000, 1),
             )
             return doc
@@ -761,20 +801,17 @@ class CatalogService:
     async def _consistent_read(
         self, repo: CatalogRepo, restaurant_id: str
     ) -> tuple[Restaurant, dict[str, Any]]:
-        """Version re-check: under READ COMMITTED our reads can tear (rows
-        from v N+1 under version N). A torn doc would advertise a version
-        its rows don't match — re-read the version and retry if it moved.
-        Bounded: after 3 tries serve the last read (staleness is
-        display-only; a mixed-version doc is not)."""
+        """The profile and the menu, from ONE snapshot.
+
+        These are ~9 queries; under READ COMMITTED they could straddle a
+        commit and render a doc mixing two menus — an item priced from the
+        old menu next to one from the new. The snapshot removes the
+        interleaving instead of detecting it afterwards, which is what the
+        bounded version re-read loop this replaced could only do
+        probabilistically (ADR-0037)."""
+        await repo.begin_snapshot()
         restaurant = await self._read(repo, restaurant_id)
-        menu = await self._menu_snapshot(repo, restaurant)
-        for _ in range(2):  # bounded retries
-            check = await repo.get_restaurant(restaurant_id)
-            if check is None or check.version == restaurant.version:
-                break
-            restaurant = await self._read(repo, restaurant_id)
-            menu = await self._menu_snapshot(repo, restaurant)
-        return restaurant, menu
+        return restaurant, await self._menu_snapshot(repo, restaurant)
 
     # ── browse (docs §7 row 4: 60s pages, staleness is priced) ─────
 
@@ -815,7 +852,6 @@ class CatalogService:
                     "city": r.city,
                     "cuisines": cuisines_by_restaurant[r.id],
                     "status": r.status,
-                    "version": r.version,
                     # The toy-city pins (dispatch milestone): the rider map
                     # draws every restaurant from this one browse call.
                     "lat": r.lat,
@@ -835,26 +871,21 @@ class CatalogService:
         """Computes a consistent point-in-time view for Order's pricing
         library — it persists NOTHING; the durable pricing snapshot lives in
         order_db. Deliberately bypasses every cache (money math reads truth),
-        with the same bounded version re-check as the blob renderer: a price
-        edit landing mid-read must not produce a mixed-version view."""
+        and reads from one snapshot like the blob renderer: a price edit
+        landing mid-read must not produce a mixed-menu view."""
         async with self._sessions() as session:
             repo = CatalogRepo(session)
+            # One snapshot for all four reads (ADR-0037). This is the money
+            # path: a torn read here could price one line from the old menu
+            # and another from the new, and the customer would be charged a
+            # total that never existed on any single menu.
+            await repo.begin_snapshot()
             restaurant = await self._read(repo, restaurant_id)
             scope = self._menu_scope(restaurant)
             overrides: set[str] = (
                 await repo.get_override_ids(restaurant_id) if restaurant.brand_id else set()
             )
             rows = await repo.get_pricing_rows(scope, item_ids)
-            for _ in range(2):  # bounded retries
-                check = await repo.get_restaurant(restaurant_id)
-                if check is None or check.version == restaurant.version:
-                    break
-                restaurant = await self._read(repo, restaurant_id)
-                scope = self._menu_scope(restaurant)
-                overrides = (
-                    await repo.get_override_ids(restaurant_id) if restaurant.brand_id else set()
-                )
-                rows = await repo.get_pricing_rows(scope, item_ids)
         items, groups, options = rows
 
         options_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -890,8 +921,15 @@ class CatalogService:
                 # The OTHER way to be shut, evaluated here because catalog is
                 # the only party holding both the schedule and the clock. The
                 # engine stays pure: it reads a boolean, not a timezone.
-                "open_now": is_open_at(restaurant.hours, restaurant.timezone, _now()),
-                "version": restaurant.version,
+                # None for a brand: "is this menu template open" has no
+                # answer. The pricing engine reads `.get("open_now", True)
+                # is False`, so None does not gate placement — a brand is
+                # already refused on `status`, which is None too.
+                "open_now": (
+                    is_open_at(restaurant.hours, restaurant.timezone, _now())
+                    if restaurant.timezone is not None
+                    else None
+                ),
             },
             "items": [
                 {
@@ -959,7 +997,6 @@ class CatalogService:
                         "city": row.city,
                         "cuisines": cuisines_by_restaurant[row.id],
                         "status": row.status,
-                        "version": row.version,
                     },
                     "score": hit["score"],
                     "matched_items": hit["matched_items"],

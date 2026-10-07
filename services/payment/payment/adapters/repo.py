@@ -4,7 +4,7 @@ source-scan test keeps it that way."""
 
 import uuid
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
 import sqlalchemy as sa
 from smartfood_outbox import stage_event as stage_outbox_event
@@ -41,7 +41,6 @@ class PaymentRepo:
                 currency=currency,
                 card_token=card_token,
                 payment_intent_id=payment_intent_id,
-                version=0,
                 created_at=now,
                 updated_at=now,
             )
@@ -49,17 +48,18 @@ class PaymentRepo:
 
     async def transition_payment(
         self, order_id: str, *, expected: PaymentStatus, target: PaymentStatus, now: datetime
-    ) -> int | None:
-        """Guarded state move; returns the NEW version, or None (0 rows —
-        it wasn't in `expected`, someone else already moved it)."""
+    ) -> bool:
+        """Guarded state move; False = 0 rows, meaning it wasn't in
+        `expected` and someone else already moved it. Returned the new
+        version until the version columns went — the caller only ever asked
+        whether it applied."""
         result = await self._s.execute(
             payments.update()
             .where((payments.c.order_id == order_id) & (payments.c.status == expected))
-            .values(status=target, version=payments.c.version + 1, updated_at=now)
-            .returning(payments.c.version)
+            .values(status=target, updated_at=now)
+            .returning(payments.c.order_id)
         )
-        row = result.one_or_none()
-        return None if row is None else cast(int, row.version)
+        return result.one_or_none() is not None
 
     async def insert_ledger_pair(
         self,
@@ -103,7 +103,6 @@ class PaymentRepo:
         self,
         *,
         order_id: str,
-        version: int,
         event_type: str,
         payload: dict[str, Any],
         now: datetime,
@@ -113,7 +112,6 @@ class PaymentRepo:
             outbox,
             aggregate_type="payment",
             aggregate_id=order_id,
-            version=version,
             event_type=event_type,
             payload=payload,
             now=now,

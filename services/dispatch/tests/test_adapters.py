@@ -118,7 +118,7 @@ async def test_courier_ok_and_gone():
 
     assert await _client(handler).send("ord_1", event="accepted", rider_id="r1") == "ok"
     assert seen[0].url.path == "/v1/internal/orders/ord_1/courier"
-    assert seen[0].headers["x-auth-role"] == "system"
+    assert seen[0].headers["x-auth-roles"] == "system"
     assert (
         await _client(lambda _: httpx.Response(404)).send("ord_1", event="delivered", rider_id="r1")
         == "gone"

@@ -4,7 +4,7 @@
 def _system_headers():
     from smartfood_auth import AuthContext, headers_for
 
-    return headers_for(AuthContext(sub="svc:dispatch", role="system"))
+    return headers_for(AuthContext(sub="svc:dispatch", roles=frozenset({"system"})))
 
 
 def test_courier_events_relay_to_the_child(client, saga):
@@ -53,10 +53,83 @@ def test_courier_events_map_saga_outcomes(client, saga):
 def test_courier_events_are_system_only(client):
     from smartfood_auth import AuthContext, headers_for
 
-    rider = headers_for(AuthContext(sub="r_1", role="rider", rider_id="r_1"))
+    rider = headers_for(AuthContext(sub="r_1", roles=frozenset({"rider"}), rider_id="r_1"))
     r = client.post(
         "/v1/internal/orders/ord_1/courier",
         json={"event": "delivered", "rider_id": "r_1"},
         headers=rider,
     )
     assert r.status_code == 403
+
+
+# ── the internal recipients read (notification → refund workflow) ──
+
+
+def test_recipients_returns_both_parties_for_a_real_order(
+    client, catalog, make_snapshot, place_order
+):
+    """Notification asks this because payment events are keyed by order and
+    carry no user_id (ADR-0040). Unscoped by design — the caller is a
+    service acting on an event, not a user reading their own order."""
+    catalog.snapshot = make_snapshot()
+    order_id = place_order(client)
+    r = client.get(f"/v1/internal/orders/{order_id}/recipients", headers=_system_headers())
+    assert r.status_code == 200
+    assert r.json() == {"user_id": "usr_1", "restaurant_id": "rst_1"}
+
+
+def test_recipients_for_an_unknown_order_is_404(client):
+    r = client.get("/v1/internal/orders/ord_ghost/recipients", headers=_system_headers())
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_recipients_requires_a_system_claim(client, catalog, make_snapshot, place_order):
+    """It leaks the customer id for any order id, so it must never be
+    reachable with a customer's own token."""
+    from smartfood_auth import AuthContext, headers_for
+
+    catalog.snapshot = make_snapshot()
+    order_id = place_order(client)
+    customer = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
+    assert (
+        client.get(f"/v1/internal/orders/{order_id}/recipients", headers=customer).status_code
+        == 403
+    )
+
+
+# ── the timeline read (explanation engine, FR-83) ──────────────────
+
+
+def test_timeline_reports_the_stamped_moments_and_the_nulls(
+    client, catalog, make_snapshot, place_order
+):
+    """A freshly placed order has one moment: when it was placed. The rest
+    are null because they have not happened — and a null here means
+    "never reached, or never recorded", never a zero."""
+    catalog.snapshot = make_snapshot()
+    order_id = place_order(client)
+    body = client.get(f"/v1/internal/orders/{order_id}/timeline", headers=_system_headers()).json()
+    assert body["status"] == "PLACED"
+    assert body["user_id"] == "usr_1"
+    assert body["placed_at"] is not None
+    assert body["cancel_reason"] is None
+    for stamp in ("confirmed_at", "accepted_at", "preparing_at", "ready_at", "picked_up_at"):
+        assert body[stamp] is None, stamp
+
+
+def test_timeline_for_an_unknown_order_is_404(client):
+    r = client.get("/v1/internal/orders/ord_ghost/timeline", headers=_system_headers())
+    assert r.status_code == 404
+
+
+def test_timeline_requires_a_system_claim(client, catalog, make_snapshot, place_order):
+    """It answers for any order id, so a customer's own token must not
+    reach it — ownership is checked by the caller that holds an identity."""
+    from smartfood_auth import AuthContext, headers_for
+
+    catalog.snapshot = make_snapshot()
+    order_id = place_order(client)
+    customer = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
+    r = client.get(f"/v1/internal/orders/{order_id}/timeline", headers=customer)
+    assert r.status_code in (401, 403)

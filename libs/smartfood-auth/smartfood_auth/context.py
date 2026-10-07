@@ -10,7 +10,7 @@ from enum import StrEnum
 from typing import Annotated
 
 from fastapi import Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from smartfood_api import ApiError, ErrorCode
 
 
@@ -46,28 +46,38 @@ ROLES = frozenset(str(role) for role in Role)
 
 H_SUB = "X-Auth-Sub"
 H_ROLE = "X-Auth-Role"
+H_ROLES = "X-Auth-Roles"
 H_RESTAURANT = "X-Auth-Restaurant-Id"
 H_RIDER = "X-Auth-Rider-Id"
 
 # Everything the edge must strip from inbound requests before stamping its own.
-STRIP_HEADERS = (H_SUB, H_ROLE, H_RESTAURANT, H_RIDER)
+# These headers are TRUSTED downstream, so a client that could set one would
+# be choosing its own identity — adding a trusted header without adding it
+# here is the whole attack. H_ROLE is no longer stamped or read, but stays
+# listed: during a rolling deploy an un-upgraded service still trusts it.
+STRIP_HEADERS = (H_SUB, H_ROLE, H_ROLES, H_RESTAURANT, H_RIDER)
 
 
 class AuthContext(BaseModel):
     sub: str
-    role: str
+    # Required and non-empty: a context with no role can pass no gate, so it
+    # is not an identity — better rejected at construction than carried.
+    roles: frozenset[str] = Field(min_length=1)
     restaurant_id: str | None = None
     rider_id: str | None = None
 
 
 async def get_auth_context(request: Request) -> AuthContext:
     sub = request.headers.get(H_SUB)
-    role = request.headers.get(H_ROLE)
-    if not sub or not role or role not in ROLES:
+    stamped = request.headers.get(H_ROLES) or ""
+    held = frozenset(part for part in (p.strip() for p in stamped.split(",")) if part)
+    # An unknown role is not identity — the strictness the single-role check
+    # had, applied to every member of the set.
+    if not sub or not held or not held <= ROLES:
         raise MissingIdentity()
     return AuthContext(
         sub=sub,
-        role=role,
+        roles=held,
         restaurant_id=request.headers.get(H_RESTAURANT),
         rider_id=request.headers.get(H_RIDER),
     )
@@ -84,7 +94,8 @@ def require_role(*roles: Role):
     """
 
     async def dep(ctx: Auth) -> AuthContext:
-        if ctx.role != "system" and ctx.role not in roles:
+        allowed = {str(role) for role in roles}
+        if str(Role.SYSTEM) not in ctx.roles and not (ctx.roles & allowed):
             raise Forbidden()
         return ctx
 
@@ -92,7 +103,7 @@ def require_role(*roles: Role):
 
 
 def require_system():
-    """The service-to-service gate: ONLY role=system passes. This is
+    """The service-to-service gate: ONLY the system role passes. This is
     require_role() with no roles, given a name that states the intent —
     call sites no longer need a defensive comment explaining the trick."""
     return require_role()

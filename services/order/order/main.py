@@ -191,6 +191,14 @@ def create_app(
         lifetime_min_s=settings.track_lifetime_min_seconds,
         lifetime_max_s=settings.track_lifetime_max_seconds,
     )
+    # Just the timer knobs, not the whole Settings: the timeline read
+    # publishes these and has no business reaching anything else.
+    app.state.timer_budget = {
+        "accept_timeout_s": settings.accept_timeout_s,
+        "no_rider_deadline_s": int(settings.no_rider_deadline_s),
+        "pickup_timeout_s": int(settings.pickup_timeout_s),
+        "forward_deadline_s": settings.forward_deadline_s,
+    }
     app.include_router(router)
     app.include_router(restaurant_router)
     app.include_router(track_router)

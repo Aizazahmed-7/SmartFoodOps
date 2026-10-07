@@ -10,7 +10,7 @@ from .engine import price_order
 from .errors import (
     InvalidSelection,
     ItemUnavailable,
-    MenuVersionChanged,
+    PriceChanged,
     PricingError,
     RestaurantClosed,
 )
@@ -31,7 +31,7 @@ __all__ = [
     "InvalidSelection",
     "ItemUnavailable",
     "Line",
-    "MenuVersionChanged",
+    "PriceChanged",
     "PricedLine",
     "PricedOption",
     "PricedOrder",

@@ -95,7 +95,6 @@ class InventoryService:
                 item_id=r.item_id,
                 restaurant_id=r.restaurant_id,
                 available=r.available,
-                version=r.version,
             )
             for r in rows
         ]
@@ -106,8 +105,7 @@ class InventoryService:
         now = _now()
         async with self._sessions() as session:
             repo = InventoryRepo(session)
-            updated = await repo.update_stock(restaurant_id, item_id, available, now)
-            if updated is None:
+            if await repo.update_stock(restaurant_id, item_id, available, now) is None:
                 if not await repo.insert_stock(restaurant_id, item_id, available, now):
                     # Lost an insert race for THIS exact (branch, item) pair —
                     # under the composite key that is the only way to conflict
@@ -115,32 +113,23 @@ class InventoryService:
                     # ADR-0028) — so the row exists now: take the update path.
                     raced = await repo.update_stock(restaurant_id, item_id, available, now)
                     assert raced is not None  # the conflicting row is ours by key
-                    version = raced.version
-                else:
-                    version = 0
-            else:
-                version = updated.version
             await repo.stage_event(
                 aggregate_type="stock",
                 # One stock ledger per (branch, item): a shared base item has
-                # an independent count — and version — at every branch, so the
-                # aggregate must carry both or two branches' bumps would mint
-                # colliding deterministic event ids (ADR-0028).
+                # an independent count at every branch, so the aggregate must
+                # carry both (ADR-0028). It is also the Kafka partition key,
+                # which is what keeps one branch's adjustments in order.
                 aggregate_id=f"{restaurant_id}:{item_id}",
-                version=version,
                 event_type=EventType.STOCK_ADJUSTED,
                 payload={
                     "item_id": item_id,
                     "restaurant_id": restaurant_id,
                     "available": available,
-                    "version": version,
                 },
                 now=now,
             )
             await session.commit()
-        return StockRow(
-            item_id=item_id, restaurant_id=restaurant_id, available=available, version=version
-        )
+        return StockRow(item_id=item_id, restaurant_id=restaurant_id, available=available)
 
     async def set_capacity(self, restaurant_id: str, capacity: int) -> tuple[int, int]:
         """Returns (capacity, active). Lowering below current active is legal:
@@ -155,6 +144,25 @@ class InventoryService:
             assert load is not None  # just written
             await session.commit()
             return load.capacity, load.active
+
+    async def load(self, restaurant_id: str) -> tuple[int, int] | None:
+        """(active, capacity), or None when this kitchen has no load row.
+
+        None is NOT "idle" and the caller must not round it to zero. A
+        restaurant with no row has never had a reservation reach it — the
+        honest reading is "unknown", and FR-85's consumer (the explanation
+        engine) has a branch for that, because telling a customer "the
+        kitchen is quiet" on the strength of a missing row is exactly the
+        invented fact ADR-0043 exists to prevent.
+
+        Uncached on purpose. `active` moves on every reserve and every
+        commit; a congestion number served from a cache would describe a
+        kitchen that no longer exists, and a stale explanation is worse
+        than no explanation because the customer cannot tell it is stale.
+        """
+        async with self._sessions() as session:
+            row = await InventoryRepo(session).get_load(restaurant_id)
+        return None if row is None else (row.active, row.capacity)
 
     # ── saga: reserve / release / commit ───────────────────────────
 
@@ -199,7 +207,6 @@ class InventoryService:
             await repo.stage_event(
                 aggregate_type="reservation",
                 aggregate_id=order_id,
-                version=0,
                 event_type=EventType.STOCK_RESERVED,
                 payload={
                     "order_id": order_id,
@@ -239,7 +246,6 @@ class InventoryService:
             await repo.stage_event(
                 aggregate_type="reservation",
                 aggregate_id=order_id,
-                version=finished.version,
                 event_type=EventType.RESERVATION_RELEASED,
                 payload={
                     "order_id": order_id,
@@ -266,7 +272,6 @@ class InventoryService:
             await repo.stage_event(
                 aggregate_type="reservation",
                 aggregate_id=order_id,
-                version=finished.version,
                 event_type=EventType.RESERVATION_CONSUMED,
                 payload={
                     "order_id": order_id,

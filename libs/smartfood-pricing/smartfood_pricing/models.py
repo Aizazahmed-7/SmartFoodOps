@@ -64,5 +64,4 @@ class PricedOrder(_Value):
     lines: tuple[PricedLine, ...]
     totals: Totals
     currency: str
-    menu_version: int
     restaurant_name: str

@@ -16,7 +16,6 @@ from ..domain.service import (
     InvalidCredentials,
     InvalidRefreshToken,
     NothingToUpdate,
-    RefreshTokenReused,
     UnknownUser,
 )
 
@@ -62,7 +61,7 @@ class ProfileOut(BaseModel):
 
     id: str
     email: str
-    role: str
+    roles: list[str]
     full_name: str | None
     phone: str | None
 
@@ -115,12 +114,6 @@ async def login(body: LoginIn, request: Request) -> TokenPair:
 async def refresh(body: RefreshIn, request: Request) -> TokenPair:
     try:
         pair = await _svc(request).refresh(body.refresh_token)
-    except RefreshTokenReused:
-        raise ApiError(
-            ErrorCode.AUTH_REFRESH_REUSED,
-            "refresh token reuse detected — all sessions revoked",
-            401,
-        ) from None
     except InvalidRefreshToken:
         raise ApiError(ErrorCode.AUTH_INVALID_CREDENTIALS, "invalid refresh token", 401) from None
     return TokenPair.model_validate(pair)

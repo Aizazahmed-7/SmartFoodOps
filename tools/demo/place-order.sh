@@ -50,7 +50,6 @@ for r in json.load(sys.stdin)['restaurants']:
 raise SystemExit('Biryani House not found — run make seed first')
 ")
 MENU=$(curl -s "$GATEWAY/v1/menus/$RESTAURANT_ID")
-MENU_VERSION=$(echo "$MENU" | json "['version']")
 ITEM_ID=$(echo "$MENU" | python3 -c "
 import sys, json
 menu = json.load(sys.stdin)
@@ -62,18 +61,21 @@ for category in menu['categories']:
             print(item['id']); raise SystemExit
 raise SystemExit('no modifier-free item — reseed?')
 ")
-echo "   restaurant=$RESTAURANT_ID item=$ITEM_ID menu_version=$MENU_VERSION"
+echo "   restaurant=$RESTAURANT_ID item=$ITEM_ID"
 
 say "quote (the server is the only pricer)"
-curl -s -X POST "$GATEWAY/v1/quote" -H "Authorization: Bearer $CTOK" \
+# The quoted total is what placement consents to (ADR-0036) — so capture it
+# here rather than printing and discarding it.
+TOTAL_CENTS=$(curl -s -X POST "$GATEWAY/v1/quote" -H "Authorization: Bearer $CTOK" \
   -H 'Content-Type: application/json' \
   -d "{\"restaurant_id\":\"$RESTAURANT_ID\",\"lines\":[{\"item_id\":\"$ITEM_ID\",\"qty\":2}]}" \
-  | json "['totals']['total_cents']" | sed 's/^/   total_cents = /'
+  | json "['totals']['total_cents']")
+echo "   total_cents = $TOTAL_CENTS"
 
 say "place (card: $CARD_TOKEN, Idempotency-Key minted fresh)"
 ORDER_ID=$(curl -s -X POST "$GATEWAY/v1/orders" -H "Authorization: Bearer $CTOK" \
   -H 'Content-Type: application/json' -H "Idempotency-Key: $(idem_key)" \
-  -d "{\"restaurant_id\":\"$RESTAURANT_ID\",\"menu_version\":$MENU_VERSION,\"address_id\":\"$ADDRESS_ID\",\"card_token\":\"$CARD_TOKEN\",\"lines\":[{\"item_id\":\"$ITEM_ID\",\"qty\":2}]}" \
+  -d "{\"restaurant_id\":\"$RESTAURANT_ID\",\"expected_total_cents\":$TOTAL_CENTS,\"address_id\":\"$ADDRESS_ID\",\"card_token\":\"$CARD_TOKEN\",\"lines\":[{\"item_id\":\"$ITEM_ID\",\"qty\":2}]}" \
   | json "['order_id']")
 echo "   order = $ORDER_ID"
 

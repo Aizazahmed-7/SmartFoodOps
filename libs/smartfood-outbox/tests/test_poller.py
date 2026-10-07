@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
-from smartfood_outbox import OutboxPoller, event_id
+from smartfood_outbox import OutboxPoller
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -18,7 +18,6 @@ outbox = sa.Table(  # the column contract every service's outbox satisfies
     sa.Column("id", sa.Text, primary_key=True),
     sa.Column("aggregate_type", sa.Text, nullable=False),
     sa.Column("aggregate_id", sa.Text, nullable=False),
-    sa.Column("aggregate_version", sa.Integer, nullable=False),
     sa.Column("event_type", sa.Text, nullable=False),
     sa.Column("payload", sa.JSON, nullable=False),
     sa.Column("occurred_at", sa.TIMESTAMP(timezone=True), nullable=False),
@@ -54,10 +53,9 @@ async def _stage(sessions, n: int, *, traceparent: str | None = None):
         for i in range(n):
             await s.execute(
                 outbox.insert().values(
-                    id=event_id("restaurant", "rst_1", i + 1, "ItemAdded"),
+                    id=f"evt_{i + 1}",  # opaque: the poller never derives an id
                     aggregate_type="restaurant",
                     aggregate_id="rst_1",
-                    aggregate_version=i + 1,
                     event_type="ItemAdded",
                     payload={"n": i},
                     occurred_at=base + timedelta(seconds=i),
@@ -89,8 +87,11 @@ async def test_drain_publishes_in_order_and_marks():
         producer=producer,
     )
     assert await poller.drain_once() == 3
-    versions = [s["record"]["aggregate_version"] for s in producer.sent]
-    assert versions == [1, 2, 3]  # occurred_at order — per-aggregate ordering
+    # occurred_at order — the per-aggregate ordering guarantee. Asserted on
+    # the payload now that the envelope carries no version (ADR-0038).
+    assert [s["record"]["payload"] for s in producer.sent] == [
+        json.dumps({"n": n}) for n in range(3)
+    ]
     first = producer.sent[0]
     assert first["key"] == "rst_1"
     assert first["record"]["cell_id"] == "c1"

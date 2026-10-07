@@ -172,7 +172,7 @@ export const createBranch = (
   body: { branch_label: string; city: string; lat?: number; lon?: number },
 ) => request<Branch>("POST", `/v1/restaurants/${brandId}/branches`, body);
 export const setBaseItemAvailability = (branchId: string, itemId: string, available: boolean) =>
-  request<{ item_id: string; available: boolean; version: number }>(
+  request<{ item_id: string; available: boolean }>(
     "PUT",
     `/v1/restaurants/${branchId}/base-items/${itemId}/availability`,
     { available },
@@ -253,7 +253,10 @@ export const clearIdemKey = () => localStorage.removeItem(IDEM_STORE);
 
 export interface PlaceOrderBody {
   restaurant_id: string;
-  menu_version: number;
+  /** The total the customer was SHOWN and is consenting to (ADR-0036).
+   *  The server reprices from its own snapshot and refuses on mismatch —
+   *  this is consent, never an asserted price. */
+  expected_total_cents: number;
   address_id: string;
   card_token: string;
   lines: ReturnType<typeof toOrderLines>;

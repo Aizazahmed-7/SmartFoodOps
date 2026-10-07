@@ -25,7 +25,7 @@ up-m2: ## Inventory+Orders milestone working set (~6-7 GB): W1 set + temporal, m
 	@echo "✔ m2 stack up — gateway :8080 · temporal-ui :8233 · mock-psp :9080"
 
 up-m3: ## Notifications milestone working set: the m2 set + notification (+ receipts pipeline)
-	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal localstack mock-psp mock-mailer rabbitmq gateway identity catalog edge-bff inventory order order-worker payment notification receipt-renderer receipt-sender analytics
+	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal localstack mock-psp mock-mailer rabbitmq gateway identity catalog edge-bff inventory order order-worker payment notification notification-worker receipt-renderer receipt-sender analytics
 	@# initdb scripts only run on FRESH volumes; converge existing ones so a
 	@# newly added service's database appears without `make nuke`. The script
 	@# is idempotent; a crash-looping service recovers on its next restart.
@@ -33,15 +33,22 @@ up-m3: ## Notifications milestone working set: the m2 set + notification (+ rece
 	@echo "✔ m3 stack up — gateway :8080 · temporal-ui :8233 · notifications :8008 · analytics :8009"
 
 up-m4: ## Dispatch milestone working set: the m3 set + dispatch, rider-gateway
-	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal localstack mock-psp mock-mailer rabbitmq gateway identity catalog edge-bff inventory order order-worker payment notification receipt-renderer receipt-sender analytics dispatch rider-gateway
+	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry temporal localstack mock-psp mock-mailer rabbitmq gateway identity catalog edge-bff inventory order order-worker payment notification notification-worker receipt-renderer receipt-sender analytics dispatch rider-gateway
 	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
 	@echo "✔ m4 stack up — gateway :8080 · dispatch :8012 · rider-gateway :8010 · rabbitmq-ui :15672"
+
+up-ai: ## AI plane working set: the W1 core + ai-assistant (~5 GB — deliberately NOT the m4 set)
+	$(COMPOSE) --profile core --profile apps up -d --wait postgres redis kafka schema-registry gateway identity catalog edge-bff ai-assistant
+	@# Same initdb convergence as up-m3/up-m4: assistant_db (and its vector
+	@# extension) must appear without `make nuke`.
+	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
+	@echo "✔ ai stack up — gateway :8080 · ai-assistant :8013 · catalog :8002"
 
 dlq-replay: ## Replay parked DLQ events after a fix: make dlq-replay TOPIC=c1.orders.events.dlq
 	uv run --package smartfood-kafka python -m smartfood_kafka.replay $(TOPIC)
 
 up-obs: ## m3 set + Prometheus (:9090), Grafana (:3000), Jaeger (:16686), Alertmanager (:9093)
-	OTLP_ENDPOINT=http://jaeger:4318 $(COMPOSE) --profile core --profile apps --profile obs up -d --wait postgres redis kafka schema-registry temporal localstack mock-psp mock-mailer rabbitmq gateway identity catalog edge-bff inventory order order-worker payment notification receipt-renderer receipt-sender analytics prometheus grafana jaeger alertmanager cadvisor kafka-exporter loki promtail canary
+	OTLP_ENDPOINT=http://jaeger:4318 $(COMPOSE) --profile core --profile apps --profile obs up -d --wait postgres redis kafka schema-registry temporal localstack mock-psp mock-mailer rabbitmq gateway identity catalog edge-bff inventory order order-worker payment notification notification-worker receipt-renderer receipt-sender analytics prometheus grafana jaeger alertmanager cadvisor kafka-exporter loki promtail canary
 	@# Same initdb convergence as up-m3: a newly added service's database
 	@# must appear without `make nuke`, whichever target brought the stack up.
 	@$(COMPOSE) exec -T postgres bash /docker-entrypoint-initdb.d/01-databases.sh >/dev/null
@@ -80,7 +87,7 @@ cov: ## Unit tests + coverage report
 		--cov=smartfood_api --cov=smartfood_auth --cov=smartfood_kafka --cov=smartfood_otel \
 		--cov=smartfood_outbox --cov=smartfood_pricing --cov=smartfood_idempotency --cov=smartfood_realtime \
 		--cov=identity --cov=edge_bff \
-		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification --cov=analytics --cov=dispatch --cov=rider_gateway \
+		--cov=catalog --cov=inventory --cov=order --cov=payment --cov=notification --cov=analytics --cov=dispatch --cov=rider_gateway --cov=ai_assistant \
 		--cov=mock_psp --cov=mock_mailer --cov=seed --cov=canary --cov=rider_sim \
 		--cov-fail-under=100 \
 		--cov-report=term-missing

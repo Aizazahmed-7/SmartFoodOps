@@ -6,7 +6,9 @@ import uuid
 from order.adapters.repo import OrderRepo
 from smartfood_auth import AuthContext, headers_for
 
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
+from .conftest import _default_items
+
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
 
 
 def _headers(key=None):
@@ -126,19 +128,38 @@ def test_missing_idempotency_key_is_422(client, catalog, make_snapshot, make_ord
 def test_price_changed_releases_key_for_fresh_confirm(
     client, catalog, make_snapshot, make_order_body
 ):
-    """Version drift → 409 with the current version; the SAME key is then
+    """Price drift → 409 naming the real total; the SAME key is then
     immediately usable with the corrected body — a refusal writes nothing,
     so there is nothing to free (ADR-0024). NOTE: the corrected body is a
     DIFFERENT body under the same key, and that is legal here because no
     order exists yet — the hash guard only protects created orders."""
-    catalog.snapshot = make_snapshot(version=4)
     key = uuid.uuid4().hex
-    r = client.post("/v1/orders", json=make_order_body(menu_version=3), headers=_headers(key))
+    stale = make_order_body()["expected_total_cents"]
+    # The carted item itself reprices — the only kind of drift that should
+    # now refuse a cart (ADR-0036).
+    catalog.snapshot = make_snapshot(
+        items=[{**_default_items()[0], "price_cents": 1500}],
+    )
+    r = client.post(
+        "/v1/orders", json=make_order_body(expected_total_cents=stale), headers=_headers(key)
+    )
     assert r.status_code == 409
     error = r.json()["error"]
     assert error["code"] == "PRICE_CHANGED"
-    assert error["details"] == [{"field": "menu_version", "issue": "menu is now at version 4"}]
-    confirm = client.post("/v1/orders", json=make_order_body(menu_version=4), headers=_headers(key))
+    # Re-quote to learn the new total — the client sequence the 409 asks for.
+    quote = client.post(
+        "/v1/quote",
+        json={"restaurant_id": "rst_1", "lines": [{"item_id": "itm_a", "qty": 2}]},
+        headers=CUSTOMER,
+    ).json()
+    current = quote["totals"]["total_cents"]
+    assert current != stale
+    assert error["details"] == [
+        {"field": "expected_total_cents", "issue": f"total is now {current} cents"}
+    ]
+    confirm = client.post(
+        "/v1/orders", json=make_order_body(expected_total_cents=current), headers=_headers(key)
+    )
     assert confirm.status_code == 202
 
 
@@ -169,9 +190,33 @@ def test_paused_restaurant_blocks_placement(client, catalog, make_snapshot, make
 def test_owner_can_place_orders_too(client, catalog, make_snapshot, make_order_body):
     """The Purchaser-gate lesson, applied to placement from day one."""
     catalog.snapshot = make_snapshot()
-    owner = headers_for(AuthContext(sub="usr_1", role="restaurant_admin", restaurant_id="rst_9"))
+    owner = headers_for(
+        AuthContext(sub="usr_1", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_9")
+    )
     r = client.post(
         "/v1/orders", json=make_order_body(), headers={**owner, "Idempotency-Key": "k-own"}
+    )
+    assert r.status_code == 202
+
+
+def test_owner_who_kept_customer_can_place_orders(client, catalog, make_snapshot, make_order_body):
+    """The same lesson under multi-role, on the money path.
+
+    Before this change `users.role` OVERWROTE customer on promotion, so the
+    Purchaser gate had to name restaurant_admin explicitly at every
+    customer-facing endpoint — a bug CLAUDE.md records as recurring. A
+    promoted owner now genuinely HOLDS customer, and this pins that the gate
+    accepts the set rather than one privileged member of it."""
+    catalog.snapshot = make_snapshot()
+    owner = headers_for(
+        AuthContext(
+            sub="usr_1",
+            roles=frozenset({"customer", "restaurant_admin"}),
+            restaurant_id="rst_9",
+        )
+    )
+    r = client.post(
+        "/v1/orders", json=make_order_body(), headers={**owner, "Idempotency-Key": "k-own-multi"}
     )
     assert r.status_code == 202
 

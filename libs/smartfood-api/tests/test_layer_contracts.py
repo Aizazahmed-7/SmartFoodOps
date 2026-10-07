@@ -15,7 +15,19 @@ import pathlib
 import re
 
 SERVICES = pathlib.Path(__file__).resolve().parents[3] / "services"
-SERVICE_PACKAGES = {"identity", "catalog", "inventory", "order", "payment", "edge_bff"}
+SERVICE_PACKAGES = {
+    "identity",
+    "catalog",
+    "inventory",
+    "order",
+    "payment",
+    "edge_bff",
+    "notification",
+    "analytics",
+    "dispatch",
+    "rider_gateway",
+    "ai_assistant",
+}
 
 # One dotted target per `import x.y` / `from x.y import z` line (first name only
 # for comma imports — lint-grade, like the rest of the grep-ban suite).

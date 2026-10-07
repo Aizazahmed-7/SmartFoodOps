@@ -25,7 +25,7 @@ import {
 import type { RiderMe } from "../api/types";
 import CityMap, { CITY, Pin, clampToCity, project } from "../components/CityMap";
 import { ErrorNote } from "../components/ui";
-import { useAuth } from "../state/auth";
+import { useAuth, hasRole } from "../state/auth";
 import { DEFAULT_CITY } from "../cities";
 
 const SPEED_MPS = 45; // arcade-brisk — the demo shouldn't feel like traffic
@@ -61,7 +61,7 @@ export default function RiderConsole() {
   const clickTarget = useRef<{ lat: number; lon: number } | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
-  const isRider = claims?.role === "rider";
+  const isRider = hasRole(claims, "rider");
 
   // The poll floor: /me every 2s while online (background too — an offer
   // must ring even when the tab is hidden behind the customer window).

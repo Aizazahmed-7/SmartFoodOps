@@ -17,7 +17,7 @@ Stock is deliberately NOT a pricing concern: quotes must not read inventory
 
 from typing import Any
 
-from .errors import InvalidSelection, ItemUnavailable, MenuVersionChanged, RestaurantClosed
+from .errors import InvalidSelection, ItemUnavailable, PriceChanged, RestaurantClosed
 from .models import (
     DEFAULT_CONFIG,
     Line,
@@ -33,16 +33,10 @@ def price_order(
     snapshot: dict[str, Any],
     lines: list[Line],
     *,
-    expected_menu_version: int | None = None,
+    expected_total_cents: int | None = None,
     config: PricingConfig = DEFAULT_CONFIG,
 ) -> PricedOrder:
     restaurant = snapshot["restaurant"]
-
-    # Version drift first: if the caller pinned a version (placement does;
-    # quote passes None and self-heals), a mismatch invalidates everything
-    # else we might say — re-sync, then talk.
-    if expected_menu_version is not None and expected_menu_version != restaurant["version"]:
-        raise MenuVersionChanged(current=restaurant["version"])
 
     # Two independent ways to be shut, kept separate on purpose: `status` is
     # the owner's explicit pause, `open_now` is the posted schedule (computed
@@ -89,11 +83,18 @@ def price_order(
         tax_cents=tax,
         total_cents=subtotal - discount + fee + tax,
     )
+    # Drift is checked LAST now, because the thing being compared is the
+    # total and the total does not exist until here (ADR-0036). Consequence
+    # worth knowing: ItemUnavailable and RestaurantClosed now outrank a
+    # price change when both apply. That ordering is the useful one — "sold
+    # out" and "closed" are actionable; "re-confirm the price" is not, if
+    # the cart cannot be fulfilled anyway.
+    if expected_total_cents is not None and expected_total_cents != totals.total_cents:
+        raise PriceChanged(current=totals.total_cents)
     return PricedOrder(
         lines=tuple(priced),
         totals=totals,
         currency=currency,
-        menu_version=restaurant["version"],
         restaurant_name=restaurant["name"],
     )
 

@@ -32,7 +32,7 @@ async def test_success_stamps_system_identity():
     assert address["id"] == "adr_1"
     request = calls["requests"][0]
     assert request.url.path == "/v1/internal/users/usr_1/addresses/adr_1"
-    assert request.headers["x-auth-role"] == "system"
+    assert request.headers["x-auth-roles"] == "system"
     assert request.headers["x-internal-caller"] == "order"
 
 

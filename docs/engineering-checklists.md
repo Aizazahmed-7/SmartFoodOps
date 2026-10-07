@@ -73,7 +73,7 @@ Blockers, all of them. Tag = how it's enforced: `[review]` today, `[CI-lint (pla
 4. External I/O — HTTP, Redis, PSP, Temporal — inside an open DB transaction `[review]`
 5. Network calls "that don't count" (Schema Registry lookups included) inside a transaction — outbox emit is pure CPU; schema IDs come from a boot-time map `[review]`
 6. `sessions.begin()` opened in API routes or adapters — the domain layer owns the transaction boundary, especially around security writes (refresh-token rotation, credential updates); repos never commit `[review]`
-7. Random `uuid4()` event IDs — `event_id` is UUIDv5 of `aggregate:{id}:{version}:{type}`, and emit fires only when the guarded transition actually applied (ADR-0018) `[review]`
+7. Staging an outbox event without the aggregate's own uniqueness guard in the SAME transaction — the aggregate row's PK, an explicit pre-check, or a guarded transition must be what stops a replay, and it must be written BEFORE the event. Event ids are random uuid4 (ADR-0035), so nothing downstream collapses a double-emit `[review]`
 8. A second lock next to the DynamoDB conditional-write assignment lock — the conditional write *is* the lock (ADR-0011) `[review]`
 9. `except Exception` swallowing in handlers/routes — domain errors map centrally `[review]`
 

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { ApiError, onboardRestaurant } from "../api/client";
-import { useAuth } from "../state/auth";
+import { useAuth, hasRole } from "../state/auth";
 import { ErrorNote } from "../components/ui";
 import { CITIES, DEFAULT_CITY } from "../cities";
 
@@ -23,7 +23,7 @@ export default function PartnerOnboard() {
   const [busy, setBusy] = useState(false);
 
   if (!claims) return <Navigate to="/login" replace state={{ from: location }} />;
-  if (claims.role === "restaurant_admin") return <Navigate to="/partner/dashboard" replace />;
+  if (hasRole(claims, "restaurant_admin")) return <Navigate to="/partner/dashboard" replace />;
 
   const toggle = (c: string) =>
     setCuisines((prev) =>

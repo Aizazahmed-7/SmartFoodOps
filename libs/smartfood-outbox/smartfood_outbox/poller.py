@@ -1,11 +1,13 @@
 """The dev-mode outbox drain (ADR-0012: OUTBOX_MODE=poller).
 
 Generic over any service's outbox table (the columns are the contract:
-id, aggregate_type, aggregate_id, aggregate_version, event_type, payload,
-occurred_at, published_at, traceparent). Guarantees:
+id, aggregate_type, aggregate_id, event_type, payload, occurred_at,
+published_at, traceparent). Guarantees:
 
 - at-least-once: rows are published THEN marked; a crash between the two
-  re-sends on the next pass — consumers dedupe by the deterministic event_id.
+  re-sends on the next pass — consumers dedupe on the event_id READ FROM THE
+  ROW, so a re-send repeats the id it was minted with (random since ADR-0035;
+  the ordering below is likewise stable across passes for the same reason).
 - per-aggregate ordering: rows drain in (occurred_at, id) order, keyed by
   aggregate_id, WITH ONE POLLER INSTANCE per service (dev reality). Multiple
   instances + SKIP LOCKED could interleave an aggregate's rows; the prod
@@ -70,7 +72,6 @@ def _record(row: Row[Any], cell_id: str) -> dict[str, Any]:
         "event_type": row.event_type,
         "aggregate_type": row.aggregate_type,
         "aggregate_id": row.aggregate_id,
-        "aggregate_version": row.aggregate_version,
         "occurred_at": _aware(row.occurred_at),
         "cell_id": cell_id,
         "payload": json.dumps(row.payload),

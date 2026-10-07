@@ -15,9 +15,15 @@ from order.main import create_app
 from smartfood_auth import AuthContext, headers_for
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-BRAND_OWNER = headers_for(AuthContext(sub="usr_9", role="restaurant_admin", restaurant_id="brd_1"))
-BRANCH_OWNER = headers_for(AuthContext(sub="usr_9", role="restaurant_admin", restaurant_id="rst_1"))
-STRANGER = headers_for(AuthContext(sub="usr_8", role="restaurant_admin", restaurant_id="brd_666"))
+BRAND_OWNER = headers_for(
+    AuthContext(sub="usr_9", roles=frozenset({"restaurant_admin"}), restaurant_id="brd_1")
+)
+BRANCH_OWNER = headers_for(
+    AuthContext(sub="usr_9", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_1")
+)
+STRANGER = headers_for(
+    AuthContext(sub="usr_8", roles=frozenset({"restaurant_admin"}), restaurant_id="brd_666")
+)
 
 TO_CONFIRMED = [
     ("PLACED", "VALIDATED"),
@@ -117,9 +123,6 @@ async def _insert_order(sessions, order_id: str, restaurant_id: str, brand_id: s
                 brand_id=brand_id,
                 restaurant_name_snapshot="Biryani House",
                 status="PLACED",
-                aggregate_version=0,
-                card_token="tok_ok",
-                menu_version=3,
                 pricing_snapshot={},
                 delivery_address_snapshot={},
                 placed_at=now,

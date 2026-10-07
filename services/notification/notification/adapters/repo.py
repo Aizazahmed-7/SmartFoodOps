@@ -19,7 +19,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import CursorResult, Row
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import notifications, order_recipients, receipts
+from ..db import notifications, receipts
 
 # Fixed namespace for notification ids. NEVER change it: ids are the dedupe
 # key, and a new namespace would re-deliver every replayed event's inbox row.
@@ -64,23 +64,6 @@ class NotificationRepo:
     def _dialect(self) -> str:
         return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
 
-    async def upsert_recipients(self, order_id: str, user_id: str, restaurant_id: str) -> None:
-        """First order event wins; the pair never changes for an order."""
-        await self._s.execute(
-            insert_ignoring_conflict(
-                order_recipients,
-                {"order_id": order_id, "user_id": user_id, "restaurant_id": restaurant_id},
-                ["order_id"],
-                self._dialect,
-            )
-        )
-
-    async def get_recipients(self, order_id: str) -> Row[Any] | None:
-        result = await self._s.execute(
-            sa.select(order_recipients).where(order_recipients.c.order_id == order_id)
-        )
-        return result.one_or_none()
-
     async def insert_notification(
         self,
         *,
@@ -88,7 +71,6 @@ class NotificationRepo:
         recipient_type: str,
         recipient_id: str,
         order_id: str,
-        kind: str,
         title: str,
         body: str,
         created_at: datetime,
@@ -101,7 +83,6 @@ class NotificationRepo:
                     "recipient_type": recipient_type,
                     "recipient_id": recipient_id,
                     "order_id": order_id,
-                    "kind": kind,
                     "title": title,
                     "body": body,
                     "created_at": created_at,
@@ -117,8 +98,7 @@ class NotificationRepo:
         order_id: str,
         user_id: str,
         restaurant_name: str,
-        items: list[dict[str, Any]],
-        totals: dict[str, Any],
+        snapshot: dict[str, Any],
         settled_at: datetime,
         created_at: datetime,
     ) -> bool:
@@ -133,8 +113,7 @@ class NotificationRepo:
                     "order_id": order_id,
                     "user_id": user_id,
                     "restaurant_name": restaurant_name,
-                    "items": items,
-                    "totals": totals,
+                    "snapshot": snapshot,
                     "settled_at": settled_at,
                     "created_at": created_at,
                 },

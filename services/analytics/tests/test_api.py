@@ -6,12 +6,14 @@ from datetime import UTC, datetime, timedelta
 from analytics.consumers import FactsProjector
 from smartfood_auth import AuthContext, headers_for
 
-SYSTEM = headers_for(AuthContext(sub="svc:ops", role="system"))
-OWNER = headers_for(AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id="rst_1"))
-OTHER_OWNER = headers_for(
-    AuthContext(sub="usr_other", role="restaurant_admin", restaurant_id="rst_2")
+SYSTEM = headers_for(AuthContext(sub="svc:ops", roles=frozenset({"system"})))
+OWNER = headers_for(
+    AuthContext(sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_1")
 )
-CUSTOMER = headers_for(AuthContext(sub="usr_1", role="customer"))
+OTHER_OWNER = headers_for(
+    AuthContext(sub="usr_other", roles=frozenset({"restaurant_admin"}), restaurant_id="rst_2")
+)
+CUSTOMER = headers_for(AuthContext(sub="usr_1", roles=frozenset({"customer"})))
 
 
 def _iso(minutes_ago=0):
@@ -111,7 +113,7 @@ def test_restaurant_view_is_scoped_by_the_claim(client, app):
 
 def test_restaurant_view_requires_the_role_and_the_claim(client):
     assert client.get("/v1/restaurant/analytics", headers=CUSTOMER).status_code == 403
-    no_claim = headers_for(AuthContext(sub="usr_o", role="restaurant_admin"))
+    no_claim = headers_for(AuthContext(sub="usr_o", roles=frozenset({"restaurant_admin"})))
     assert client.get("/v1/restaurant/analytics", headers=no_claim).status_code == 404
 
 
@@ -204,7 +206,7 @@ def test_brand_claim_spans_every_branch(client, app):
     """ADR-0028: the owner's claim is the BRAND — daily numbers must fold
     orders from all branches, healed legacy rows included."""
     BRAND_OWNER = headers_for(
-        AuthContext(sub="usr_owner", role="restaurant_admin", restaurant_id="brd_1")
+        AuthContext(sub="usr_owner", roles=frozenset({"restaurant_admin"}), restaurant_id="brd_1")
     )
     downtown = _event("OrderPlaced", "ord_dt", at=_iso(30))
     downtown["payload"]["brand_id"] = "brd_1"  # stamped at placement

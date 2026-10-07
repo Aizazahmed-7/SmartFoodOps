@@ -1,11 +1,13 @@
 """Every branch of the internal grant endpoint and its domain method."""
 
+from datetime import UTC, datetime
+
 import jwt as pyjwt
 import pytest
 from identity.config import Settings
 from smartfood_auth import AuthContext, headers_for
 
-SYSTEM = headers_for(AuthContext(sub="svc:catalog", role="system"))
+SYSTEM = headers_for(AuthContext(sub="svc:catalog", roles=frozenset({"system"})))
 REG = {"email": "owner@example.com", "password": "hunter2hunter2"}
 
 
@@ -31,7 +33,7 @@ def test_grant_promotes_customer(client):
     user_id = _register(client)
     assert _grant(client, user_id).status_code == 200
     claims = _claims(client)  # fresh login sees the new role
-    assert claims["role"] == "restaurant_admin"
+    assert "restaurant_admin" in claims["roles"]
     assert claims["restaurant_id"] == "rst_1"
 
 
@@ -59,7 +61,7 @@ def test_grant_still_conflicts_across_role_classes(client):
     rider = client.post(
         "/v1/internal/grants",
         json={"user_id": user_id, "role": "rider"},
-        headers=headers_for(AuthContext(sub="svc:test", role="system")),
+        headers=headers_for(AuthContext(sub="svc:test", roles=frozenset({"system"}))),
     )
     assert rider.status_code == 200
     r = _grant(client, user_id, "rst_1")
@@ -73,7 +75,7 @@ def test_grant_unknown_user_is_404(client):
 
 def test_grant_requires_system_role(client):
     user_id = _register(client)
-    customer = headers_for(AuthContext(sub=user_id, role="customer"))
+    customer = headers_for(AuthContext(sub=user_id, roles=frozenset({"customer"})))
     assert _grant(client, user_id, headers=customer).status_code == 403
     assert _grant(client, user_id, headers={}).status_code == 401
 
@@ -105,7 +107,7 @@ def test_refresh_carries_the_promotion(client):
     claims = pyjwt.decode(
         refreshed["access_token"], options={"verify_signature": False}, algorithms=["RS256"]
     )
-    assert claims["role"] == "restaurant_admin"
+    assert "restaurant_admin" in claims["roles"]
     assert claims["restaurant_id"] == "rst_1"
 
 
@@ -113,7 +115,7 @@ async def test_grant_to_non_customer_role_conflicts(tmp_path):
     """Riders (and admins) can't own restaurants — domain-level, since no
     HTTP path can produce a rider yet."""
     import sqlalchemy as sa
-    from identity.db import metadata, users
+    from identity.db import metadata, user_roles, users
     from identity.domain.service import GrantConflict, IdentityService
     from identity.keys import load_or_generate
     from smartfood_auth import TokenIssuer
@@ -148,7 +150,11 @@ async def test_grant_to_non_customer_role_conflicts(tmp_path):
     await svc.register(email=REG["email"], password=REG["password"], full_name=None)
     async with sessions() as s:
         user_id = (await s.execute(sa.select(users.c.id))).scalar_one()
-        await s.execute(users.update().values(role="rider", rider_id="rid_1"))
+        # Seed the ROLE, not the legacy shadow column — authorization reads
+        # user_roles now, so writing users.role would prove nothing.
+        await s.execute(
+            user_roles.insert().values(user_id=user_id, role="rider", granted_at=datetime.now(UTC))
+        )
         await s.commit()
 
     with pytest.raises(GrantConflict):
@@ -167,7 +173,7 @@ def test_rider_grant_promotes_customer_and_stamps_the_claim(client):
     user_id = _register(client)
     assert _grant_rider(client, user_id).status_code == 200
     claims = _claims(client)  # fresh login carries the new shape
-    assert claims["role"] == "rider"
+    assert "rider" in claims["roles"]
     assert claims["rider_id"] == user_id  # rider_id IS the user id, by decision
     assert "restaurant_id" not in claims
 

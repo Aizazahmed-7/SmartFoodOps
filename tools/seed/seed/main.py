@@ -813,7 +813,7 @@ async def _seed_riders(client: httpx.AsyncClient, identity_base_url: str) -> int
         )
         bearer = {"Authorization": f"Bearer {pair['access_token']}"}
         me = _expect(await client.get("/v1/auth/me", headers=bearer), 200)
-        if me["role"] == "rider":
+        if "rider" in me["roles"]:
             continue  # replay — already promoted
         _expect(
             await client.post(

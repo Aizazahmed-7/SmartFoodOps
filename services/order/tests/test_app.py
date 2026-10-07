@@ -35,7 +35,6 @@ def _placement(order_id="ord_1"):
         restaurant_id="rst_1",
         restaurant_name="Biryani House",
         card_token="tok_ok",
-        menu_version=3,
         currency="USD",
         amount_cents=1500,
         placed_at="2026-08-18T10:00:00+00:00",

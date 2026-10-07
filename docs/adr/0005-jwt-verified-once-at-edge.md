@@ -1,6 +1,6 @@
 # 0005 — JWT verified once at edge; identity headers + network trust internally
 
-**Status**: Accepted
+**Status**: Accepted — amended by [ADR-0034](0034-multi-role-identity-and-per-login-sessions.md): the single `role` claim and `X-Auth-Role` header are replaced by `roles` and `X-Auth-Roles`
 
 ## Context
 
@@ -8,9 +8,9 @@ Every request needs authenticated identity, but verifying JWTs in all 13 service
 
 ## Decision
 
-Identity issues RS256 JWTs (15-min access; claims `sub`, `role`, scoping `restaurant_id`/`rider_id`, `cell`, `jti`) with 30-day opaque rotating refresh tokens (family reuse detection). **Verification happens exactly once, at edge-bff** (JWKS cached in-process 10 min, two live keys for rotation). The edge strips all inbound `X-Auth-*` headers, then stamps `X-Auth-Sub`, `X-Auth-Role`, `X-Auth-Restaurant-Id`, `X-Auth-Rider-Id`. Services consume them via the shared `smartfood-auth` middleware (`AuthContext` dependency) and never parse JWTs.
+Identity issues RS256 JWTs (15-min access; claims `sub`, `roles`, scoping `restaurant_id`/`rider_id`, `cell`, `jti`) with 30-day opaque rotating refresh tokens (one row per login, rotated in place — ADR-0034). **Verification happens exactly once, at edge-bff** (JWKS cached in-process 10 min, two live keys for rotation). The edge strips all inbound `X-Auth-*` headers, then stamps `X-Auth-Sub`, `X-Auth-Roles`, `X-Auth-Restaurant-Id`, `X-Auth-Rider-Id`. Services consume them via the shared `smartfood-auth` middleware (`AuthContext` dependency) and never parse JWTs.
 
-Headers are trustworthy because **domain services have no public routes** — reachable only from edge/gateways/peers in private subnets. Service-to-service and Temporal activities use internal-network trust: `X-Internal-Caller` for audit, original actor identity propagated (stored in workflow input, restamped by activities); system work runs as `role: system`, `sub: svc:order-worker`.
+Headers are trustworthy because **domain services have no public routes** — reachable only from edge/gateways/peers in private subnets. Service-to-service and Temporal activities use internal-network trust: `X-Internal-Caller` for audit, original actor identity propagated (stored in workflow input, restamped by activities); system work runs as `roles: [system]`, `sub: svc:order-worker`.
 
 Ownership enforcement stays in the owning service, in the query (`WHERE id=:id AND restaurant_id=:ctx.restaurant_id`; 0 rows → 404, no existence leaks).
 

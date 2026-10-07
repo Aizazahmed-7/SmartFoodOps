@@ -10,6 +10,7 @@ import base64
 import hashlib
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -77,16 +78,18 @@ class TokenIssuer:
         self,
         *,
         sub: str,
-        role: "Role | str",
+        roles: "Iterable[Role | str]",
         restaurant_id: str | None = None,
         rider_id: str | None = None,
     ) -> str:
+        # Role(r) on every member: typos die HERE, never in a minted token.
+        held = sorted({str(Role(role)) for role in roles})
         now = int(time.time())
         claims: dict[str, Any] = {
             "iss": self._issuer,
             "aud": self._audience,
             "sub": sub,
-            "role": str(Role(role)),  # typos die HERE, never in a minted token
+            "roles": held,
             "iat": now,
             "exp": now + self._ttl,
             "jti": uuid.uuid4().hex,
