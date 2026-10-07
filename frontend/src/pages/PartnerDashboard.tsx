@@ -11,9 +11,10 @@ import { ErrorNote, Money, Spinner } from "../components/ui";
 import PartnerOrders from "./PartnerOrders";
 import PartnerInsights from "./PartnerInsights";
 import PartnerStock from "./PartnerStock";
+import PartnerStudio from "./PartnerStudio";
 import { CITIES, DEFAULT_CITY } from "../cities";
 
-type Tab = "orders" | "menu" | "stock" | "insights";
+type Tab = "orders" | "menu" | "stock" | "insights" | "studio";
 
 interface GroupDraft {
   name: string;
@@ -293,6 +294,7 @@ export default function PartnerDashboard() {
           {tabButton("menu", "Menu")}
           {onBranch && tabButton("stock", "Stock")}
           {tabButton("insights", "Insights")}
+          {tabButton("studio", "Studio")}
         </nav>
       </div>
 
@@ -322,6 +324,10 @@ export default function PartnerDashboard() {
           from one branch's screen to another's (the capacity ghost bug). */}
       {tab === "stock" && onBranch && <PartnerStock key={scope} rid={scope!} />}
       {tab === "insights" && <PartnerInsights />}
+      {/* No scope: the server scopes by claim, and each draft names the
+          restaurant its copy is for. Switching branch chips does not
+          change what this tab is about. */}
+      {tab === "studio" && <PartnerStudio />}
       {tab !== "menu" ? null : (<>
       <ErrorNote error={removeCategory.error ?? toggle86.error ?? removeItem.error} />
 

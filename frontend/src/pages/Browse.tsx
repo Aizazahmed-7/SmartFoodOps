@@ -5,7 +5,8 @@ import { browse } from "../api/client";
 import type { RestaurantCard } from "../api/types";
 import { ErrorNote, Spinner } from "../components/ui";
 
-import { CITIES, DEFAULT_CITY } from "../cities";
+import { CITIES } from "../cities";
+import { useCity } from "../state/city";
 const CUISINES = ["pakistani", "burgers", "italian", "japanese", "mexican", "indian",
                   "vietnamese", "middle-eastern", "chinese", "pizza"];
 const TAGS = ["vegetarian", "vegan", "halal", "spicy"];
@@ -28,7 +29,8 @@ export function RestaurantTile({ r }: { r: RestaurantCard }) {
 }
 
 export default function Browse() {
-  const [city, setCity] = useState<string>(DEFAULT_CITY);
+  // Shared, so the assistant panel answers about the city on screen.
+  const { city, setCity } = useCity();
   const [cuisine, setCuisine] = useState<string | undefined>();
   const [tag, setTag] = useState<string | undefined>();
   const [pages, setPages] = useState(1);

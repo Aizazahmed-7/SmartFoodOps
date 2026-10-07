@@ -505,6 +505,7 @@ Topics are **cell-prefixed from day 1** (`<cell>.<domain>.<stream>`; one value t
 | `c1.catalog.changes` | restaurant_id-scoped aggregate (compacted CDC) | 6 (proposed) | compacted | Catalog outbox → Debezium | Menu-blob renderer, Part B embeddings |
 | `c1.inventory.events` | item aggregate id | 12 (proposed) | 7d | Inventory outbox → Debezium | Analytics, projectors |
 | `c1.identity.events` | user_id | 6 (proposed) | 7d | Identity outbox → Debezium | Audit, Analytics |
+| `c1.assistant.events` | message_id | 6 (proposed) | 7d | ai-assistant outbox → Debezium | Analytics (the six AI metrics, FR-95) |
 
 Sizing rule: partitions = slowest consumer's parallelism × 2 headroom at the 2,500 orders/s ceiling. Aggregate ~35k msg/s, ~17 MB/s → 6-broker MSK at <30% ([capacity-plan.md](capacity-plan.md)).
 

@@ -46,7 +46,7 @@ export default function Login() {
         New here? <Link to="/register" className="text-orange-400">Create an account</Link>
       </p>
       <p className="text-center text-xs text-slate-600">
-        Seeded demo: owner-springfield-biryani-house@demo.smartfood.dev / demo1234demo
+        Seeded demo: owner-islamabad-biryani-house@demo.smartfood.dev / demo1234demo
       </p>
     </form>
   );

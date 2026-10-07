@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { cancelOrder, getCourier, getOrder, getTrackTicket } from "../api/client";
+import {
+  cancelOrder, getCourier, getOrder, getOrderExplanation, getOrderFeedback,
+  getTrackTicket, putOrderFeedback,
+} from "../api/client";
 import { hasCode } from "../api/errors";
 import {
-  CANCEL_FAMILY, CANCELLABLE_STATUSES, TERMINAL_STATUSES,
-  type CancelReason, type OrderStatus,
+  CANCEL_FAMILY, CANCELLABLE_STATUSES, RATEABLE_STATUSES, SETTLED_REASONS, TERMINAL_STATUSES,
+  type OrderDetail as OrderDetailT, type OrderExplanation, type OrderStatus,
 } from "../api/types";
 import { ErrorNote, Money, Note, Spinner, StatusTag } from "../components/ui";
 import CityMap, { Pin, project } from "../components/CityMap";
@@ -18,21 +21,6 @@ const JOURNEY: { at: OrderStatus[]; label: string }[] = [
   { at: ["READY", "PICKED_UP"], label: "On its way" },
   { at: ["DELIVERED", "SETTLED"], label: "Delivered" },
 ];
-
-// Reasons where a card hold actually existed and was voided (auth happens
-// before CONFIRMED; these cancels all come after it). Stock/decline cancels
-// never held money — saying "released" there would be inventing a refund.
-const HOLD_WAS_RELEASED = new Set(["restaurant_rejected", "restaurant_timeout", "customer_cancelled"]);
-
-const REASONS: Record<CancelReason, string> = {
-  item_unavailable: "some items ran out of stock",
-  at_capacity: "the kitchen is at capacity",
-  payment_declined: "your card was declined",
-  restaurant_rejected: "the restaurant couldn't take the order",
-  restaurant_timeout: "the restaurant didn't respond in time",
-  customer_cancelled: "you cancelled it",
-  system_timeout: "we couldn't complete it in time",
-};
 
 function Journey({ status }: { status: OrderStatus }) {
   const reached = JOURNEY.findIndex((step) => step.at.includes(status));
@@ -142,18 +130,9 @@ export default function OrderDetail() {
         <StatusTag status={o.status} />
       </div>
 
-      {cancelled ? (
-        <Note tone="error">
-          Order {o.status === "CANCELLING" ? "is being cancelled" : "was cancelled"}
-          {/* Unknown reasons (a newer backend) fall back to the raw slug. */}
-          {o.cancel_reason ? ` — ${REASONS[o.cancel_reason as CancelReason] ?? o.cancel_reason}` : ""}.
-          {o.cancel_reason && HOLD_WAS_RELEASED.has(o.cancel_reason)
-            ? " Your card hold has been released."
-            : " Your card was never charged."}
-        </Note>
-      ) : (
-        <Journey status={o.status} />
-      )}
+      {cancelled ? null : <Journey status={o.status} />}
+
+      <Explanation order={o} cancelled={cancelled} />
 
       {!cancelled && <CourierMap orderId={o.order_id} status={o.status} />}
 
@@ -203,6 +182,8 @@ export default function OrderDetail() {
         <ErrorNote error={cancel.error} />
       )}
 
+      {RATEABLE_STATUSES.includes(o.status) && <Feedback orderId={o.order_id} />}
+
       <Link to="/orders" className="inline-block text-sm text-slate-400 hover:text-white">
         ← All orders
       </Link>
@@ -210,6 +191,181 @@ export default function OrderDetail() {
   );
 }
 
+
+/**
+ * Why the order is where it is (B5, FR-83/FR-86).
+ *
+ * The cancellation copy that used to live in this file is gone. It was a
+ * hardcoded map of reason slugs plus a hardcoded set of reasons where a
+ * card hold existed — and that set omitted `no_rider_available`, so the one
+ * customer whose food WAS cooked and then binned was told their card was
+ * never charged. The server derives that from `confirmed_at` instead,
+ * which is the actual evidence, and it cannot get the set wrong because it
+ * is not a set.
+ *
+ * Failure is silence. An order page that works is worth more than an
+ * explanation: if the assistant is down, or the order is not ours, or the
+ * backend predates B5, the customer still sees their food, their money and
+ * their journey bar. That is also why this is its own component — a failing
+ * query here must not take the page with it.
+ */
+/**
+ * Severity from the BUCKET, not the status. A cancelled order is over and
+ * reads as an error; a blown deadline or a very long stage is worth
+ * colouring; everything else is neutral, because most of the time the
+ * honest message is "this is going normally and here is where it is".
+ */
+function tone(view: OrderExplanation, cancelled: boolean): "info" | "warn" | "error" {
+  if (cancelled) return "error";
+  return view.bucket === "overdue" || view.bucket === "long" ? "warn" : "info";
+}
+
+function Explanation({ order, cancelled }: { order: OrderDetailT; cancelled: boolean }) {
+  const orderId = order.order_id;
+  const explanation = useQuery({
+    queryKey: ["explanation", orderId],
+    queryFn: () => getOrderExplanation(orderId),
+    // Re-ask while the order is still moving: the same cause reads
+    // differently as time passes ("just sent" becomes "9 minutes"), so a
+    // once-fetched sentence would quietly go stale on screen.
+    refetchInterval: (query) =>
+      query.state.data && SETTLED_REASONS.has(query.state.data.reason) ? false : 15_000,
+    retry: false, // a 404 is an answer, not a flake
+  });
+
+  const view = explanation.data;
+  // No explanation — the assistant is down, or the backend predates B5, or
+  // the server could not fill its own copy in ("fallback", which is true
+  // but useless next to a status the page already shows).
+  //
+  // For a LIVE order that is fine: the journey bar and the courier map
+  // still say where things are. For a CANCELLED one it is not. Part A had
+  // a local banner here and removing it made a core screen depend on an
+  // optional GenAI service — a customer whose order died would have seen a
+  // status tag and nothing about why, or about their money. `cancel_reason`
+  // is still on the order payload, so the floor costs two lines.
+  if (!view || view.source === "fallback") {
+    return cancelled ? <CancelledFloor order={order} /> : null;
+  }
+
+  return (
+    <Note tone={tone(view, cancelled)}>
+      {/* `data-reason` is the stable contract. The prose is server-owned
+          and a model may rewrite its wording (B5's polish layer), so
+          anything asserting on the words is asserting on a sample. */}
+      <span data-testid="order-explanation" data-reason={view.reason}>
+        {view.text}
+      </span>
+    </Note>
+  );
+}
+
+/**
+ * The offline floor for a cancelled order.
+ *
+ * Deliberately thinner than the server's copy: it names the cause and
+ * says nothing about money. Part A's version guessed at the card hold from
+ * a hardcoded list of reasons and got FR-32 wrong; the evidence for that
+ * claim is a timestamp only the backend has, so when the backend is not
+ * answering, the honest thing is to not make the claim.
+ */
+function CancelledFloor({ order }: { order: OrderDetailT }) {
+  const reason = order.cancel_reason;
+  return (
+    <Note tone="error">
+      <span data-testid="order-explanation" data-reason="offline">
+        Order {order.status === "CANCELLING" ? "is being cancelled" : "was cancelled"}
+        {reason ? ` — ${reason.replace(/_/g, " ")}` : ""}.
+      </span>
+    </Note>
+  );
+}
+
+/**
+ * Rate a delivered order (B6, FR-91).
+ *
+ * Part A captured no feedback of any kind, so this control is the entire
+ * corpus FR-92's summaries will be built from — which is why it collects a
+ * number first and a sentence only if someone wants to leave one. Most
+ * people will not, and a form that demands prose collects nothing.
+ *
+ * Shows back what was already said rather than asking twice. The rating is
+ * correctable: the API is a PUT, and a customer who clicks 4 then 5 meant
+ * 5 — treating the first click as final would be an interface deciding
+ * something the schema does not.
+ */
+function Feedback({ orderId }: { orderId: string }) {
+  const queryClient = useQueryClient();
+  const existing = useQuery({
+    queryKey: ["feedback", orderId],
+    queryFn: () => getOrderFeedback(orderId),
+    retry: false, // a 404 is an answer (not rated yet), not a flake
+  });
+  const [comment, setComment] = useState("");
+  const [touched, setTouched] = useState(false);
+
+  const saved = existing.data;
+  const rating = saved?.rating ?? 0;
+
+  const submit = useMutation({
+    mutationFn: (next: { rating: number; comment: string | null }) =>
+      putOrderFeedback(orderId, next.rating, next.comment),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["feedback", orderId] }),
+  });
+
+  if (existing.isLoading) return null;
+
+  return (
+    <div className="card space-y-2">
+      <div className="flex items-center justify-between">
+        <b className="text-sm">{saved ? "Your rating" : "How was it?"}</b>
+        <div className="flex gap-1">
+          {[1, 2, 3, 4, 5].map((n) => (
+            <button
+              key={n}
+              aria-label={`${n} star${n > 1 ? "s" : ""}`}
+              data-testid={`rate-${n}`}
+              disabled={submit.isPending}
+              className={`text-xl leading-none ${n <= rating ? "text-amber-400" : "text-slate-600"}`}
+              onClick={() => submit.mutate({ rating: n, comment: saved?.comment ?? null })}
+            >
+              ★
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* The sentence is optional and secondary — asked for only once a
+          rating exists, because a form that demands prose collects nothing. */}
+      {rating > 0 && (
+        <>
+          <textarea
+            className="input h-16 w-full text-sm"
+            placeholder="Anything you'd like the restaurant to know? (optional)"
+            value={touched ? comment : (saved?.comment ?? "")}
+            onChange={(e) => {
+              setTouched(true);
+              setComment(e.target.value);
+            }}
+          />
+          {touched && (
+            <button
+              className="btn-primary w-full"
+              disabled={submit.isPending}
+              onClick={() => {
+                submit.mutate({ rating, comment: comment.trim() || null });
+                setTouched(false);
+              }}
+            >
+              {submit.isPending ? "Saving…" : "Save comment"}
+            </button>
+          )}
+        </>
+      )}
+      <ErrorNote error={submit.error} />
+    </div>
+  );
+}
 
 /**
  * The customer's courier dot (dispatch milestone): a 2s authed poll of
