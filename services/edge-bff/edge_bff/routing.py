@@ -73,6 +73,11 @@ RULES = [
     # Only the ticket POST — the SSE stream rides /sse/track/* straight
     # from the gateway to order (the ticket IS its auth, FR-38).
     Rule("/v1/track", "order_base_url", "auth"),
+    # Only the POST that starts a turn and mints the ticket — the token
+    # stream rides /sse/assistant/* straight from the gateway to the
+    # assistant, because an EventSource cannot carry an Authorization
+    # header and the ticket is the auth there (FR-68).
+    Rule("/v1/assistant", "assistant_base_url", "auth"),
     # Longer prefix beats "/v1/restaurant" -> order: the owner's metrics
     # view rides the analytics service, everything else under /v1/restaurant
     # stays kitchen ops.

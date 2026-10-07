@@ -232,6 +232,37 @@ class CatalogRepo:
             )
         )
 
+    async def get_items_for_search(self, item_ids: list[str]) -> list[Row[Any]]:
+        """Name and CURRENT price for ranked ids (FR-65's hydration).
+
+        The assistant ranks; catalog prices. Reading these here rather than
+        storing them in the index is what makes it impossible for the
+        index's up-to-60s-stale copy to reach a customer through search —
+        and an id that has been deleted since indexing simply returns no
+        row, which the caller drops.
+        """
+        if not item_ids:
+            return []
+        rows = await self._s.execute(
+            sa.select(menu_items.c.id, menu_items.c.name, menu_items.c.price_cents).where(
+                menu_items.c.id.in_(item_ids)
+            )
+        )
+        return list(rows)
+
+    async def get_all_restaurant_ids(self) -> list[str]:
+        """Every restaurant, brands included — the republish worklist.
+
+        Brands are included deliberately: publishing one fans a fresh
+        full-state event to each of its branches (ADR-0028), which is
+        exactly what a downstream rebuild wants. A branch therefore sees its
+        state twice, once from its brand and once from itself. On a
+        COMPACTED topic those collapse to one surviving record per key, so
+        the duplication costs a little log and nothing else.
+        """
+        rows = await self._s.execute(sa.select(restaurants.c.id).order_by(restaurants.c.id))
+        return [str(row.id) for row in rows]
+
     async def get_unpublished_brands(self) -> list[Row[Any]]:
         """Brands that have never staged an event — the boot backfill's
         worklist; a crash mid-storm resumes here.
