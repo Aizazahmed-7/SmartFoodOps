@@ -108,7 +108,20 @@ class FakeBudgetStore:
 
 
 def settings(**kwargs: Any) -> Settings:
-    base: dict[str, Any] = {"database_url": "sqlite+aiosqlite://", "create_all": True}
+    """Hermetic by default (NFR-33: the unit suite needs no network).
+
+    `kafka_consumers="off"` is the load-bearing part. Without it `create_app`
+    builds the REAL consumers, and on a developer's machine with the stack
+    up the suite quietly joined live consumer groups and projected whatever
+    was on the topics into its sqlite database — which is how B4's second
+    orders-topic consumer turned a 4-second suite into one that hung. A test
+    that wants a runner passes one explicitly.
+    """
+    base: dict[str, Any] = {
+        "database_url": "sqlite+aiosqlite://",
+        "create_all": True,
+        "kafka_consumers": "off",
+    }
     base.update(kwargs)
     return Settings(**base)
 
@@ -128,6 +141,12 @@ def client(llm: FakeLlm, store: FakeBudgetStore):
     """The REAL router, guard and service over a fake provider — the
     failover rule and the budget arithmetic are the parts worth testing,
     and a coarse `service=` override would skip both."""
-    app = create_app(settings(), providers={"anthropic": llm}, budget_store=store)
+    # `runners=[]` and not the default, which is not a detail: without it
+    # `create_app` builds the REAL Kafka consumers, and on a developer's
+    # machine with the stack up the unit suite quietly joins live consumer
+    # groups and projects real topic traffic into its sqlite database.
+    # NFR-33 says this suite needs no network; it was taking one whenever
+    # one happened to be there.
+    app = create_app(settings(), providers={"anthropic": llm}, budget_store=store, runners=[])
     with TestClient(app) as test_client:  # `with` runs the lifespan (create_all)
         yield test_client

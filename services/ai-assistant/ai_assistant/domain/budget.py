@@ -17,7 +17,7 @@ from dataclasses import replace
 from typing import Protocol
 
 from ..metrics import BUDGET_REFUSALS, CONTEXT_TRUNCATIONS
-from .ports import Message
+from .ports import Message, PlaneShed
 from .router import Route
 
 
@@ -35,16 +35,6 @@ class BudgetStore(Protocol):
 
 class BudgetExceeded(Exception):
     """This subject's token budget is exhausted. Maps to 429 RATE_LIMITED."""
-
-
-class PlaneShed(Exception):
-    """The per-cell spend/quota breaker is open. Maps to 503 ADMISSION_SHED,
-    not DEPENDENCY_UNAVAILABLE: nothing is broken, we chose to stop
-    spending. Callers with a non-generative answer available (lexical
-    search, popularity recommendations, a rendered template) must catch this
-    and serve that instead — ladder step 2a. A breaker that errors where it
-    could return a worse-but-real answer is a worse breaker.
-    """
 
 
 def estimate_tokens(text: str) -> int:
@@ -195,3 +185,9 @@ class BudgetGuard:
             budget=self._user_budget,
             window_s=self._user_window_s,
         )
+
+
+# Re-exported: PlaneShed now lives in `ports` beside the other domain
+# exceptions, because the ROUTER raises it (ladder step 2a is enforced where
+# generation converges) and `budget` already imports from `router`.
+__all__ = ["BudgetExceeded", "BudgetGuard", "PlaneShed"]

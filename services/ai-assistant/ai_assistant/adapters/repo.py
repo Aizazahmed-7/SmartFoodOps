@@ -1,0 +1,237 @@
+"""assistant_db writes that are not the vector index itself: the debounce
+queue and the pointer that says which vector space is live.
+
+The `VectorStore` adapter lives beside this file rather than inside it —
+one is a queue, one is an index, and they fail for different reasons.
+"""
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Any, cast
+
+import sqlalchemy as sa
+from sqlalchemy import CursorResult
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..db import knowledge_epochs, knowledge_index_state, knowledge_pending
+
+
+@dataclass(frozen=True)
+class Pending:
+    """One restaurant's queued re-index, as the drain sees it."""
+
+    restaurant_id: str
+    payload: dict[str, Any]
+    payload_hash: str
+    first_seen_at: datetime
+
+
+class PendingRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    @property
+    def _dialect(self) -> str:
+        return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
+
+    async def stage(
+        self,
+        *,
+        restaurant_id: str,
+        payload: dict[str, Any],
+        payload_hash: str,
+        now: datetime,
+        debounce_s: float,
+    ) -> None:
+        """Queue one restaurant for re-indexing, no sooner than `debounce_s`
+        from its FIRST unprocessed change.
+
+        The conflict clause is the whole debounce, and it is deliberately
+        asymmetric:
+
+        - `payload` is overwritten, because catalog's events are full-state
+          snapshots and the newest one supersedes every earlier one
+          completely. There is no merge to do and no history to keep.
+        - `due_at` keeps the EARLIER of the two. That makes this a fixed
+          window rather than a sliding one: an owner editing twenty dishes
+          over five minutes is indexed once, `debounce_s` after the first
+          edit, instead of never — a trailing debounce restarts on every
+          event and can starve past NFR-28's 60 s freshness budget.
+        - `first_seen_at` is not touched at all, so "this restaurant has
+          been waiting four minutes" stays answerable.
+
+        Written as ONE upsert rather than a read-then-write because two
+        partitions of the same topic, or a redelivery racing a drain, would
+        otherwise interleave into a lost update — and the symptom would be a
+        restaurant that silently never re-indexes.
+
+        `sa.case` rather than `LEAST`: Postgres has `LEAST`, sqlite spells
+        the same thing `MIN`, and the unit suite runs on sqlite. A CASE
+        compiles identically on both.
+        """
+        insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
+        due_at = now + timedelta(seconds=debounce_s)
+        stmt = insert(knowledge_pending).values(
+            restaurant_id=restaurant_id,
+            payload=payload,
+            payload_hash=payload_hash,
+            due_at=due_at,
+            first_seen_at=now,
+        )
+        await self._s.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[knowledge_pending.c.restaurant_id],
+                set_={
+                    "payload": stmt.excluded.payload,
+                    "payload_hash": stmt.excluded.payload_hash,
+                    "due_at": sa.case(
+                        (
+                            knowledge_pending.c.due_at < stmt.excluded.due_at,
+                            knowledge_pending.c.due_at,
+                        ),
+                        else_=stmt.excluded.due_at,
+                    ),
+                },
+            )
+        )
+
+    async def due(self, *, now: datetime, limit: int) -> list[Pending]:
+        """Restaurants whose window has closed, oldest deadline first.
+
+        Oldest-first so a backlog drains in the order it accumulated: under
+        load the restaurant that has been stale longest is the one whose
+        customers are seeing the wrong menu.
+        """
+        rows = await self._s.execute(
+            sa.select(knowledge_pending)
+            .where(knowledge_pending.c.due_at <= now)
+            .order_by(knowledge_pending.c.due_at)
+            .limit(limit)
+        )
+        return [
+            Pending(
+                restaurant_id=row.restaurant_id,
+                payload=row.payload,
+                payload_hash=row.payload_hash,
+                first_seen_at=row.first_seen_at,
+            )
+            for row in rows
+        ]
+
+    async def complete(self, *, restaurant_id: str, payload_hash: str) -> bool:
+        """Remove a drained row — but ONLY if it still holds the payload we
+        drained. Returns whether it did.
+
+        The drain reads a row, then spends seconds embedding with no
+        transaction open. An unguarded delete would silently discard any
+        edit that landed in that gap, and nothing would report it: the index
+        would simply stay wrong until the restaurant happened to change
+        again. Keyed on the payload's fingerprint, a mid-flight edit leaves
+        the row in place and the next tick picks it up.
+
+        A redelivery of the SAME payload fingerprints identically and is
+        therefore correctly treated as already done.
+        """
+        result = await self._s.execute(
+            sa.delete(knowledge_pending).where(
+                knowledge_pending.c.restaurant_id == restaurant_id,
+                knowledge_pending.c.payload_hash == payload_hash,
+            )
+        )
+        return bool(cast("CursorResult[Any]", result).rowcount)
+
+
+class IndexStateRepo:
+    """Which vector space retrieval reads (FR-61)."""
+
+    SINGLETON = "current"
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    @property
+    def _dialect(self) -> str:
+        return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
+
+    async def ensure(self, *, model_version: str, now: datetime) -> None:
+        """Adopt this version if there is no opinion yet — and ONLY then.
+
+        Insert-if-absent rather than upsert, and the distinction is the
+        whole feature. An upsert here would mean that changing
+        `embedding_model` and restarting silently repoints every query at a
+        generation with zero rows in it: the index would answer nothing,
+        recover gradually as the drain caught up, and never report that it
+        had been wrong. Only the reindex moves this pointer.
+        """
+        insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
+        stmt = insert(knowledge_index_state).values(
+            id=self.SINGLETON, active_model_version=model_version, updated_at=now
+        )
+        await self._s.execute(
+            stmt.on_conflict_do_nothing(index_elements=[knowledge_index_state.c.id])
+        )
+
+    async def active(self) -> str | None:
+        return await self._s.scalar(
+            sa.select(knowledge_index_state.c.active_model_version).where(
+                knowledge_index_state.c.id == self.SINGLETON
+            )
+        )
+
+    async def activate(self, *, model_version: str, now: datetime) -> None:
+        """The cutover. Called by the reindex once every chunk exists under
+        the new version — never by a boot, a config change or a drain."""
+        await self._s.execute(
+            sa.update(knowledge_index_state)
+            .where(knowledge_index_state.c.id == self.SINGLETON)
+            .values(active_model_version=model_version, updated_at=now)
+        )
+
+
+class EpochRepo:
+    """The per-city corpus counter the answer cache is fenced on (FR-74).
+
+    A counter and not a timestamp: two drain passes inside one clock tick
+    would produce the same "version", and the one cache entry written
+    between them would outlive the change that should have killed it.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    @property
+    def _dialect(self) -> str:
+        return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
+
+    async def current(self, city: str) -> int:
+        """1 when a city has never been drained — so a fresh deployment has
+        a usable fence rather than a missing one."""
+        return int(
+            await self._s.scalar(
+                sa.select(knowledge_epochs.c.epoch).where(knowledge_epochs.c.city == city)
+            )
+            or 1
+        )
+
+    async def bump(self, *, city: str, now: datetime) -> None:
+        """Move a city on by one, in the CALLER's transaction.
+
+        Upsert-and-increment in one statement: read-then-write would let two
+        drain passes for different restaurants in the same city read the
+        same value and write the same one back, leaving a cache entry from
+        before both of them still reachable.
+        """
+        insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
+        # 2, not 1, on the INSERT branch. A city with no row already reads as
+        # epoch 1, so inserting 1 would leave the fence exactly where it was
+        # and the first menu change a city ever sees would invalidate
+        # nothing — the one case a cold cache hides in testing.
+        stmt = insert(knowledge_epochs).values(city=city, epoch=2, updated_at=now)
+        await self._s.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[knowledge_epochs.c.city],
+                set_={"epoch": knowledge_epochs.c.epoch + 1, "updated_at": now},
+            )
+        )
