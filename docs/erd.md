@@ -1,4 +1,4 @@
-# SmartFoodOps — ERD (as built, W3)
+# SmartFoodOps — ERD (as built, W3 + Part B)
 
 **Read this first:** the platform is database-per-service — six PostgreSQL databases, one per owning service, and **no foreign keys ever cross a database**. Real FK lines appear only inside each diagram; references _between_ services travel as plain id columns (shown in the last diagram) and are kept consistent by events + idempotent consumers, not constraints. Two table shapes come from shared libs: `outbox` (smartfood-outbox, 8 columns) repeats across services; `idempotency_keys` (smartfood-idempotency) survives only in payment_db — order's copy was retired by ADR-0024 (the orders row itself is placement's idempotency record). Identity's `processed_events` ledger is likewise **retired** (design review, 2026-09-08): `grant_restaurant_admin` already short-circuits an already-applied grant, so the seen-check traded one indexed read for one indexed read while adding two statements per event — dedupe now rides the write in all five consumers, per ADR-0018's per-sink modes.
 
@@ -286,7 +286,13 @@ erDiagram
         json pricing_snapshot "totals; activities READ, never recompute"
         json delivery_address_snapshot
         timestamptz placed_at
-        timestamptz updated_at
+        timestamptz payment_cleared_at "B5/FR-81 — the moment a card hold exists"
+        timestamptz confirmed_at "B5/FR-81 — accept_timeout_s runs from here"
+        timestamptz accepted_at "B5/FR-81"
+        timestamptz preparing_at "B5/FR-81"
+        timestamptz ready_at "B5/FR-81 — food waiting; the courier question starts"
+        timestamptz picked_up_at "B5/FR-81"
+        timestamptz updated_at "overwritten by EVERY move — says when, never what"
     }
     order_cancellations {
         text order_id PK "FK — the row's EXISTENCE is the cancellation"
@@ -313,9 +319,60 @@ erDiagram
         timestamptz published_at
         text traceparent
     }
+    order_feedback {
+        text order_id PK "FK — one review per order, enforced by the PK"
+        text user_id "the ownership check on every read and write"
+        text restaurant_id "SNAPSHOTTED, not joined — see below"
+        text brand_id "the branch's brand at the time of writing"
+        int rating "CHECK 1..5"
+        text comment "NULLABLE — most ratings have no prose"
+        timestamptz created_at
+        timestamptz updated_at
+    }
     orders ||--o| order_cancellations : "at most one — absent means not cancelled"
     orders ||--o{ order_items : "line snapshots"
+    orders ||--o| order_feedback : "at most one — only DELIVERED or SETTLED"
 ```
+
+**The milestone columns (B5, FR-81).** `updated_at` moves on every transition,
+so it can say *when something last happened* but never *what took long* — the
+moment it moves, the previous moment is gone. Each milestone is therefore its
+own column, stamped by `transitions.py` **inside the guarded UPDATE** and
+nowhere else. That is what makes them exactly-once: a replayed transition
+matches `WHERE status = :expected` against 0 rows and so cannot re-stamp a
+moment that already passed.
+
+Two of the six are worth justifying individually. `payment_cleared_at` exists
+because authorization completes at `PAYMENT_CLEARED`, one transition *before*
+`CONFIRMED` — an explanation that reads `confirmed_at` to decide whether a
+cancelled customer was charged tells them "you won't be charged" while the
+hold is live. `confirmed_at` exists because `accept_timeout_s` runs from it;
+timing that window from `placed_at` would charge the restaurant for the
+saga's own reserve-and-authorize round trip.
+
+The terminal moves (DELIVERED, SETTLED, CANCELLED) have no column on purpose:
+they announce themselves as events carrying `occurred_at`, so a consumer can
+time them without the row growing a column per state forever.
+
+**`order_feedback` (B6, FR-91).** Part A captured no feedback at all, so
+there was nothing for FR-92 to summarise and no honest proxy for it.
+`order_id` as the primary key makes "one review per order" a schema fact
+rather than a rule someone remembers; changing your mind rewrites the row,
+and a summary is regenerated from whatever the rows currently say — the only
+version anyone can defend quoting.
+
+`restaurant_id` is **snapshotted rather than joined**. A branch can be
+repointed to another brand later (ADR-0028), but feedback about the food
+served that night belongs to the branch that served it, whatever happens to
+its ownership afterwards.
+
+Writes are gated on `RATEABLE_STATUSES = ("DELIVERED", "SETTLED")`. SETTLED is
+included because to the person who ate the food it is the same evening as
+DELIVERED, and excluding it would close the feedback window the moment the
+card was captured. **REFUNDED is deliberately absent** even though the food
+did arrive: a refund means something went wrong that a 1–5 scale cannot
+express, and inviting stars there asks the wrong question of a corpus that
+B6 summarises as how the kitchen is doing.
 
 Indexes worth knowing: `ix_orders_history (user_id, placed_at DESC, order_id DESC)` — customer keyset paging; `ix_orders_feed (restaurant_id, status, placed_at)` — kitchen queues.
 
