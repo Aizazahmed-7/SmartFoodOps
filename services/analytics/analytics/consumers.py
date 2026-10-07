@@ -16,12 +16,14 @@ order events alone, which carry totals and all lifecycle timestamps.
 """
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
+from smartfood_kafka import EventType
 from smartfood_otel import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .adapters.repo import AnalyticsRepo, event_values, view_values
+from .adapters.repo import AnalyticsRepo, event_values, item_values, view_values
 
 log = get_logger("analytics.projector")
 
@@ -101,14 +103,60 @@ class ViewsProjector:
         log.info("views added", events=len(events), rows=len(rows))
 
 
+GROUP_ITEMS = "analytics.facts.items"
+
+
+class ItemFactsProjector:
+    """OrderPlaced → one row per dish ordered (FR-96).
+
+    Its OWN consumer group on the same topic, not a second write inside
+    `FactsProjector`. Two reasons, and the second is the one that matters:
+    item facts are a Part B feature and the order facts are what the
+    dashboards bill by, so a bug here must not be able to park the batches
+    those depend on — the notification split-loop rule, applied to a
+    projection instead of a topic. It also means the item facts can be
+    rebuilt from the topic's start by resetting one group, without
+    replaying the order facts alongside them.
+    """
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
+        self._sessions = sessions
+
+    async def handle(self, event: dict[str, Any]) -> None:
+        await self.handle_batch([event])
+
+    async def handle_batch(self, events: list[dict[str, Any]]) -> None:
+        rows: list[dict[str, Any]] = []
+        for event in events:
+            # ONLY OrderPlaced carries `items[]`. Every other lifecycle
+            # event on this topic skips — forward compatibility on a shared
+            # topic, the same rule ViewsProjector follows.
+            if str(event.get("event_type", "")) != EventType.ORDER_PLACED:
+                continue
+            rows.extend(item_values(_payload(event)))
+        async with self._sessions() as session:
+            await AnalyticsRepo(session).insert_item_facts(rows)
+            await session.commit()
+        log.info("item facts folded", events=len(events), rows=len(rows))
+
+
 GROUP_REPOINT = "analytics.brand-repoint"
 
 
 class BrandRepointHandler:
-    """catalog.changes → heals NULL brand_id on legacy facts and views
-    (ADR-0028). NATURALLY idempotent — the IS NULL predicate is the dedupe,
-    so no processed_events ledger: replaying the compacted topic into a
-    rebuilt database converges to the same rows."""
+    """catalog.changes → the branch↔brand relationship, in both the forms
+    analytics needs it (ADR-0028).
+
+    It heals NULL brand_id on legacy facts and views, and it RECORDS the
+    mapping, which is what lets a brand owner's claim reach an assistant
+    citation (FR-98): citations name branches and a claim is normally a
+    brand, and the facts carry no brand column to heal.
+
+    NATURALLY idempotent either way — the heal's dedupe is its IS NULL
+    predicate and the mapping's is its primary key, so no processed_events
+    ledger: replaying the compacted topic into a rebuilt database converges
+    to the same rows. That the topic is COMPACTED is also why the mapping
+    needs no backfill — every branch catalog knows is on it."""
 
     def __init__(self, sessions: async_sessionmaker[AsyncSession]):
         self._sessions = sessions
@@ -122,7 +170,12 @@ class BrandRepointHandler:
         if restaurant_id == brand_id:
             return  # the brand's own aggregate — facts reference branches
         async with self._sessions() as session:
-            healed = await AnalyticsRepo(session).repoint_brand(restaurant_id, brand_id)
+            repo = AnalyticsRepo(session)
+            # The mapping first, and unconditionally: a branch whose facts
+            # need no healing still has to be reachable from its brand, or
+            # a tenant with no legacy rows sees an empty AI dashboard.
+            await repo.record_brand(restaurant_id, brand_id, datetime.now(UTC))
+            healed = await repo.repoint_brand(restaurant_id, brand_id)
             await session.commit()
         if healed:
             log.info(
@@ -131,3 +184,94 @@ class BrandRepointHandler:
                 brand_id=brand_id,
                 rows=healed,
             )
+
+
+GROUP_ASSISTANT = "analytics.assistant.v1"
+
+
+def assistant_values(payload: dict[str, Any], occurred_at: str) -> dict[str, Any] | None:
+    """One interaction fact → its row, or None for a payload we cannot read.
+
+    None rather than an exception on a shapeless payload. This topic is
+    first-party and this should never fire, which is exactly why it must
+    not park the batch: a KPI projection that stops on one bad row stops
+    counting everything, and the number a dashboard shows then silently
+    describes a shorter window than its label claims.
+    """
+    message_id = payload.get("message_id")
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    try:
+        occurred = datetime.fromisoformat(occurred_at)
+    except ValueError:
+        # Only `message_id` used to be guarded, so the docstring's promise
+        # held for exactly one field. An envelope missing `occurred_at`
+        # yields "" here and `fromisoformat("")` raises straight out of
+        # `handle_batch` — taking the GOOD facts in the same batch with it
+        # and stopping the group. Every coercion below is guarded for the
+        # same reason; the contract is "skip the row", not "skip one shape
+        # of row".
+        return None
+    try:
+        values = {
+            "message_id": message_id,
+            # `or ""` and not `.get(key, "")`: the default only fires when the
+            # KEY IS ABSENT, so a payload carrying an explicit null produced the
+            # literal string "None" — which passes every `user_id != ""` guard
+            # downstream, making two different null-user turns look like the
+            # same customer and joining them to any order row with the same
+            # stringified null.
+            "conversation_id": str(payload.get("conversation_id") or ""),
+            "user_id": str(payload.get("user_id") or ""),
+            "city": str(payload.get("city") or ""),
+            "outcome": str(payload.get("outcome", "")),
+            "refusal_reason": str(payload.get("refusal_reason", "none")),
+            "cache_tier": str(payload.get("cache_tier", "")),
+            "item_ids": [str(i) for i in payload.get("item_ids") or []],
+            "restaurant_ids": [str(r) for r in payload.get("restaurant_ids") or []],
+            "candidates": int(payload.get("candidates") or 0),
+            "ungrounded": int(payload.get("ungrounded") or 0),
+            "duration_ms": float(payload.get("duration_ms") or 0.0),
+            "occurred_at": occurred,
+        }
+    except (TypeError, ValueError):
+        return None
+    return values
+
+
+class AssistantFactsProjector:
+    """`c1.assistant.events` → one fact row per interaction (FR-94).
+
+    Published through the outbox since B3 and read by nobody until now.
+    It is a KPI rather than telemetry (ADR-0044), which is why it rode the
+    outbox at all — and why this projector exists on its own consumer
+    group: the six FR-95 metrics and FR-97's conversion both start here,
+    and a bug in either must not park the batches the order dashboards
+    bill by.
+    """
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]):
+        self._sessions = sessions
+
+    async def handle(self, event: dict[str, Any]) -> None:
+        await self.handle_batch([event])
+
+    async def handle_batch(self, events: list[dict[str, Any]]) -> None:
+        rows: list[dict[str, Any]] = []
+        unreadable = 0
+        for event in events:
+            if str(event.get("event_type", "")) != EventType.ASSISTANT_INTERACTION:
+                # Forward compatibility on a shared topic — the same rule
+                # every other projector here follows.
+                continue
+            values = assistant_values(_payload(event), str(event.get("occurred_at", "")))
+            if values is None:
+                unreadable += 1
+                continue
+            rows.append(values)
+        async with self._sessions() as session:
+            await AnalyticsRepo(session).insert_assistant_facts(rows)
+            await session.commit()
+        if unreadable:
+            log.warning("assistant facts skipped unreadable payloads", count=unreadable)
+        log.info("assistant facts folded", events=len(events), rows=len(rows))
