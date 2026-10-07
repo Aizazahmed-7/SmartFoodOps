@@ -322,8 +322,7 @@ erDiagram
     order_feedback {
         text order_id PK "FK — one review per order, enforced by the PK"
         text user_id "the ownership check on every read and write"
-        text restaurant_id "SNAPSHOTTED, not joined — see below"
-        text brand_id "the branch's brand at the time of writing"
+        text branch_id "the branch's brand at the time of writing"
         int rating "CHECK 1..5"
         text comment "NULLABLE — most ratings have no prose"
         timestamptz created_at
@@ -335,7 +334,7 @@ erDiagram
 ```
 
 **The milestone columns (B5, FR-81).** `updated_at` moves on every transition,
-so it can say *when something last happened* but never *what took long* — the
+so it can say _when something last happened_ but never _what took long_ — the
 moment it moves, the previous moment is gone. Each milestone is therefore its
 own column, stamped by `transitions.py` **inside the guarded UPDATE** and
 nowhere else. That is what makes them exactly-once: a replayed transition
@@ -343,7 +342,7 @@ matches `WHERE status = :expected` against 0 rows and so cannot re-stamp a
 moment that already passed.
 
 Two of the six are worth justifying individually. `payment_cleared_at` exists
-because authorization completes at `PAYMENT_CLEARED`, one transition *before*
+because authorization completes at `PAYMENT_CLEARED`, one transition _before_
 `CONFIRMED` — an explanation that reads `confirmed_at` to decide whether a
 cancelled customer was charged tells them "you won't be charged" while the
 hold is live. `confirmed_at` exists because `accept_timeout_s` runs from it;
