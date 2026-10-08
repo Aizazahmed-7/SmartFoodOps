@@ -81,9 +81,8 @@ class RestaurantFacts:
 
 
 class RestaurantFactsReader:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], *, model_version: str) -> None:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
-        self._model_version = model_version
 
     async def for_restaurant(self, claim: str, *, now: datetime | None = None) -> RestaurantFacts:
         now = now or datetime.now(UTC)
@@ -101,7 +100,6 @@ class RestaurantFactsReader:
                         sa.select(item_chunks.c.restaurant_id)
                         .where(
                             sa.and_(
-                                item_chunks.c.model_version == self._model_version,
                                 sa.or_(
                                     item_chunks.c.restaurant_id == claim,
                                     item_chunks.c.brand_id == claim,
@@ -165,9 +163,7 @@ class RestaurantFactsReader:
                     .limit(TOP_DISHES)
                 )
             ).all()
-            names = await self._names(
-                [row.item_id for row in top], branches, session, self._model_version
-            )
+            names = await self._names([row.item_id for row in top], branches, session)
 
         return RestaurantFacts(
             orders=int(totals[0] or 0),
@@ -178,7 +174,7 @@ class RestaurantFactsReader:
         )
 
     async def _names(
-        self, item_ids: list[str], branches: list[str], session: AsyncSession, version: str
+        self, item_ids: list[str], branches: list[str], session: AsyncSession
     ) -> list[str]:
         """Dish names, in the order the ids were given.
 
@@ -191,7 +187,6 @@ class RestaurantFactsReader:
             await session.execute(
                 sa.select(item_chunks.c.item_id, item_chunks.c.name).where(
                     sa.and_(
-                        item_chunks.c.model_version == self._model_version,
                         item_chunks.c.restaurant_id.in_(branches),
                         item_chunks.c.item_id.in_(item_ids),
                     )

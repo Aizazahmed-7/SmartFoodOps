@@ -206,7 +206,7 @@ async def _reader() -> tuple[MenuFactsReader, async_sessionmaker]:
     # reindex does when it flips.
     async with sessions() as session:
         await session.commit()
-    return MenuFactsReader(sessions, model_version=VERSION), sessions
+    return MenuFactsReader(sessions), sessions
 
 
 async def _chunk(sessions, item_id, name, category, restaurant, brand, version=VERSION):
@@ -214,7 +214,6 @@ async def _chunk(sessions, item_id, name, category, restaurant, brand, version=V
         await session.execute(
             item_chunks.insert().values(
                 id=f"{restaurant}:{item_id}:{version}",
-                model_version=version,
                 restaurant_id=restaurant,
                 item_id=item_id,
                 name=name,
@@ -227,7 +226,6 @@ async def _chunk(sessions, item_id, name, category, restaurant, brand, version=V
                 available=True,
                 status="open",
                 content=name,
-                content_hash=f"{item_id}:{version}",
                 embedding=[0.0] * 512,
                 updated_at=sa.func.now(),
             )
@@ -341,4 +339,4 @@ async def _reader_without_index() -> tuple[MenuFactsReader, async_sessionmaker]:
     async with engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    return MenuFactsReader(sessions, model_version=VERSION), sessions
+    return MenuFactsReader(sessions), sessions

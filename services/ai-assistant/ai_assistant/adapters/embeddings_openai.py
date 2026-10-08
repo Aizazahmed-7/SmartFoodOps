@@ -46,14 +46,6 @@ class OpenAiEmbeddings:
         self._timeout_s = timeout_s
         self._retry = retry or RetryPolicy()
 
-    @property
-    def model(self) -> str:
-        return self._model
-
-    @property
-    def dimensions(self) -> int:
-        return self._dimensions
-
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []

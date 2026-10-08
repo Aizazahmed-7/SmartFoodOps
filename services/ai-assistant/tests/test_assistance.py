@@ -70,14 +70,12 @@ async def sessions():
         await session.execute(
             restaurant_chunks.insert().values(
                 id="rst_1:self",
-                model_version=VERSION,
                 restaurant_id="rst_1",
                 city="islamabad",
                 brand_id=None,
                 cuisines=[],
                 status="open",
                 content="Biryani House",
-                content_hash="h",
                 embedding=[0.0] * 512,
                 updated_at=NOW,
             )
@@ -91,7 +89,6 @@ async def sessions():
             await session.execute(
                 item_chunks.insert().values(
                     id=f"rst_1:{item_id}",
-                    model_version=VERSION,
                     restaurant_id="rst_1",
                     item_id=item_id,
                     # FR-88 gave the index a name column; irrelevant here,
@@ -100,7 +97,6 @@ async def sessions():
                     city="islamabad",
                     category="Mains",
                     content=name,
-                    content_hash="h",
                     embedding=[0.0] * 512,
                     tags=[],
                     cuisines=[],
@@ -142,7 +138,7 @@ async def test_the_partners_are_what_people_actually_order_with_it(sessions):
             _placed("o3", "itm_biryani", "itm_raita"),
         ]
     )
-    partners = await Recommender(sessions, model_version=VERSION).goes_with(
+    partners = await Recommender(sessions).goes_with(
         item_ids=["itm_biryani"], city="islamabad", limit=5
     )
     # Naan twice, raita once — ranked by how often the pairing happened.
@@ -151,7 +147,7 @@ async def test_the_partners_are_what_people_actually_order_with_it(sessions):
 
 async def test_the_dish_asked_about_is_not_its_own_accompaniment(sessions):
     await FeatureHandler(sessions).handle_batch([_placed("o1", "itm_biryani", "itm_naan")])
-    partners = await Recommender(sessions, model_version=VERSION).goes_with(
+    partners = await Recommender(sessions).goes_with(
         item_ids=["itm_biryani", "itm_naan"], city="islamabad", limit=5
     )
     assert partners == []
@@ -161,10 +157,10 @@ async def test_a_dish_on_either_side_of_the_pair_is_found(sessions):
     """Pairs are stored canonically (`a < b`), so the dish asked about can
     be on either end — checking one would find half the partners."""
     await FeatureHandler(sessions).handle_batch([_placed("o1", "itm_biryani", "itm_naan")])
-    from_left = await Recommender(sessions, model_version=VERSION).goes_with(
+    from_left = await Recommender(sessions).goes_with(
         item_ids=["itm_biryani"], city="islamabad", limit=5
     )
-    from_right = await Recommender(sessions, model_version=VERSION).goes_with(
+    from_right = await Recommender(sessions).goes_with(
         item_ids=["itm_naan"], city="islamabad", limit=5
     )
     assert [p.item_id for p in from_left] == ["itm_naan"]
@@ -176,17 +172,10 @@ async def test_a_dish_nobody_pairs_has_no_accompaniment(sessions):
     which is a worse answer but not a wrong one."""
     await FeatureHandler(sessions).handle_batch([_placed("o1", "itm_biryani", "itm_naan")])
     assert (
-        await Recommender(sessions, model_version=VERSION).goes_with(
-            item_ids=["itm_lonely"], city="islamabad", limit=5
-        )
+        await Recommender(sessions).goes_with(item_ids=["itm_lonely"], city="islamabad", limit=5)
         == []
     )
 
 
 async def test_asking_about_nothing_costs_no_query(sessions):
-    assert (
-        await Recommender(sessions, model_version=VERSION).goes_with(
-            item_ids=[], city="islamabad", limit=5
-        )
-        == []
-    )
+    assert await Recommender(sessions).goes_with(item_ids=[], city="islamabad", limit=5) == []

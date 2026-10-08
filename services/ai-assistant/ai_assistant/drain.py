@@ -12,7 +12,7 @@ writes — and because the world can move in the gap, the write completes with
 a guarded delete (`PendingRepo.complete`) rather than an unconditional one.
 
 Three things stop the provider being called:
-- the chunk's `content_hash` already matches the stored row (nothing changed)
+- the chunk's text already matches the stored row (nothing changed)
 - the same text already has a vector somewhere in the index (the fan-out)
 - the drain runs at all: a menu with no textual change costs zero calls
 """
@@ -43,20 +43,6 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def model_version(embeddings: EmbeddingPort) -> str:
-    """`{model}:{dimensions}` — the identity of a vector SPACE, not of a
-    provider.
-
-    Both halves matter: vectors from different models are not comparable,
-    and neither are vectors from the same model at different widths (these
-    embeddings are Matryoshka-truncatable, so 512 and 1536 are genuinely
-    different spaces). Stamped on every row and present in every query
-    predicate, so a rolling reindex (FR-61) can hold two generations at once
-    without either leaking into the other's results.
-    """
-    return f"{embeddings.model}:{embeddings.dimensions}"
-
-
 def _backlog_seconds(pending: "list[Pending]", now: datetime) -> float:
     """How long the oldest waiting menu change has been waiting."""
     if not pending:
@@ -82,7 +68,6 @@ class KnowledgeDrain:
         self._interval_s = interval_s
         self._batch = batch
         self._clock = clock
-        self._model_version = model_version(embeddings)
 
     async def run(self) -> None:
         """Supervised forever, like the outbox poller and the consumer loop:
@@ -129,18 +114,12 @@ class KnowledgeDrain:
 
         async with self._sessions() as session:
             store = PostgresVectorStore(session)
-            stored = await store.hashes_for(
-                restaurant_id=pending.restaurant_id, model_version=self._model_version
-            )
+            stored = await store.contents_for(restaurant_id=pending.restaurant_id)
             # Read before the rewrite: what retrieval can currently see, and
             # where. Both are compared against the new rows below to decide
             # whether the answer cache's fence has to move.
-            was_retrievable = await store.retrieval_state(
-                restaurant_id=pending.restaurant_id, model_version=self._model_version
-            )
-            was_in = await store.cities_for(
-                restaurant_id=pending.restaurant_id, model_version=self._model_version
-            )
+            was_retrievable = await store.retrieval_state(restaurant_id=pending.restaurant_id)
+            was_in = await store.cities_for(restaurant_id=pending.restaurant_id)
             stale = self._stale(knowledge, stored)
 
         # One batched call for everything whose text changed. `_stale` is
@@ -155,7 +134,6 @@ class KnowledgeDrain:
         async with self._sessions() as session:
             deleted = await PostgresVectorStore(session).replace_restaurant(
                 restaurant_id=pending.restaurant_id,
-                model_version=self._model_version,
                 restaurant=RestaurantUpsert(
                     chunk=knowledge.restaurant,
                     embedding=vectors.get(knowledge.restaurant.content_hash),
@@ -178,7 +156,7 @@ class KnowledgeDrain:
             # 86'd dish and a paused kitchen both leave every content hash
             # identical while changing what a query returns.
             now_retrievable = await PostgresVectorStore(session).retrieval_state(
-                restaurant_id=pending.restaurant_id, model_version=self._model_version
+                restaurant_id=pending.restaurant_id
             )
             if stale or deleted or now_retrievable != was_retrievable:
                 # Every city the restaurant was in AND is now in. A branch
@@ -199,8 +177,12 @@ class KnowledgeDrain:
     def _stale(
         self, knowledge: RestaurantKnowledge, stored: dict[str, str]
     ) -> list[tuple[str, str]]:
-        """`(content_hash, text)` for every chunk whose text is not already
-        embedded under this id.
+        """`(content_hash, text)` for every chunk whose text differs from
+        what is stored under its id.
+
+        Compares the TEXT itself rather than a stored digest: `content` is
+        kept on the row for B2's lexical leg anyway, so a second derived
+        column would only be a cheaper way to ask the same question.
 
         De-duplicated WITHIN the restaurant too: a menu that lists the same
         drink under two categories is two chunks and one vector.
@@ -208,7 +190,10 @@ class KnowledgeDrain:
         stale: dict[str, str] = {}
 
         def consider(chunk_id: str, content_hash: str, content: str) -> None:
-            if stored.get(chunk_id) != content_hash:
+            if stored.get(chunk_id) != content:
+                # Keyed by the digest so two chunks sharing text share one
+                # embedding — the digest is derived in `chunk()` and never
+                # stored, it only has to be stable within this pass.
                 stale.setdefault(content_hash, content)
 
         restaurant = knowledge.restaurant
@@ -235,13 +220,13 @@ class KnowledgeDrain:
     ) -> None:
         EMBED_REQUESTS.labels(outcome="sent" if embedded else "skipped").inc()
 
-        def count(kind: str, chunk_id: str, content_hash: str) -> None:
-            result = "unchanged" if stored.get(chunk_id) == content_hash else "embedded"
+        def count(kind: str, chunk_id: str, content: str) -> None:
+            result = "unchanged" if stored.get(chunk_id) == content else "embedded"
             KNOWLEDGE_CHUNKS.labels(kind=kind, result=result).inc()
 
-        count("restaurant", knowledge.restaurant.id, knowledge.restaurant.content_hash)
+        count("restaurant", knowledge.restaurant.id, knowledge.restaurant.content)
         for item in knowledge.items:
-            count("item", item.id, item.content_hash)
+            count("item", item.id, item.content)
         if deleted:
             KNOWLEDGE_CHUNKS.labels(kind="item", result="deleted").inc(deleted)
         first_seen = pending.first_seen_at

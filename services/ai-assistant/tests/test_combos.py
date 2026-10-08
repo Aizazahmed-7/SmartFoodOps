@@ -177,14 +177,12 @@ async def sessions():
             await session.execute(
                 restaurant_chunks.insert().values(
                     id=f"{restaurant}:self",
-                    model_version=VERSION,
                     restaurant_id=restaurant,
                     city=city,
                     brand_id=None,
                     cuisines=[],
                     status="open",
                     content=restaurant,
-                    content_hash="h",
                     embedding=[0.0] * 512,
                     updated_at=NOW,
                 )
@@ -213,9 +211,7 @@ def _placed(order_id, *items, restaurant="rst_1", at=NOW):
 
 async def _pairs(sessions, city="islamabad"):
     async with sessions() as session:
-        return await FeatureRepo(session).co_ordered(
-            city=city, since=NOW - timedelta(days=30), model_version=VERSION
-        )
+        return await FeatureRepo(session).co_ordered(city=city, since=NOW - timedelta(days=30))
 
 
 async def test_dishes_bought_together_become_a_pair(sessions):
@@ -279,7 +275,7 @@ async def test_the_recommender_returns_pairs_unpriced(sessions):
         [_placed("ord_1", "itm_a", "itm_b"), _placed("ord_2", "itm_a", "itm_b")]
     )
 
-    assert await Recommender(sessions, model_version=VERSION).pairs_in(city="islamabad") == [
+    assert await Recommender(sessions).pairs_in(city="islamabad") == [
         ("rst_1", "itm_a", "itm_b", 2)
     ]
 
@@ -287,7 +283,7 @@ async def test_the_recommender_returns_pairs_unpriced(sessions):
 async def test_hydrating_no_ids_costs_nothing(sessions):
     from ai_assistant.recommend import Recommender
 
-    assert await Recommender(sessions, model_version=VERSION).hydrate([]) == []
+    assert await Recommender(sessions).hydrate([]) == []
 
 
 async def test_hydrating_pair_ids_returns_menu_passages(sessions):
@@ -301,14 +297,12 @@ async def test_hydrating_pair_ids_returns_menu_passages(sessions):
         await session.execute(
             item_chunks.insert().values(
                 id="rst_1:itm_a",
-                model_version=VERSION,
                 restaurant_id="rst_1",
                 item_id="itm_a",
                 name="itm_a",
                 city="islamabad",
                 category="Mains",
                 content="Chicken Biryani",
-                content_hash="h",
                 embedding=[0.0] * 512,
                 tags=[],
                 cuisines=[],
@@ -321,7 +315,7 @@ async def test_hydrating_pair_ids_returns_menu_passages(sessions):
         await session.commit()
 
     # Duplicates collapse: a dish in two pairs must be looked up once.
-    passages = await Recommender(sessions, model_version=VERSION).hydrate(
+    passages = await Recommender(sessions).hydrate(
         [("rst_1", "itm_a"), ("rst_1", "itm_a"), ("rst_1", "itm_gone")]
     )
     assert [(p.item_id, p.restaurant_id) for p in passages] == [("itm_a", "rst_1")]

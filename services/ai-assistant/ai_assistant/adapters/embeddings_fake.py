@@ -45,14 +45,6 @@ class FakeEmbeddings:
         self._dimensions = dimensions
         self._model = model
 
-    @property
-    def model(self) -> str:
-        return self._model
-
-    @property
-    def dimensions(self) -> int:
-        return self._dimensions
-
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         return [self._vector(text) for text in texts]
 

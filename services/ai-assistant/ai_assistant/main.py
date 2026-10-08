@@ -44,7 +44,6 @@ from .domain.retrieval import Hydrated, Passage
 from .domain.router import ModelRouter, default_policy
 from .domain.service import AssistantService
 from .drafts import DraftStore
-from .drain import model_version
 from .explain_service import ExplainService
 from .menu_facts import MenuFactsReader
 from .polish_cache import PolishedTemplates
@@ -95,7 +94,7 @@ def _embeddings(settings: Settings, http: httpx.AsyncClient | None) -> Embedding
     return FakeEmbeddings(dimensions=settings.embedding_dimensions)
 
 
-def _answer_cache(settings: Settings, sessions: Any, redis: Any, model_version: str = "") -> Any:
+def _answer_cache(settings: Settings, sessions: Any, redis: Any) -> Any:
     """Both tiers, or neither.
 
     An exact tier without Redis is not a degraded cache, it is a lookup that
@@ -112,7 +111,6 @@ def _answer_cache(settings: Settings, sessions: Any, redis: Any, model_version: 
         sessions,
         exact_tier=RedisExactCache(redis, ttl_s=settings.answer_cache_ttl_s),
         semantic_tier=PostgresSemanticCache(sessions, threshold=settings.answer_cache_distance),
-        model_version=model_version,
     )
 
 
@@ -330,7 +328,6 @@ def create_app(
     # model's version while the drain wrote the fake's — leaving retrieval
     # filtering on a generation with no rows in it, silently.
     embeddings = _embeddings(settings, own_http)
-    active_version = model_version(embeddings)
 
     live_runners = list(runners) if runners is not None else []
     if not live_runners and settings.kafka_consumers == "on":  # pragma: no cover — live
@@ -385,11 +382,7 @@ def create_app(
             drain.run,
             features_consumer.run,
             views_consumer.run,
-            ProfileBuilder(
-                sessions,
-                interval_s=settings.profile_interval_seconds,
-                model_version=active_version,
-            ).run,
+            ProfileBuilder(sessions, interval_s=settings.profile_interval_seconds).run,
         ]
 
     own_producer: Any | None = None
@@ -505,16 +498,12 @@ def create_app(
         history=settings.history_limit,
         shown=_record_answer_shown(app),
     )
-    app.state.answer_cache = _answer_cache(settings, sessions, own_redis, active_version)
-    app.state.cards = CardService(
-        sessions,
-        CatalogClient(settings.catalog_base_url, internal_http),
-        model_version=active_version,
-    )
+    app.state.answer_cache = _answer_cache(settings, sessions, own_redis)
+    app.state.cards = CardService(sessions, CatalogClient(settings.catalog_base_url, internal_http))
     app.state.kitchen_load = InventoryClient(settings.inventory_base_url, internal_http)
     app.state.drafts = DraftStore(sessions)
-    app.state.menu_facts = MenuFactsReader(sessions, model_version=active_version)
-    app.state.restaurant_facts = RestaurantFactsReader(sessions, model_version=active_version)
+    app.state.menu_facts = MenuFactsReader(sessions)
+    app.state.restaurant_facts = RestaurantFactsReader(sessions)
     app.state.feedback = FeedbackClient(settings.order_base_url, internal_http)
     # Enqueue is injected rather than imported, so the API can be exercised
     # without a broker — and so a test can assert WHICH ids were enqueued,
@@ -531,10 +520,8 @@ def create_app(
         # FR-87, arrived at by the machinery rather than by a flag.
         templates=PolishedTemplates(TemplateCache(), router=app.state.service.router),
     )
-    app.state.retriever = PostgresRetriever(
-        sessions, embeddings, ef_search=settings.hnsw_ef_search, model_version=active_version
-    )
-    app.state.recommender = Recommender(sessions, model_version=active_version)
+    app.state.retriever = PostgresRetriever(sessions, embeddings, ef_search=settings.hnsw_ef_search)
+    app.state.recommender = Recommender(sessions)
     app.state.recommend_limit = settings.recommend_limit
     app.state.stream_lifetime_s = settings.stream_lifetime_seconds
     app.include_router(router)

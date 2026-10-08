@@ -36,12 +36,7 @@ def normalize(question: str) -> str:
 class Fence:
     """What a cached answer is only valid WITHIN (FR-74).
 
-    All three parts earn their place:
-
-    `model_version` — a question vector written by one embedder is
-    meaningless to another, and the rolling reindex means two can coexist
-    (FR-61). Sharing a cache across them would compare distances in
-    different spaces.
+    Both parts earn their place:
 
     `city` — retrieval is geo-scoped (FR-63), so an answer is about one
     city's menus. This is FR-74's "geo bucket", and it is the coarsest
@@ -51,9 +46,15 @@ class Fence:
     `epoch` — FR-74's "menu_version". The assistant's corpus is a Kafka
     projection, not a versioned blob, so the version is a per-city counter
     the drain bumps when it changes that city's chunks.
+
+    A third part, `model_version`, left with the rolling reindex. It existed
+    because a question vector written by one embedder is meaningless to
+    another and two generations could coexist; with the model fixed by
+    configuration, a model change is a rebuild — which re-drains every
+    restaurant and so bumps every city's epoch, invalidating the cache
+    through the part that remains.
     """
 
-    model_version: str
     city: str
     epoch: int
 
@@ -65,7 +66,7 @@ class Fence:
         read and not rejected; this way a stale entry is simply unreachable.
         """
         digest = hashlib.sha256(normalize(question).encode()).hexdigest()[:32]
-        return f"assistant:ans:{self.model_version}:{self.city}:{self.epoch}:{digest}"
+        return f"assistant:ans:{self.city}:{self.epoch}:{digest}"
 
     def row_id(self, question: str) -> str:
         return hashlib.sha256(normalize(question).encode()).hexdigest()

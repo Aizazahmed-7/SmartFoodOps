@@ -24,9 +24,8 @@ log = get_logger("ai-assistant.recommend")
 
 
 class Recommender:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], *, model_version: str) -> None:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
-        self._model_version = model_version
 
     async def record_shown(
         self, *, user_id: str, city: str, surface: str, basis: str, item_ids: Any
@@ -81,7 +80,6 @@ class Recommender:
             return await FeatureRepo(session).co_ordered(
                 city=city,
                 since=datetime.now(UTC) - WINDOW,
-                model_version=self._model_version,
                 limit=limit,
             )
 
@@ -127,7 +125,6 @@ class Recommender:
             for restaurant_id, item_id in wanted:
                 texts = await store.texts_by_item(
                     item_ids=[item_id],
-                    model_version=self._model_version,
                     restaurant_id=restaurant_id,
                 )
                 if item_id in texts:
@@ -161,7 +158,7 @@ class Recommender:
                 # worse than the baseline because it looks like it knows
                 # something.
                 return "popular", await self.popular(city=city, limit=limit, at=at)
-            candidates = await repo.menu_attributes(city=city, model_version=self._model_version)
+            candidates = await repo.menu_attributes(city=city)
         if not candidates:
             return "popular", await self.popular(city=city, limit=limit, at=at)
         # Deduped BEFORE ranking too: `menu_attributes` yields one row per
@@ -171,13 +168,9 @@ class Recommender:
         for candidate in candidates:
             unique.setdefault(candidate.item_id, candidate)
         chosen = recommend(profile, list(unique.values()), limit)
-        return "taste", await self._passages(
-            [c.item_id for c in chosen], self._model_version, city=city
-        )
+        return "taste", await self._passages([c.item_id for c in chosen], city=city)
 
-    async def _passages(
-        self, item_ids: list[str], model_version: str, *, city: str
-    ) -> list[Passage]:
+    async def _passages(self, item_ids: list[str], *, city: str) -> list[Passage]:
         """Ranked ids -> passages, DEDUPED and scoped to the city.
 
         Deduped because the index holds one chunk per (restaurant, item), so
@@ -186,9 +179,7 @@ class Recommender:
         dish could resolve to a branch in another one (B4 review).
         """
         async with self._sessions() as session:
-            found = await PostgresVectorStore(session).texts_by_item(
-                item_ids=item_ids, model_version=model_version, city=city
-            )
+            found = await PostgresVectorStore(session).texts_by_item(item_ids=item_ids, city=city)
         seen: set[str] = set()
         passages: list[Passage] = []
         for item_id in item_ids:
@@ -218,18 +209,16 @@ class Recommender:
         when = at or datetime.now(UTC)
         async with self._sessions() as session:
             repo = FeatureRepo(session)
-            counted = await repo.popular_in(city=city, at=when, model_version=self._model_version)
+            counted = await repo.popular_in(city=city, at=when)
             ordered = rank(counted, limit)
             if not ordered:
                 # FR-80's floor: a city with no order history in this hour
                 # band still has a menu, and "never an empty response" is
                 # the requirement this endpoint exists for.
-                fallback = await repo.any_in(
-                    city=city, model_version=self._model_version, limit=limit
-                )
-                return await self._passages(fallback, self._model_version, city=city)
+                fallback = await repo.any_in(city=city, limit=limit)
+                return await self._passages(fallback, city=city)
             found = await PostgresVectorStore(session).texts_by_item(
-                item_ids=[p.item_id for p in ordered], model_version=self._model_version, city=city
+                item_ids=[p.item_id for p in ordered], city=city
             )
         seen: set[str] = set()
         passages: list[Passage] = []

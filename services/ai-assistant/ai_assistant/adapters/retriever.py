@@ -43,12 +43,10 @@ class PostgresRetriever:
         embeddings: EmbeddingPort,
         *,
         ef_search: int | None = None,
-        model_version: str,
     ) -> None:
         self._sessions = sessions
         self._embeddings = embeddings
         self._ef_search = ef_search
-        self._model_version = model_version
 
     async def retrieve(self, *, query: str, filters: Filters, limit: int) -> Retrieved:
         """A sessionmaker rather than a session, matching catalog's
@@ -64,7 +62,7 @@ class PostgresRetriever:
         await self._apply_settings(session)
         (vector,) = await self._embeddings.embed([query])
         fetch = limit * LEG_OVERFETCH
-        common = {"model_version": self._model_version, "q": query, "leg_limit": fetch}
+        common = {"q": query, "leg_limit": fetch}
         # pgvector binds a vector from its text form; going through the
         # driver's list adaptation would need the dialect's type on a raw
         # textual query, which is exactly what this SQL avoids.
@@ -87,7 +85,7 @@ class PostgresRetriever:
             return []
         async with self._sessions() as session:
             found = await PostgresVectorStore(session).texts_for(
-                chunk_ids=[c.chunk_id for c in candidates], model_version=self._model_version
+                chunk_ids=[c.chunk_id for c in candidates]
             )
         return [
             Passage(

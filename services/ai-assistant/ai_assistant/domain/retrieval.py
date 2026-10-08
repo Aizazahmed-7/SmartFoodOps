@@ -159,11 +159,11 @@ def predicates(filters: Filters, *, items: bool) -> tuple[str, dict[str, object]
     would eventually return a paused restaurant or another city's menu, and
     the fusion would launder it into the result set as though both agreed.
 
-    `model_version` is bound by the caller from `knowledge_index_state` — the
-    ACTIVE generation, never the configured one, so a half-built reindex is
-    invisible to queries.
+    There is no generation predicate any more: the embedding model is fixed
+    by configuration, so the index holds exactly one vector space and a
+    filter on it would always be true.
     """
-    clauses = ["model_version = :model_version", "city = :city"]
+    clauses = ["city = :city"]
     params: dict[str, object] = {"city": filters.city}
     if filters.open_only:
         clauses.append("status = 'open'")

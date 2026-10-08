@@ -27,19 +27,18 @@ class PostgresVectorStore:
     def _dialect(self) -> str:
         return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
 
-    async def hashes_for(self, *, restaurant_id: str, model_version: str) -> dict[str, str]:
+    async def contents_for(self, *, restaurant_id: str) -> dict[str, str]:
         stored: dict[str, str] = {}
         for table in (item_chunks, restaurant_chunks):
             rows = await self._s.execute(
-                sa.select(table.c.id, table.c.content_hash).where(
+                sa.select(table.c.id, table.c.content).where(
                     table.c.restaurant_id == restaurant_id,
-                    table.c.model_version == model_version,
                 )
             )
-            stored.update({row.id: row.content_hash for row in rows})
+            stored.update({row.id: row.content for row in rows})
         return stored
 
-    async def retrieval_state(self, *, restaurant_id: str, model_version: str) -> set[tuple]:
+    async def retrieval_state(self, *, restaurant_id: str) -> set[tuple]:
         """Everything a RETRIEVAL predicate reads, per row.
 
         `content_hash` deliberately excludes `available` and `status`
@@ -62,7 +61,6 @@ class PostgresVectorStore:
                 item_chunks.c.status,
             ).where(
                 item_chunks.c.restaurant_id == restaurant_id,
-                item_chunks.c.model_version == model_version,
             )
         )
         state.update((r.id, r.city, bool(r.available), r.status) for r in items)
@@ -71,13 +69,12 @@ class PostgresVectorStore:
                 restaurant_chunks.c.id, restaurant_chunks.c.city, restaurant_chunks.c.status
             ).where(
                 restaurant_chunks.c.restaurant_id == restaurant_id,
-                restaurant_chunks.c.model_version == model_version,
             )
         )
         state.update((r.id, r.city, True, r.status) for r in restaurants)
         return state
 
-    async def cities_for(self, *, restaurant_id: str, model_version: str) -> set[str]:
+    async def cities_for(self, *, restaurant_id: str) -> set[str]:
         """Which cities this restaurant currently has rows in.
 
         Read BEFORE the rewrite, so a branch whose address moves from
@@ -90,15 +87,12 @@ class PostgresVectorStore:
             rows = await self._s.execute(
                 sa.select(table.c.city).where(
                     table.c.restaurant_id == restaurant_id,
-                    table.c.model_version == model_version,
                 )
             )
             found.update(row.city for row in rows)
         return found
 
-    async def texts_for(
-        self, *, chunk_ids: Sequence[str], model_version: str
-    ) -> dict[str, tuple[str, str]]:
+    async def texts_for(self, *, chunk_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
         """`chunk_id -> (item_id, content)` for candidates the retriever
         ranked.
 
@@ -112,7 +106,6 @@ class PostgresVectorStore:
             return {}
         rows = await self._s.execute(
             sa.select(item_chunks.c.id, item_chunks.c.item_id, item_chunks.c.content).where(
-                item_chunks.c.model_version == model_version,
                 item_chunks.c.id.in_(wanted),
             )
         )
@@ -122,7 +115,6 @@ class PostgresVectorStore:
         self,
         *,
         item_ids: Sequence[str],
-        model_version: str,
         city: str | None = None,
         restaurant_id: str | None = None,
     ) -> dict[str, tuple[str, str]]:
@@ -148,7 +140,6 @@ class PostgresVectorStore:
         if not wanted:
             return {}
         predicates = [
-            item_chunks.c.model_version == model_version,
             item_chunks.c.item_id.in_(wanted),
             item_chunks.c.available.is_(True),
             item_chunks.c.status == "open",
@@ -164,9 +155,7 @@ class PostgresVectorStore:
         )
         return {row.item_id: (row.restaurant_id, row.content) for row in rows}
 
-    async def restaurants_for(
-        self, *, item_ids: Sequence[str], model_version: str
-    ) -> dict[str, str]:
+    async def restaurants_for(self, *, item_ids: Sequence[str]) -> dict[str, str]:
         """`item_id -> restaurant_id`, for grouping cards into one snapshot
         call per restaurant.
 
@@ -181,7 +170,6 @@ class PostgresVectorStore:
             return {}
         rows = await self._s.execute(
             sa.select(item_chunks.c.item_id, item_chunks.c.restaurant_id).where(
-                item_chunks.c.model_version == model_version,
                 item_chunks.c.item_id.in_(wanted),
             )
         )
@@ -191,41 +179,35 @@ class PostgresVectorStore:
         self,
         *,
         restaurant_id: str,
-        model_version: str,
         restaurant: RestaurantUpsert,
         items: Sequence[ItemUpsert],
         now: datetime,
     ) -> int:
-        await self._write_restaurant(restaurant, model_version, now)
+        await self._write_restaurant(restaurant, now)
         for item in items:
-            await self._write_item(item, model_version, now)
-        return await self._reconcile(restaurant_id, model_version, [i.chunk.id for i in items])
+            await self._write_item(item, now)
+        return await self._reconcile(restaurant_id, [i.chunk.id for i in items])
 
     # ── writes ──────────────────────────────────────────────────────
 
-    async def _write_restaurant(
-        self, upsert: RestaurantUpsert, model_version: str, now: datetime
-    ) -> None:
+    async def _write_restaurant(self, upsert: RestaurantUpsert, now: datetime) -> None:
         chunk = upsert.chunk
         values = {
             "id": chunk.id,
-            "model_version": model_version,
             "restaurant_id": chunk.restaurant_id,
             "city": chunk.city,
             "brand_id": chunk.brand_id,
             "cuisines": list(chunk.cuisines),
             "status": chunk.status,
             "content": chunk.content,
-            "content_hash": chunk.content_hash,
             "updated_at": now,
         }
         await self._upsert(restaurant_chunks, values, upsert.embedding)
 
-    async def _write_item(self, upsert: ItemUpsert, model_version: str, now: datetime) -> None:
+    async def _write_item(self, upsert: ItemUpsert, now: datetime) -> None:
         chunk = upsert.chunk
         values = {
             "id": chunk.id,
-            "model_version": model_version,
             "restaurant_id": chunk.restaurant_id,
             "item_id": chunk.item_id,
             "city": chunk.city,
@@ -238,7 +220,6 @@ class PostgresVectorStore:
             "available": chunk.available,
             "status": chunk.status,
             "content": chunk.content,
-            "content_hash": chunk.content_hash,
             "updated_at": now,
         }
         await self._upsert(item_chunks, values, upsert.embedding)
@@ -257,25 +238,21 @@ class PostgresVectorStore:
         if embedding is None:
             await self._s.execute(
                 sa.update(table)
-                .where(table.c.id == values["id"], table.c.model_version == values["model_version"])
-                .values({k: v for k, v in values.items() if k not in ("id", "model_version")})
+                .where(table.c.id == values["id"])
+                .values({k: v for k, v in values.items() if k != "id"})
             )
             return
         insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
         stmt = insert(table).values({**values, "embedding": list(embedding)})
         await self._s.execute(
             stmt.on_conflict_do_update(
-                index_elements=[table.c.id, table.c.model_version],
-                set_={
-                    column: stmt.excluded[column]
-                    for column in values
-                    if column not in ("id", "model_version")
-                }
+                index_elements=[table.c.id],
+                set_={column: stmt.excluded[column] for column in values if column != "id"}
                 | {"embedding": stmt.excluded.embedding},
             )
         )
 
-    async def _reconcile(self, restaurant_id: str, model_version: str, keep: list[str]) -> int:
+    async def _reconcile(self, restaurant_id: str, keep: list[str]) -> int:
         """Delete every item chunk this restaurant no longer lists.
 
         Not housekeeping — correctness. Catalog's payloads are full
@@ -288,7 +265,6 @@ class PostgresVectorStore:
         """
         condition = sa.and_(
             item_chunks.c.restaurant_id == restaurant_id,
-            item_chunks.c.model_version == model_version,
         )
         if keep:
             condition = sa.and_(condition, item_chunks.c.id.notin_(keep))

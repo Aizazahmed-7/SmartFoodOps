@@ -134,16 +134,14 @@ class EmbeddingUnavailable(Exception):
 
 
 class EmbeddingPort(Protocol):
-    """Text -> vectors. `model` and `dimensions` are exposed because both
-    are written to every row: vectors from different models are not
-    comparable, so a change to either is a version bump and a rolling
-    reindex, never an in-place edit (PRD FR-61)."""
+    """Text -> vectors.
 
-    @property
-    def model(self) -> str: ...
-
-    @property
-    def dimensions(self) -> int: ...
+    The model and its dimensions are an implementation detail of the
+    adapter now. They used to be exposed because both were written to every
+    row, so that two vector spaces could be told apart during a rolling
+    reindex; with the model fixed by configuration the index holds one
+    space and nothing downstream needs to ask which.
+    """
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         """Batch by contract: per-text calls are the difference between one

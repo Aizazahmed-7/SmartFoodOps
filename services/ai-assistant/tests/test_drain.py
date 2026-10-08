@@ -20,7 +20,7 @@ from ai_assistant.adapters.repo import PendingRepo
 from ai_assistant.consumers import KnowledgeHandler
 from ai_assistant.db import item_chunks, knowledge_pending, metadata, restaurant_chunks
 from ai_assistant.domain.knowledge import fingerprint
-from ai_assistant.drain import KnowledgeDrain, model_version
+from ai_assistant.drain import KnowledgeDrain
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -167,14 +167,6 @@ async def test_volatile_columns_land_as_filters_not_prose(drain, sessions, clock
     assert "899" not in row["content"]
 
 
-async def test_the_model_version_names_the_vector_space(drain, sessions, clock, embeddings):
-    await _stage(sessions)
-    clock.advance(31)
-    await drain.tick()
-    row = (await _rows(sessions, item_chunks))[0]
-    assert row["model_version"] == model_version(embeddings) == f"fake-hashing-v1:{DIMENSIONS}"
-
-
 # ── what does NOT cost a provider call ──────────────────────────────
 
 
@@ -275,7 +267,7 @@ async def test_a_shared_dish_across_branches_has_identical_text(drain, sessions,
     assert len(dishes) == 2
     # Still byte-identical, and still the same vector — an embedding is a
     # pure function of (text, model), so paying twice buys the same answer.
-    assert dishes[0]["content_hash"] == dishes[1]["content_hash"]
+    assert dishes[0]["content"] == dishes[1]["content"]
     assert list(dishes[0]["embedding"]) == list(dishes[1]["embedding"])
     dish = "Chicken Karahi\nWok-cooked.\nCategory: Mains\nTags: spicy\nCuisines: pakistani"
     # The dish TWICE now — once per branch — plus each branch's own

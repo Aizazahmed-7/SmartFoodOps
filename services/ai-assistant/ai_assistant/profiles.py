@@ -23,7 +23,6 @@ log = get_logger("ai-assistant.profiles")
 async def build_profiles(
     sessions: async_sessionmaker[AsyncSession],
     *,
-    model_version: str,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Rebuild every recent customer's profile. Returns a summary.
@@ -43,7 +42,7 @@ async def build_profiles(
     for user_id in users:
         async with sessions() as session:
             repo = FeatureRepo(session)
-            rows = await repo.taste_rows(user_id=user_id, since=since, model_version=model_version)
+            rows = await repo.taste_rows(user_id=user_id, since=since)
             if not rows:
                 # `active` is read once at the top of the pass. If a reindex
                 # lands mid-pass the old version's chunks go away, every
@@ -96,18 +95,16 @@ class ProfileBuilder:
         sessions: async_sessionmaker[AsyncSession],
         *,
         interval_s: float,
-        model_version: str,
     ) -> None:
         self._sessions = sessions
         self._interval = interval_s
-        self._model_version = model_version
 
     async def run(self) -> None:  # pragma: no cover — the loop; the pass is tested
         import asyncio
 
         while True:
             try:
-                await build_profiles(self._sessions, model_version=self._model_version)
+                await build_profiles(self._sessions)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

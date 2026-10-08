@@ -94,13 +94,13 @@ def test_identity_fields_survive_the_merge():
 # ── predicates ──────────────────────────────────────────────────────
 
 
-def test_every_query_is_scoped_to_a_version_and_a_city():
+def test_every_query_is_scoped_to_a_city():
     """Unscoped retrieval would return dishes from a city the customer
-    cannot order from, and `model_version` keeps a half-built reindex
-    invisible."""
+    cannot order from. There is no generation predicate any more — the
+    index holds one vector space, so a filter on it would always be true."""
     sql, params = predicates(Filters(city="springfield"), items=True)
-    assert "model_version = :model_version" in sql
     assert "city = :city" in sql
+    assert "model_version" not in sql
     assert params["city"] == "springfield"
 
 

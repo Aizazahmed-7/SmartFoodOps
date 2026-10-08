@@ -63,9 +63,8 @@ class MenuFacts:
 
 
 class MenuFactsReader:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], *, model_version: str) -> None:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = sessions
-        self._model_version = model_version
 
     @staticmethod
     def _owned_by(claim: str) -> Any:
@@ -125,7 +124,7 @@ class MenuFactsReader:
                         item_chunks.c.tags,
                         item_chunks.c.cuisines,
                     )
-                    .where(sa.and_(item_chunks.c.model_version == self._model_version, where))
+                    .where(where)
                     .order_by(item_chunks.c.item_id)
                     .limit(limit * self.BRANCH_FAN_OUT)
                 )

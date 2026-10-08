@@ -15,8 +15,6 @@ from ai_assistant.adapters.retriever import LEG_OVERFETCH, PostgresRetriever
 from ai_assistant.domain.retrieval import Candidate, Filters
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-ACTIVE = "fake:512"
-
 
 class StubEmbeddings:
     model = "stub"
@@ -65,7 +63,6 @@ def _retriever(session: StubSession, embeddings, **kwargs) -> PostgresRetriever:
     stub stands in as both — exactly how catalog's search adapter is tested.
     The cast says what the stub is: the slice of AsyncSession this code
     touches, not the whole class."""
-    kwargs.setdefault("model_version", ACTIVE)
     return PostgresRetriever(
         cast(async_sessionmaker[AsyncSession], lambda: session), embeddings, **kwargs
     )
@@ -204,12 +201,12 @@ async def test_the_bulk_read_deduplicates_and_skips_an_empty_set():
 
     empty = StubSession()
     store = PostgresVectorStore(cast(AsyncSession, empty))
-    assert await store.texts_for(chunk_ids=[], model_version="m:512") == {}
+    assert await store.texts_for(chunk_ids=[]) == {}
     assert empty.statements == []
 
     session = StubSession(rows=[_text_row("r1:i1", "i1", "Mutton Karahi")])
     found = await PostgresVectorStore(cast(AsyncSession, session)).texts_for(
-        chunk_ids=["r1:i1", "r1:i1"], model_version="m:512"
+        chunk_ids=["r1:i1", "r1:i1"]
     )
     assert found == {"r1:i1": ("i1", "Mutton Karahi")}
     assert len(session.statements) == 1

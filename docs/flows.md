@@ -778,9 +778,9 @@ sequenceDiagram
 
     DR->>DR: chunk(restaurant_id, payload) → 1 restaurant chunk + N item chunks
     Note over DR: restaurant_id comes from the ENVELOPE (aggregate_id = topic key),<br/>not the payload. Price and availability are NOT embedded — they<br/>become filter COLUMNS. content holds durable facts only (FR-60)
-    DR->>VS: hashes_for(restaurant, model_version) — what is already embedded
-    DR->>DR: _stale() = chunks whose content_hash differs
-    Note over DR: de-duplicated WITHIN the restaurant too: the same drink listed<br/>under two categories is two chunks and ONE vector
+    DR->>VS: contents_for(restaurant) — the text already embedded, per chunk
+    DR->>DR: _stale() = chunks whose text differs from what is stored
+    Note over DR: de-duplicated WITHIN the restaurant too: the same drink listed<br/>under two categories is two chunks and ONE vector. Keyed on a<br/>digest of the text, derived in chunk() and never stored
     DR->>EMB: embed([every stale text, in ONE batched request])
     Note over DR,EMB: cross-restaurant vector reuse was removed deliberately — the<br/>three-dict hot path it needed cost more in readability than it<br/>saved, and it was the only thing forcing this loop to stay<br/>sequential
     Note over DR,EMB: OUTSIDE any transaction — this is seconds of network
@@ -791,7 +791,7 @@ sequenceDiagram
         DR->>PQ: DELETE WHERE restaurant_id=:id AND payload_hash=:hash
         Note over PQ: GUARDED on the fingerprint. The drain spent seconds embedding<br/>with no transaction open, an unguarded delete would silently<br/>discard an edit that landed in that gap, and the index would<br/>stay wrong until the restaurant happened to change again.<br/>rowcount 0 → the row stays and the next tick picks it up
         DR->>DR: bump the answer-cache epoch for every city it WAS in and IS in
-        Note over DR: only when something retrieval can SEE changed — an 86'd dish<br/>leaves every content_hash identical while changing results.<br/>A pass that re-confirms an unchanged menu must not cold-start<br/>the whole city's cache on a catalog heartbeat
+        Note over DR: only when something retrieval can SEE changed — an 86'd dish<br/>leaves every chunk's TEXT identical while changing results.<br/>A pass that re-confirms an unchanged menu must not cold-start<br/>the whole city's cache on a catalog heartbeat
     end
     Note over DR: KNOWLEDGE_BACKLOG_SECONDS gauge is set BEFORE this pass runs,<br/>so a pass that fails on every row still reports the backlog<br/>it could not clear (NFR-28's alarm)
 ```
@@ -804,7 +804,7 @@ Three reasons, in order of how much they cost to get wrong:
    base-menu edit stages a full-state event *per branch*; an owner fixing six
    dishes across twelve branches produces seventy-two events in twenty
    seconds, all converging on the same final state. The debounce and the
-   `content_hash` comparison are what collapse that to one pass and one
+   text comparison are what collapse that to one pass and one
    embedding per changed text.
 2. **Back-pressure.** A consumer that blocks on a provider call holds its
    partition. The queue lets the consumer commit offsets immediately and the

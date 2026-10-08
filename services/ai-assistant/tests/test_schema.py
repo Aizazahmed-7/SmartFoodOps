@@ -66,7 +66,6 @@ async def test_item_chunk_round_trips_through_both_variants(engine):
         await conn.execute(
             item_chunks.insert().values(
                 id="r1:i1",
-                model_version="m:512",
                 restaurant_id="r1",
                 item_id="i1",
                 name="i1",
@@ -79,7 +78,6 @@ async def test_item_chunk_round_trips_through_both_variants(engine):
                 available=True,
                 status="open",
                 content="Chicken Biryani",
-                content_hash="deadbeef",
                 embedding=vector,
                 updated_at=sa.func.now(),
             )
@@ -97,14 +95,12 @@ async def test_restaurant_chunk_round_trips(engine):
         await conn.execute(
             restaurant_chunks.insert().values(
                 id="r1:_self",
-                model_version="m:512",
                 restaurant_id="r1",
                 city="springfield",
                 brand_id="b1",
                 cuisines=["thai"],
                 status="paused",
                 content="Biryani House",
-                content_hash="cafe",
                 embedding=[0.1] * EMBEDDING_DIMENSIONS,
                 updated_at=sa.func.now(),
             )
@@ -147,11 +143,15 @@ def test_hnsw_indexes_are_postgres_only():
     assert RESTAURANT_HNSW_INDEX not in declared
 
 
-def test_chunk_identity_is_composite():
-    """(id, model_version): a rolling reindex writes the new model's rows
-    beside the old ones, so the same chunk legitimately exists twice."""
+def test_chunk_identity_is_the_chunk_id_alone():
+    """One vector space, so one row per chunk. The key was `(id,
+    model_version)` while a rolling reindex could hold two generations at
+    once; with the model fixed by configuration there is no second
+    generation for the key to separate."""
     for table in (item_chunks, restaurant_chunks):
-        assert [c.name for c in table.primary_key.columns] == ["id", "model_version"]
+        assert [c.name for c in table.primary_key.columns] == ["id"]
+        assert "model_version" not in table.c
+        assert "content_hash" not in table.c
 
 
 def test_only_brand_id_is_nullable():

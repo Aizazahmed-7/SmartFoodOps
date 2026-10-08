@@ -100,13 +100,10 @@ def _slugs() -> sa.types.TypeEngine[Sequence[str]]:
 item_chunks = sa.Table(
     "item_chunks",
     metadata,
-    # (id, model_version) is the natural key AND the reason the PK is
-    # composite: a rolling reindex (FR-61) writes the new model's rows
-    # BESIDE the old ones and flips the active version afterwards, so the
-    # same chunk legitimately exists twice at once. Keyed on id alone, the
-    # reindex would have to be stop-the-world.
+    # `rst_9:itm_4` — one row per chunk, one generation. The embedding
+    # model and its dimensions are fixed by Settings, so there is no second
+    # vector space for this key to disambiguate against.
     sa.Column("id", sa.Text, primary_key=True),
-    sa.Column("model_version", sa.Text, primary_key=True),
     sa.Column("restaurant_id", sa.Text, nullable=False),
     sa.Column("item_id", sa.Text, nullable=False),
     # The dish's name as a COLUMN, not only as the first line of `content`.
@@ -147,7 +144,6 @@ item_chunks = sa.Table(
     # availability (FR-60). Kept because the reindex re-embeds from HERE (no
     # catalog call, no Kafka replay) and because B2's lexical leg reads it.
     sa.Column("content", sa.Text, nullable=False),
-    sa.Column("content_hash", sa.Text, nullable=False),
     sa.Column("embedding", _vector(), nullable=False),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
 )
@@ -156,41 +152,28 @@ restaurant_chunks = sa.Table(
     "restaurant_chunks",
     metadata,
     sa.Column("id", sa.Text, primary_key=True),
-    sa.Column("model_version", sa.Text, primary_key=True),
     sa.Column("restaurant_id", sa.Text, nullable=False),
     sa.Column("city", sa.Text, nullable=False),
     sa.Column("brand_id", sa.Text, nullable=True),
     sa.Column("cuisines", _slugs(), nullable=False),
     sa.Column("status", sa.Text, nullable=False),
     sa.Column("content", sa.Text, nullable=False),
-    sa.Column("content_hash", sa.Text, nullable=False),
     sa.Column("embedding", _vector(), nullable=False),
     sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
 )
 
-# Retrieval's hard-predicate prefix: every query filters model_version (so
-# two embedding generations never mix in one result set) then city.
-sa.Index("ix_item_chunks_scope", item_chunks.c.model_version, item_chunks.c.city)
-sa.Index(
-    "ix_restaurant_chunks_scope",
-    restaurant_chunks.c.model_version,
-    restaurant_chunks.c.city,
-)
+# Retrieval's hard-predicate prefix. `city` leads because every query is
+# geo-scoped (FR-63); there is no generation column in front of it any more,
+# which only ever held one value and so contributed no selectivity.
+sa.Index("ix_item_chunks_scope", item_chunks.c.city)
+sa.Index("ix_restaurant_chunks_scope", restaurant_chunks.c.city)
 # The ingestion path's own access pattern: hashes_for() and the reconcile
 # delete both address one restaurant at one version. BOTH tables need it —
 # hashes_for reads them together, and without the second index every drain
 # pass sequentially scans restaurant_chunks (one row per branch, so a full
 # scan per restaurant indexed).
-sa.Index(
-    "ix_item_chunks_restaurant",
-    item_chunks.c.restaurant_id,
-    item_chunks.c.model_version,
-)
-sa.Index(
-    "ix_restaurant_chunks_restaurant",
-    restaurant_chunks.c.restaurant_id,
-    restaurant_chunks.c.model_version,
-)
+sa.Index("ix_item_chunks_restaurant", item_chunks.c.restaurant_id)
+sa.Index("ix_restaurant_chunks_restaurant", restaurant_chunks.c.restaurant_id)
 
 
 # ── B1: the debounce queue (FR-57) ──────────────────────────────────
@@ -325,10 +308,9 @@ answer_cache = sa.Table(
     # The normalized question's hash. A PK rather than a surrogate: writing
     # the same question twice must collide, not accumulate.
     sa.Column("id", sa.Text, primary_key=True),
-    # The fence, all three parts of it. `model_version` because a vector
-    # written under one embedder is meaningless to another (FR-61); `city`
-    # and `epoch` because FR-74 requires menu-version and geo fencing.
-    sa.Column("model_version", sa.Text, primary_key=True),
+    # The fence, now two parts. `model_version` left with the second vector
+    # space it existed to separate: the model is fixed by Settings, and a
+    # model change means a rebuild, which bumps every city's epoch anyway.
     # In the KEY, not just a filter. With the key as (question, model) alone,
     # two cities asking the same question overwrote each other's row and
     # both then missed on the city predicate — the more popular a question
@@ -346,9 +328,7 @@ answer_cache = sa.Table(
     sa.Column("restaurant_ids", _slugs(), nullable=False),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
 )
-sa.Index(
-    "ix_answer_cache_fence", answer_cache.c.model_version, answer_cache.c.city, answer_cache.c.epoch
-)
+sa.Index("ix_answer_cache_fence", answer_cache.c.city, answer_cache.c.epoch)
 
 ANSWER_HNSW_INDEX = "ix_answer_cache_embedding_hnsw"
 """One index over every cached question, not one per fence.

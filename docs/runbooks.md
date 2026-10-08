@@ -322,8 +322,9 @@ slow day, and it will drag **AssistantAnswerLatencyBreach** with it.
 **Check**: both tiers on the panel — `exact` collapsing alone suggests
 question text changed shape (a new entry point, a client appending something
 per-request); `semantic` collapsing too suggests the embedding path or the
-index behind it; a recent deploy that changed the cache key or a reindex that
-changed `model_version`.
+index behind it; a recent deploy that changed the cache key, or a model
+change followed by a rebuild — the epoch and `model_version` in the fence
+both move, so every prior entry stops matching by design.
 **Fix**: if a key change caused it the cache is cold and will refill — confirm
 the rate is climbing rather than flat. A genuinely broken tier is a code fix;
 until then watch quota. Verify: hit rate climbing back over 20%.

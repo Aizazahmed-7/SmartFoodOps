@@ -789,7 +789,7 @@ VALUES (...) ON CONFLICT (message_id) DO UPDATE SET ...</code></pre>
 <li><strong>A park that can itself fail.</strong> The catch-all opens a fresh database connection to park a failed job, so the database blip its own comment names as the motivating case would also break the park.</li>
 </ul>
 
-<p>Also carried: retrieval latency has a stated SLO with no instrument behind it; conversion rates are right-censored (the denominator counts turns whose attribution window has not elapsed, so a 1-day view reads lower than a 30-day one for the same traffic); embeddings and the rolling reindex are outside the kill switch and need a recorded decision; and the LLM price table ships with clearly-marked <strong>placeholder</strong> numbers that must be set from the vendor's published list before anyone makes a decision from a cost panel.</p>
+<p>Also carried: retrieval latency has a stated SLO with no instrument behind it; conversion rates are right-censored (the denominator counts turns whose attribution window has not elapsed, so a 1-day view reads lower than a 30-day one for the same traffic); the knowledge drain's embedding calls sit outside the kill switch and need a recorded decision; and the LLM price table ships with clearly-marked <strong>placeholder</strong> numbers that must be set from the vendor's published list before anyone makes a decision from a cost panel.</p>
 
 <hr>
 

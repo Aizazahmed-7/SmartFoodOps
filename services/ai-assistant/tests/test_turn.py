@@ -241,7 +241,7 @@ def _cached_turn(*, exact=None, semantic=None, remember=None, candidates=None):
     return graph, model, asked, sink
 
 
-READ_FENCE = Fence("m:512", "springfield", 3)
+READ_FENCE = Fence("springfield", 3)
 
 
 async def _hit(*_args):

@@ -566,7 +566,6 @@ erDiagram
     }
     item_chunks {
         text id PK "rst_9:itm_4"
-        text model_version PK "gemini-embedding-001:512"
         text restaurant_id "the BRANCH"
         text item_id
         text name "a column, not just line 1 of content"
@@ -578,21 +577,18 @@ erDiagram
         int price_cents "VOLATILE pre-filter — narrows here, truth in catalog"
         bool available "VOLATILE pre-filter"
         text status "open|paused — denormalised so the item leg needs no join"
-        text content "the exact text embedded — durable facts only"
-        text content_hash "lets the drain skip unchanged chunks"
+        text content "the exact text embedded — durable facts only;<br>the drain compares THIS to decide what to re-embed"
         vector embedding
         timestamptz updated_at
     }
     restaurant_chunks {
         text id PK "rst_9:_self"
-        text model_version PK
         text restaurant_id
         text city
         text brand_id
         slugs cuisines
         text status
         text content
-        text content_hash
         vector embedding
         timestamptz updated_at
     }
@@ -600,20 +596,22 @@ erDiagram
     knowledge_pending ||--o| restaurant_chunks : "drained into (logical, no FK)"
 ```
 
-Indexes: `ix_item_chunks_scope (model_version, city)` and the same on
-restaurant chunks — retrieval's hard-predicate prefix, so two embedding
-generations can never mix in one result set. `ix_*_restaurant (restaurant_id,
-model_version)` serves the ingestion path, and **both** tables need it:
-without the second, every drain pass sequentially scans `restaurant_chunks`.
-`ix_knowledge_pending_due (due_at)` is what `due()` reads.
+Indexes: `ix_*_scope (city)` — retrieval's hard predicate, since every query
+is geo-scoped (FR-63). `ix_*_restaurant (restaurant_id)` serves the ingestion
+path, and **both** tables need it: without the second, every drain pass
+sequentially scans `restaurant_chunks`. `ix_knowledge_pending_due (due_at)`
+is what `due()` reads.
 
-**`model_version` is configuration, not state.** The embedding model and
-dimensions are fixed by `Settings`, and every reader derives the version from
-the same place the drain writes it — so there is no second source of truth to
-disagree. It stays in the primary key and as the leading column of both
-retrieval indexes because it costs nothing there and it is what stops two
-vector spaces mixing in one result set if the model is ever changed without
-rebuilding.
+**No `model_version`, and no `content_hash`.** `model_version` existed so
+two embedding generations could coexist during a rolling reindex; with the
+model fixed by `Settings` every row carried the same value, which made it a
+constant in both primary keys and the leading column of all four indexes
+where it contributed no selectivity, plus a predicate on every query that was
+always true. `content_hash` was `sha256(content)`, used to decide what still
+needed embedding — the comparison stays and is load-bearing, but the drain
+now compares `content` itself, which is already on the row for B2's lexical
+leg. The digest is still computed during chunking and used in memory to
+collapse chunks that share text within one pass; it is simply not stored.
 
 **Changing the model is a rebuild, not a migration.** Truncate the chunk
 tables and reset the `assistant.knowledge.v1` consumer group; `catalog.changes`
@@ -636,9 +634,11 @@ consumer-protection problem. Keeping price out of `content` makes it
 structurally impossible for the indexed copy to be quoted — not a rule
 someone has to remember, but an absence.
 
-`content` is kept rather than discarded after embedding for two reasons: the
-rolling reindex re-embeds **from here** (no catalog call, no Kafka replay),
-and B2's lexical search leg reads it directly.
+`content` is kept rather than discarded after embedding because B2's lexical
+search leg reads it directly — the fused retrieval runs a keyword query over
+this column alongside the vector query. (It used to serve a second purpose,
+re-embedding during a rolling reindex; with that removed, a model change
+replays the compacted topic instead.)
 
 **Brand rows are never chunked at all.** A brand is a menu *template*, not a
 place (ADR-0028) — catalog leaves `city` and `status` null on them. Every

@@ -36,10 +36,8 @@ class AnswerCache:
         *,
         exact_tier: Any,
         semantic_tier: Any,
-        model_version: str,
     ) -> None:
         self._sessions = sessions
-        self._model_version = model_version
         self._exact = exact_tier
         self._semantic = semantic_tier
 
@@ -49,7 +47,7 @@ class AnswerCache:
         a city with no bumps yet is epoch 0, not an absence."""
         async with self._sessions() as session:
             epoch = await EpochRepo(session).current(city)
-        return Fence(model_version=self._model_version, city=city, epoch=epoch)
+        return Fence(city=city, epoch=epoch)
 
     async def exact(self, question: str, city: str) -> tuple[Cached | None, Fence]:
         """The hit, AND the fence it was looked up under.

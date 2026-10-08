@@ -46,12 +46,9 @@ class CardService:
         self,
         sessions: async_sessionmaker[AsyncSession],
         catalog: Any,
-        *,
-        model_version: str,
     ) -> None:
         self._sessions = sessions
         self._catalog = catalog
-        self._model_version = model_version
 
     async def for_message(self, *, message_id: str, user_id: str) -> list[dict[str, Any]] | None:
         """None when the message is not this customer's, or does not exist —
@@ -64,7 +61,7 @@ class CardService:
             if message is None or not message.item_ids:  # pragma: no cover — owner implies a row
                 return []
             by_restaurant = await PostgresVectorStore(session).restaurants_for(
-                item_ids=message.item_ids, model_version=self._model_version
+                item_ids=message.item_ids
             )
 
         return await self._price(message.item_ids, by_restaurant)

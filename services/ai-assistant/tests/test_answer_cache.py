@@ -53,12 +53,11 @@ def test_negation_is_not_normalized_away():
 def test_the_fence_is_in_the_key_not_checked_after_the_read():
     """A key that can be read and then rejected is a key that will one day
     be read and NOT rejected. This way a stale entry is unreachable."""
-    base = Fence("m:512", "springfield", 3)
+    base = Fence("springfield", 3)
     same = base.key("Something light?")
-    assert same == Fence("m:512", "springfield", 3).key("something light")
-    assert same != Fence("m:512", "springfield", 4).key("something light")  # menu moved
-    assert same != Fence("m:512", "karachi", 3).key("something light")  # another city
-    assert same != Fence("m:1536", "springfield", 3).key("something light")  # another embedder
+    assert same == Fence("springfield", 3).key("something light")
+    assert same != Fence("springfield", 4).key("something light")  # menu moved
+    assert same != Fence("karachi", 3).key("something light")  # another city
 
 
 # ── what may be cached ──────────────────────────────────────────────
@@ -126,7 +125,7 @@ class FakeRedis:
 async def test_the_same_question_comes_back_without_a_query():
     redis = FakeRedis()
     tier = RedisExactCache(redis, ttl_s=3600)
-    fence = Fence("m:512", "springfield", 1)
+    fence = Fence("springfield", 1)
     assert await tier.get(fence=fence, question="Something light?") is None
     await tier.put(fence=fence, question="Something light?", cached=ANSWER)
     hit = await tier.get(fence=fence, question="  something   LIGHT  ")
@@ -140,7 +139,7 @@ async def test_every_entry_gets_a_ttl():
     the fence does NOT catch survives — a prompt edit, a model swap."""
     redis = FakeRedis()
     await RedisExactCache(redis, ttl_s=900).put(
-        fence=Fence("m:512", "springfield", 1), question="q", cached=ANSWER
+        fence=Fence("springfield", 1), question="q", cached=ANSWER
     )
     assert set(redis.ttls.values()) == {900}
 
@@ -148,8 +147,8 @@ async def test_every_entry_gets_a_ttl():
 async def test_a_menu_change_makes_the_entry_unreachable():
     redis = FakeRedis()
     tier = RedisExactCache(redis, ttl_s=3600)
-    await tier.put(fence=Fence("m:512", "springfield", 1), question="q", cached=ANSWER)
-    assert await tier.get(fence=Fence("m:512", "springfield", 2), question="q") is None
+    await tier.put(fence=Fence("springfield", 1), question="q", cached=ANSWER)
+    assert await tier.get(fence=Fence("springfield", 2), question="q") is None
 
 
 async def test_a_cached_answer_carries_ids_and_never_a_price():
@@ -158,7 +157,7 @@ async def test_a_cached_answer_carries_ids_and_never_a_price():
     prose about a dish that still exists."""
     redis = FakeRedis()
     await RedisExactCache(redis, ttl_s=60).put(
-        fence=Fence("m:512", "springfield", 1), question="q", cached=ANSWER
+        fence=Fence("springfield", 1), question="q", cached=ANSWER
     )
     body = json.loads(next(iter(redis.store.values())))
     assert set(body) == {"answer", "item_ids", "restaurant_ids"}
@@ -208,10 +207,8 @@ async def test_a_write_that_fails_does_not_fail_the_turn(sessions):
 
     async with sessions() as session:
         await session.commit()
-    cache = AnswerCache(
-        sessions, exact_tier=Broken(), semantic_tier=Broken(), model_version="m:512"
-    )
-    await cache.remember(Fence("m:512", "springfield", 1), "q", [0.1], ANSWER)  # no raise
+    cache = AnswerCache(sessions, exact_tier=Broken(), semantic_tier=Broken())
+    await cache.remember(Fence("springfield", 1), "q", [0.1], ANSWER)  # no raise
 
 
 async def test_the_fence_is_resolved_per_lookup_not_captured(sessions):
@@ -227,7 +224,7 @@ async def test_the_fence_is_resolved_per_lookup_not_captured(sessions):
 
     async with sessions() as session:
         await session.commit()
-    cache = AnswerCache(sessions, exact_tier=Spy(), semantic_tier=Spy(), model_version="m:512")
+    cache = AnswerCache(sessions, exact_tier=Spy(), semantic_tier=Spy())
     await cache.exact("q", "springfield")
     async with sessions() as session:
         await EpochRepo(session).bump(city="springfield", now=T0)
@@ -266,9 +263,10 @@ async def test_the_semantic_tier_is_scoped_to_its_fence(sessions):
     tier = PostgresSemanticCache(
         cast(async_sessionmaker[AsyncSession], lambda: Recorder()), threshold=0.12
     )
-    assert await tier.get(fence=Fence("m:512", "springfield", 7), query_vector=[0.1]) is None
+    assert await tier.get(fence=Fence("springfield", 7), query_vector=[0.1]) is None
     (sql,) = statements
-    assert "model_version" in sql and "city" in sql and "epoch" in sql
+    assert "city" in sql and "epoch" in sql
+    assert "model_version" not in sql
 
 
 class Row:
@@ -310,7 +308,7 @@ def _stub_sessions(row):
 
 async def test_a_near_enough_question_is_served(sessions):
     tier = _tier(Row(0.05))
-    hit = await tier.get(fence=Fence("m:512", "springfield", 1), query_vector=[0.1])
+    hit = await tier.get(fence=Fence("springfield", 1), query_vector=[0.1])
     assert hit is not None
     assert hit.answer == "Raita, from earlier." and hit.item_ids == ["itm_raita"]
 
@@ -321,7 +319,7 @@ async def test_the_nearest_question_can_still_be_too_far(sessions):
     predicate would be applied after the scan anyway — and reading the
     actual distance is what makes the cut tunable against real data."""
     tier = _tier(Row(0.4))
-    assert await tier.get(fence=Fence("m:512", "springfield", 1), query_vector=[0.1]) is None
+    assert await tier.get(fence=Fence("springfield", 1), query_vector=[0.1]) is None
 
 
 async def test_asking_the_same_thing_twice_overwrites_rather_than_accumulates(sessions):
@@ -332,7 +330,7 @@ async def test_asking_the_same_thing_twice_overwrites_rather_than_accumulates(se
     from ai_assistant.db import answer_cache as table
 
     tier = PostgresSemanticCache(sessions, threshold=0.12)
-    fence = Fence("m:512", "springfield", 1)
+    fence = Fence("springfield", 1)
     for answer in ("first", "second"):
         await tier.put(
             fence=fence,
@@ -356,7 +354,7 @@ async def test_a_menu_change_writes_a_new_row_under_the_new_fence(sessions):
     tier = PostgresSemanticCache(sessions, threshold=0.12)
     for epoch in (1, 2):
         await tier.put(
-            fence=Fence("m:512", "springfield", epoch),
+            fence=Fence("springfield", epoch),
             question="Something light?",
             query_vector=[0.1],
             cached=ANSWER,
@@ -369,9 +367,7 @@ async def test_a_menu_change_writes_a_new_row_under_the_new_fence(sessions):
 
 async def test_the_row_id_is_the_question_not_a_surrogate():
     """Writing the same question twice must COLLIDE, not accumulate."""
-    assert Fence("m", "c", 1).row_id("Something light?") == Fence("m", "c", 9).row_id(
-        "  something  LIGHT "
-    )
+    assert Fence("c", 1).row_id("Something light?") == Fence("c", 9).row_id("  something  LIGHT ")
 
 
 async def test_the_service_writes_both_tiers_and_reads_the_semantic_one(sessions):
@@ -396,11 +392,9 @@ async def test_the_service_writes_both_tiers_and_reads_the_semantic_one(sessions
         await session.commit()
 
     exact_tier, semantic_tier = Tier("exact"), Tier("semantic")
-    cache = AnswerCache(
-        sessions, exact_tier=exact_tier, semantic_tier=semantic_tier, model_version="m:512"
-    )
+    cache = AnswerCache(sessions, exact_tier=exact_tier, semantic_tier=semantic_tier)
 
-    fence = Fence("m:512", "springfield", 2)
+    fence = Fence("springfield", 2)
     assert (await cache.semantic([0.1, 0.2], fence)) == ANSWER
     assert seen["semantic"] == fence
 
@@ -428,9 +422,8 @@ async def test_an_answer_with_no_vector_is_written_to_the_exact_tier_only(sessio
         sessions,
         exact_tier=Tier("exact"),
         semantic_tier=Tier("semantic"),
-        model_version="m:512",
     )
-    await cache.remember(Fence("m:512", "springfield", 1), "q", [], ANSWER)
+    await cache.remember(Fence("springfield", 1), "q", [], ANSWER)
     assert written == ["exact"]
 
 
@@ -459,7 +452,7 @@ async def test_a_corrupt_entry_is_a_miss_not_a_crash():
             return '{"not_an_answer": 1}'
 
     tier = RedisExactCache(Corrupt(), ttl_s=60)
-    assert await tier.get(fence=Fence("m:512", "springfield", 1), question="q") is None
+    assert await tier.get(fence=Fence("springfield", 1), question="q") is None
 
 
 async def test_a_dead_redis_is_a_miss_not_a_crash():
@@ -471,7 +464,7 @@ async def test_a_dead_redis_is_a_miss_not_a_crash():
             raise RuntimeError("connection reset")
 
     tier = RedisExactCache(Dead(), ttl_s=60)
-    fence = Fence("m:512", "springfield", 1)
+    fence = Fence("springfield", 1)
     assert await tier.get(fence=fence, question="q") is None
     await tier.put(fence=fence, question="q", cached=ANSWER)  # no raise
 
@@ -496,7 +489,7 @@ async def test_a_failing_semantic_read_is_a_miss_not_a_failed_turn(sessions):
     tier = PostgresSemanticCache(
         cast(async_sessionmaker[AsyncSession], lambda: Broken()), threshold=0.12
     )
-    assert await tier.get(fence=Fence("m:512", "springfield", 1), query_vector=[0.1]) is None
+    assert await tier.get(fence=Fence("springfield", 1), query_vector=[0.1]) is None
 
 
 async def test_the_read_is_bounded_by_age_as_well_as_the_fence(sessions):
@@ -527,5 +520,5 @@ async def test_the_read_is_bounded_by_age_as_well_as_the_fence(sessions):
     tier = PostgresSemanticCache(
         cast(async_sessionmaker[AsyncSession], lambda: Recorder()), threshold=0.12
     )
-    await tier.get(fence=Fence("m:512", "springfield", 1), query_vector=[0.1])
+    await tier.get(fence=Fence("springfield", 1), query_vector=[0.1])
     assert "created_at" in statements[0]

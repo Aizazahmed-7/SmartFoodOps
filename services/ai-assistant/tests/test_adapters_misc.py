@@ -24,7 +24,7 @@ def embedder(handler: Any, **kwargs: Any) -> OpenAiEmbeddings:
     )
 
 
-async def test_embed_sends_the_dimensions_and_exposes_the_model_version():
+async def test_embed_sends_the_configured_model_and_dimensions():
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -34,8 +34,10 @@ async def test_embed_sends_the_dimensions_and_exposes_the_model_version():
         return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1, 0.2]}]})
 
     adapter = embedder(handler)
-    assert (adapter.model, adapter.dimensions) == ("text-embedding-3-small", 512)
     vectors = await adapter.embed(["a light soup"])
+    # Both are sent on the wire rather than exposed as properties: nothing
+    # downstream asks which space a vector is in now that there is one.
+    assert seen["model"] == "text-embedding-3-small"
     assert seen["dimensions"] == 512
     assert vectors == [[0.1, 0.2]]
 

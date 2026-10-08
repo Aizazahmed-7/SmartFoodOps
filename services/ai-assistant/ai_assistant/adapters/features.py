@@ -68,7 +68,7 @@ class FeatureRepo:
         return [row[0] for row in rows]
 
     async def taste_rows(
-        self, *, user_id: str, since: datetime, model_version: str
+        self, *, user_id: str, since: datetime
     ) -> list[tuple[str, str, str, Sequence[str], Sequence[str], int]]:
         """One customer's ordered dishes, joined to the attributes a profile
         is made of.
@@ -92,8 +92,7 @@ class FeatureRepo:
                 order_items.join(
                     item_chunks,
                     (item_chunks.c.item_id == order_items.c.item_id)
-                    & (item_chunks.c.restaurant_id == order_items.c.restaurant_id)
-                    & (item_chunks.c.model_version == model_version),
+                    & (item_chunks.c.restaurant_id == order_items.c.restaurant_id),
                 )
             )
             .where(order_items.c.user_id == user_id, order_items.c.placed_at >= since)
@@ -159,7 +158,7 @@ class FeatureRepo:
             orders=int(row.orders),
         )
 
-    async def menu_attributes(self, *, city: str, model_version: str) -> list[Attributes]:
+    async def menu_attributes(self, *, city: str) -> list[Attributes]:
         """Every dish a city can offer, as scorable attributes.
 
         The whole city, because a recommendation is a ranking over what is
@@ -175,7 +174,6 @@ class FeatureRepo:
                 item_chunks.c.tags,
             ).where(
                 item_chunks.c.city == city,
-                item_chunks.c.model_version == model_version,
                 item_chunks.c.available.is_(True),
                 item_chunks.c.status == "open",
             )
@@ -191,7 +189,7 @@ class FeatureRepo:
         ]
 
     async def co_ordered(
-        self, *, city: str, since: datetime, model_version: str, limit: int = 50
+        self, *, city: str, since: datetime, limit: int = 50
     ) -> list[tuple[str, str, str, int]]:
         """`(restaurant_id, item_a, item_b, orders together)` — dishes people
         buy in one go, and where.
@@ -216,7 +214,6 @@ class FeatureRepo:
             sa.select(restaurant_chunks.c.restaurant_id)
             .where(
                 restaurant_chunks.c.city == city,
-                restaurant_chunks.c.model_version == model_version,
             )
             .scalar_subquery()
         )
@@ -246,7 +243,7 @@ class FeatureRepo:
         )
         return [(row.rst, row.a, row.b, int(row.orders)) for row in rows]
 
-    async def any_in(self, *, city: str, model_version: str, limit: int) -> list[str]:
+    async def any_in(self, *, city: str, limit: int) -> list[str]:
         """Any orderable dish in the city, cheapest first.
 
         FR-80's floor beneath popularity. A brand-new city has no order
@@ -263,7 +260,6 @@ class FeatureRepo:
             sa.select(item_chunks.c.item_id)
             .where(
                 item_chunks.c.city == city,
-                item_chunks.c.model_version == model_version,
                 item_chunks.c.available.is_(True),
                 item_chunks.c.status == "open",
             )
@@ -272,7 +268,7 @@ class FeatureRepo:
         )
         return list(dict.fromkeys(row.item_id for row in rows))
 
-    async def popular_in(self, *, city: str, at: datetime, model_version: str) -> list[Popular]:
+    async def popular_in(self, *, city: str, at: datetime) -> list[Popular]:
         """What this city orders around this hour.
 
         Scoped by RESTAURANT, not by item: the index carries one chunk per
@@ -291,7 +287,6 @@ class FeatureRepo:
             sa.select(restaurant_chunks.c.restaurant_id)
             .where(
                 restaurant_chunks.c.city == city,
-                restaurant_chunks.c.model_version == model_version,
             )
             .scalar_subquery()
         )

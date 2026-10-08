@@ -136,7 +136,6 @@ class PostgresSemanticCache:
                         answer_cache.c.embedding.cosine_distance(list(query_vector)).label("d"),
                     )
                     .where(
-                        answer_cache.c.model_version == fence.model_version,
                         answer_cache.c.city == fence.city,
                         answer_cache.c.epoch == fence.epoch,
                         # The same age bound the exact tier gets from its
@@ -191,7 +190,6 @@ class PostgresSemanticCache:
             insert = pg_insert if dialect == "postgresql" else sqlite_insert
             values = {
                 "id": fence.row_id(question),
-                "model_version": fence.model_version,
                 "city": fence.city,
                 "epoch": fence.epoch,
                 "question": question,
@@ -206,12 +204,9 @@ class PostgresSemanticCache:
                 stmt.on_conflict_do_update(
                     index_elements=[
                         answer_cache.c.id,
-                        answer_cache.c.model_version,
                         answer_cache.c.city,
                     ],
-                    set_={
-                        k: v for k, v in values.items() if k not in ("id", "model_version", "city")
-                    },
+                    set_={k: v for k, v in values.items() if k not in ("id", "city")},
                 )
             )
             await session.commit()
