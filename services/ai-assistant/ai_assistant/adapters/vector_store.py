@@ -1,13 +1,11 @@
 """`VectorStore` over assistant_db (ADR-0032).
 
-Three reads and two writes, and the interesting part is which of them is
-allowed to cost money. `hashes_for` and `vectors_by_hash` exist solely so
-that `embed()` is called as rarely as the data allows: the first says "this
-restaurant already has that text", the second says "somebody else in the
-index already has that text". Everything after them is Postgres.
+`hashes_for` is the one read that exists to save money: it says "this
+restaurant already has that text", so `embed()` is skipped for every chunk
+whose content did not change. Everything else here is Postgres.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, cast
 
@@ -96,38 +94,6 @@ class PostgresVectorStore:
                 )
             )
             found.update(row.city for row in rows)
-        return found
-
-    async def vectors_by_hash(
-        self, *, content_hashes: Iterable[str], model_version: str
-    ) -> dict[str, list[float]]:
-        """Vectors already computed for these exact texts, anywhere in the
-        index.
-
-        This is what makes the ADR-0028 fan-out cheap. A base dish inherited
-        by twelve branches produces twelve chunk rows with byte-identical
-        text (item chunks deliberately omit the restaurant name — ADR-0033
-        §4), so eleven of them can be served from the first one's vector. An
-        embedding is a pure function of (text, model), so reusing it is not
-        an approximation; it is the same answer without the round trip.
-
-        Item chunks only: a restaurant chunk carries its branch label, so no
-        two of them share text and the lookup would never hit.
-        """
-        wanted = list(dict.fromkeys(content_hashes))
-        if not wanted:
-            return {}
-        rows = await self._s.execute(
-            sa.select(item_chunks.c.content_hash, item_chunks.c.embedding).where(
-                item_chunks.c.model_version == model_version,
-                item_chunks.c.content_hash.in_(wanted),
-            )
-        )
-        # First one wins: every row for a hash holds the same vector, so the
-        # duplicates a fan-out leaves behind are all equally correct.
-        found: dict[str, list[float]] = {}
-        for row in rows:
-            found.setdefault(row.content_hash, list(row.embedding))
         return found
 
     async def texts_for(
@@ -328,78 +294,3 @@ class PostgresVectorStore:
             condition = sa.and_(condition, item_chunks.c.id.notin_(keep))
         result = await self._s.execute(sa.delete(item_chunks).where(condition))
         return cast("CursorResult[Any]", result).rowcount or 0
-
-    # ── reindex (FR-61) ─────────────────────────────────────────────
-
-    async def awaiting_migration(
-        self, *, active_version: str, target_version: str, limit: int
-    ) -> list[tuple[sa.Table, dict[str, Any]]]:
-        """Rows that exist under the active version and not yet under the
-        target one, as `(table, row)` pairs.
-
-        The anti-join IS the resume: a reindex killed halfway through simply
-        finds fewer rows next time, so the task needs no cursor, no progress
-        table and no cleanup after a crash. It is also why the task can be
-        safely re-run by a worker that lost its ack.
-
-        The text comes from `content` — the row already holds exactly what
-        was embedded — so a reindex touches neither catalog nor Kafka.
-        """
-        pending: list[tuple[sa.Table, dict[str, Any]]] = []
-        for table in (restaurant_chunks, item_chunks):
-            migrated = sa.select(table.c.id).where(table.c.model_version == target_version)
-            rows = await self._s.execute(
-                sa.select(table)
-                .where(table.c.model_version == active_version, table.c.id.notin_(migrated))
-                .limit(limit - len(pending))
-            )
-            pending.extend((table, dict(row)) for row in rows.mappings())
-            if len(pending) >= limit:
-                break
-        return pending
-
-    async def copy_forward(
-        self,
-        *,
-        table: sa.Table,
-        row: dict[str, Any],
-        target_version: str,
-        embedding: Sequence[float],
-        now: datetime,
-    ) -> None:
-        """Write one existing chunk into the new vector space.
-
-        Every column rides across unchanged except the three that define the
-        generation — version, vector, timestamp. The old row is left alone:
-        the composite PK `(id, model_version)` is what lets both exist while
-        the cutover has not happened yet.
-        """
-        values = {
-            **row,
-            "model_version": target_version,
-            "embedding": list(embedding),
-            "updated_at": now,
-        }
-        insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
-        stmt = insert(table).values(values)
-        # DO NOTHING, not DO UPDATE. `awaiting_migration` already excludes
-        # ids present at the target version, so a conflict here means the
-        # DRAIN wrote this chunk between that read and this write — a menu
-        # edit landing mid-migration. Its row is the fresher of the two.
-        # Updating would stamp a vector computed from the OLD text onto the
-        # NEW content while `content_hash` still matched, leaving a row whose
-        # embedding does not describe it and nothing able to notice.
-        await self._s.execute(
-            stmt.on_conflict_do_nothing(index_elements=[table.c.id, table.c.model_version])
-        )
-
-    async def drop_version(self, *, model_version: str) -> int:
-        """Retire a superseded generation. Runs only AFTER the pointer has
-        moved, so no query can be reading these rows when they go."""
-        removed = 0
-        for table in (item_chunks, restaurant_chunks):
-            result = await self._s.execute(
-                sa.delete(table).where(table.c.model_version == model_version)
-            )
-            removed += cast("CursorResult[Any]", result).rowcount or 0
-        return removed

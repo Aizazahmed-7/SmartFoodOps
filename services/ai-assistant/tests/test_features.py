@@ -214,11 +214,9 @@ async def test_a_city_with_no_orders_returns_nothing(sessions):
 
 
 async def _seed_menu(sessions, *items):
-    from ai_assistant.adapters.repo import IndexStateRepo
     from ai_assistant.db import item_chunks
 
     async with sessions() as session:
-        await IndexStateRepo(session).ensure(model_version=VERSION, now=NOON)
         for item_id, restaurant, text in items:
             await session.execute(
                 item_chunks.insert().values(
@@ -251,7 +249,9 @@ async def test_popular_ids_become_passages_with_menu_text(sessions):
     await _seed_menu(sessions, ("itm_karahi", "rst_1", "Chicken Karahi\nWok-cooked."))
     await FeatureHandler(sessions).handle_batch([_placed("ord_1", _line("itm_karahi"))])
 
-    (passage,) = await Recommender(sessions).popular(city="springfield", limit=5, at=NOON)
+    (passage,) = await Recommender(sessions, model_version=VERSION).popular(
+        city="springfield", limit=5, at=NOON
+    )
     assert passage.item_id == "itm_karahi" and passage.restaurant_id == "rst_1"
     assert "Chicken Karahi" in passage.text
 
@@ -270,7 +270,9 @@ async def test_a_dish_no_longer_on_the_menu_is_not_recommended(sessions):
             _placed("ord_2", _line("itm_delisted")),
         ]
     )
-    found = await Recommender(sessions).popular(city="springfield", limit=5, at=NOON)
+    found = await Recommender(sessions, model_version=VERSION).popular(
+        city="springfield", limit=5, at=NOON
+    )
     assert [p.item_id for p in found] == ["itm_still_here"]
 
 
@@ -279,14 +281,22 @@ async def test_no_index_means_no_recommendation(sessions):
     from ai_assistant.recommend import Recommender
 
     await FeatureHandler(sessions).handle_batch([_placed("ord_1")])
-    assert await Recommender(sessions).popular(city="springfield", limit=5, at=NOON) == []
+    assert (
+        await Recommender(sessions, model_version=VERSION).popular(
+            city="springfield", limit=5, at=NOON
+        )
+        == []
+    )
 
 
 async def test_a_city_with_history_but_no_matches_recommends_nothing(sessions):
     from ai_assistant.recommend import Recommender
 
     await _seed_menu(sessions, ("itm_karahi", "rst_1", "Chicken Karahi"))
-    assert await Recommender(sessions).popular(city="karachi", limit=5, at=NOON) == []
+    assert (
+        await Recommender(sessions, model_version=VERSION).popular(city="karachi", limit=5, at=NOON)
+        == []
+    )
 
 
 async def test_looking_up_no_items_costs_no_query(sessions):

@@ -27,7 +27,6 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .adapters.repo import IndexStateRepo
 from .db import item_chunks
 
 MAX_ITEMS = 50
@@ -64,24 +63,9 @@ class MenuFacts:
 
 
 class MenuFactsReader:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession], *, model_version: str) -> None:
         self._sessions = sessions
-
-    async def _active(self, session: AsyncSession) -> str | None:
-        """The generation retrieval is actually reading, resolved per call.
-
-               NOT the configured one. Every other index reader in this service
-               asks `IndexStateRepo` for the same reason: an operator who changes
-               `embedding_model` and restarts leaves the old generation active
-               until a reindex finishes, and a reader pinned to config would query
-               a version with no rows. For the studio that showed up as "N not
-               found on this menu" against the admin's own menu — and worse, as a
-               promotion quoting an undercounted order total, which is precisely
-               the fabricated statistic this reader exists to prevent.
-        has been built yet — no rows to read, and
-               certainly not a licence to read every generation at once.
-        """
-        return await IndexStateRepo(session).active()
+        self._model_version = model_version
 
     @staticmethod
     def _owned_by(claim: str) -> Any:
@@ -130,9 +114,6 @@ class MenuFactsReader:
 
     async def _read(self, where: Any, *, limit: int = MAX_ITEMS) -> list[MenuFacts]:
         async with self._sessions() as session:
-            version = await self._active(session)
-            if version is None:
-                return []
             rows = (
                 await session.execute(
                     sa.select(
@@ -144,7 +125,7 @@ class MenuFactsReader:
                         item_chunks.c.tags,
                         item_chunks.c.cuisines,
                     )
-                    .where(sa.and_(item_chunks.c.model_version == version, where))
+                    .where(sa.and_(item_chunks.c.model_version == self._model_version, where))
                     .order_by(item_chunks.c.item_id)
                     .limit(limit * self.BRANCH_FAN_OUT)
                 )

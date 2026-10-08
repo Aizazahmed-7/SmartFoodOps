@@ -1,17 +1,11 @@
-"""The AI plane's worker half. B1: the rolling reindex (FR-61).
+"""The AI plane's worker half: the content studio (B6).
 
-The task is a thin shell over `run_reindex` — build the async wiring, run
-it, return the summary. Everything worth testing is in `reindex.py`, which
-needs no broker and no Celery to exercise.
-
-Idempotency (execution is at-least-once by config — acks_late): the reindex
-resumes from an anti-join, so a redelivered task migrates whatever is left
-rather than redoing what is done. Re-running it is both the retry policy and
-the completion procedure.
+Each task is a thin shell — build the async wiring, run it, settle the row.
+Everything worth testing lives in `content.py` and `drafts.py`, which need
+no broker and no Celery to exercise.
 """
 
 import asyncio
-from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -20,54 +14,6 @@ from .config import Settings
 from .content import PermanentFailure, run_draft, run_summary
 from .domain.ports import LlmRateLimited, LlmUnavailable
 from .providers import shed_reason
-from .reindex import run_reindex
-
-
-async def _run(settings: Settings) -> dict[str, Any]:
-    from .adapters.embeddings_fake import FakeEmbeddings
-
-    engine = create_async_engine(settings.database_url)
-    try:
-        embeddings = FakeEmbeddings(dimensions=settings.embedding_dimensions)
-        if settings.openai_api_key:  # pragma: no cover — live wiring
-            import httpx
-
-            from .adapters.embeddings_openai import OpenAiEmbeddings
-
-            async with httpx.AsyncClient() as http:
-                result = await run_reindex(
-                    async_sessionmaker(engine, expire_on_commit=False),
-                    OpenAiEmbeddings(
-                        api_key=settings.openai_api_key,
-                        base_url=settings.openai_base_url,
-                        http=http,
-                        model=settings.embedding_model,
-                        dimensions=settings.embedding_dimensions,
-                    ),
-                    batch=settings.reindex_batch,
-                    max_batches=settings.reindex_max_batches,
-                )
-                return vars(result)
-        result = await run_reindex(
-            async_sessionmaker(engine, expire_on_commit=False),
-            embeddings,
-            batch=settings.reindex_batch,
-            max_batches=settings.reindex_max_batches,
-        )
-        return vars(result)
-    finally:
-        await engine.dispose()
-
-
-@celery_app.task(name="assistant.reindex")
-def reindex() -> dict[str, Any]:  # pragma: no cover — the shell; run_reindex is tested
-    """Migrate the corpus toward the configured model version.
-
-    Returns the `ReindexResult` as a dict. `done: false` means the batch cap
-    was reached and there is more to do — re-run it.
-    """
-    return asyncio.run(_run(Settings()))
-
 
 # ── B6: the content studio (FR-88, UC-25) ───────────────────────────
 

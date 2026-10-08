@@ -230,26 +230,6 @@ knowledge_pending = sa.Table(
 sa.Index("ix_knowledge_pending_due", knowledge_pending.c.due_at)
 
 
-# ── B1: which vector space retrieval reads (FR-61) ──────────────────
-
-knowledge_index_state = sa.Table(
-    "knowledge_index_state",
-    metadata,
-    # A single row. The PK is a constant rather than a surrogate so the
-    # table cannot grow a second opinion about which index is live.
-    sa.Column("id", sa.Text, primary_key=True),
-    # What RETRIEVAL reads. Deliberately NOT the same thing as what the
-    # drain WRITES: a rolling reindex (FR-61) spends minutes with both
-    # generations present, and queries must keep seeing the old one until
-    # every row of the new one exists. Bumping `embedding_model` therefore
-    # changes what is written immediately and what is read only when the
-    # reindex says so.
-    sa.Column("active_model_version", sa.Text, nullable=False),
-    sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
-    sa.CheckConstraint("id = 'current'", name="ck_knowledge_index_state_singleton"),
-)
-
-
 # ── B3: the conversation store (ADR-0042) ───────────────────────────
 
 conversations = sa.Table(

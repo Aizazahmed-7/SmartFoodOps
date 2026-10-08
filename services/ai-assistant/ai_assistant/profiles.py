@@ -15,14 +15,16 @@ from smartfood_otel import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .adapters.features import FeatureRepo
-from .adapters.repo import IndexStateRepo
 from .domain.taste import WINDOW, build
 
 log = get_logger("ai-assistant.profiles")
 
 
 async def build_profiles(
-    sessions: async_sessionmaker[AsyncSession], *, now: datetime | None = None
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    model_version: str,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Rebuild every recent customer's profile. Returns a summary.
 
@@ -35,20 +37,13 @@ async def build_profiles(
     at = now or datetime.now(UTC)
     since = at - WINDOW
     async with sessions() as session:
-        active = await IndexStateRepo(session).active()
-        if active is None:
-            # No index means no tags and no cuisines to build from — a
-            # profile of empty counts, which is worse than none because it
-            # is not `thin` and would be trusted.
-            log.info("no active index — profiles not built")
-            return {"users": 0, "built": 0, "skipped": "no index"}
         users = await FeatureRepo(session).users_with_history(since=since)
 
     built = 0
     for user_id in users:
         async with sessions() as session:
             repo = FeatureRepo(session)
-            rows = await repo.taste_rows(user_id=user_id, since=since, model_version=active)
+            rows = await repo.taste_rows(user_id=user_id, since=since, model_version=model_version)
             if not rows:
                 # `active` is read once at the top of the pass. If a reindex
                 # lands mid-pass the old version's chunks go away, every
@@ -96,16 +91,23 @@ class ProfileBuilder:
     subsequent profile stale instead.
     """
 
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], *, interval_s: float) -> None:
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        interval_s: float,
+        model_version: str,
+    ) -> None:
         self._sessions = sessions
         self._interval = interval_s
+        self._model_version = model_version
 
     async def run(self) -> None:  # pragma: no cover — the loop; the pass is tested
         import asyncio
 
         while True:
             try:
-                await build_profiles(self._sessions)
+                await build_profiles(self._sessions, model_version=self._model_version)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

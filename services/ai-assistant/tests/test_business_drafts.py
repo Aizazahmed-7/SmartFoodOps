@@ -9,7 +9,6 @@ fact set with no customer in it is a guarantee.
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from ai_assistant.adapters.repo import IndexStateRepo
 from ai_assistant.db import item_chunks, metadata, order_items
 from ai_assistant.restaurant_facts import LAPSED_AFTER_DAYS, RestaurantFacts, RestaurantFactsReader
 from smartfood_auth import AuthContext, headers_for
@@ -161,9 +160,8 @@ async def _reader() -> tuple[RestaurantFactsReader, async_sessionmaker]:
     # one, so the fixture has to say which that is — the same thing a
     # reindex does when it flips.
     async with sessions() as session:
-        await IndexStateRepo(session).ensure(model_version=VERSION, now=_INDEXED_AT)
         await session.commit()
-    return RestaurantFactsReader(sessions), sessions
+    return RestaurantFactsReader(sessions, model_version=VERSION), sessions
 
 
 async def _menu(sessions, restaurant, brand, dishes):
@@ -280,16 +278,3 @@ async def test_a_claim_matching_no_menu_gets_empty_facts():
     reader, _ = await _reader()
     facts = await reader.for_restaurant("rst_nobody", now=NOW)
     assert facts.orders == 0 and facts.top_dishes == [] and facts.thin
-
-
-async def test_aggregates_before_the_first_index_are_empty_not_unscoped():
-    """No active generation means no branches resolvable, and the honest
-    answer is zeros — not a read across every restaurant's orders."""
-    engine = create_async_engine(
-        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(metadata.create_all)
-    reader = RestaurantFactsReader(async_sessionmaker(engine, expire_on_commit=False))
-    facts = await reader.for_restaurant("rst_1", now=NOW)
-    assert facts.orders == 0 and facts.thin

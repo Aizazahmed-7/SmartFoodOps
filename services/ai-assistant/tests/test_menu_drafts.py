@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
-from ai_assistant.adapters.repo import IndexStateRepo
 from ai_assistant.db import item_chunks, metadata
 from ai_assistant.menu_facts import MAX_ITEMS, MenuFacts, MenuFactsReader
 from smartfood_auth import AuthContext, headers_for
@@ -206,9 +205,8 @@ async def _reader() -> tuple[MenuFactsReader, async_sessionmaker]:
     # one, so the fixture has to say which that is — the same thing a
     # reindex does when it flips.
     async with sessions() as session:
-        await IndexStateRepo(session).ensure(model_version=VERSION, now=_INDEXED_AT)
         await session.commit()
-    return MenuFactsReader(sessions), sessions
+    return MenuFactsReader(sessions, model_version=VERSION), sessions
 
 
 async def _chunk(sessions, item_id, name, category, restaurant, brand, version=VERSION):
@@ -343,4 +341,4 @@ async def _reader_without_index() -> tuple[MenuFactsReader, async_sessionmaker]:
     async with engine.begin() as conn:
         await conn.run_sync(metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    return MenuFactsReader(sessions), sessions
+    return MenuFactsReader(sessions, model_version=VERSION), sessions

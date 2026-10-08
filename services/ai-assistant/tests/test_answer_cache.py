@@ -12,7 +12,7 @@ from typing import cast
 
 import pytest
 from ai_assistant.adapters.answer_cache import PostgresSemanticCache, RedisExactCache
-from ai_assistant.adapters.repo import EpochRepo, IndexStateRepo
+from ai_assistant.adapters.repo import EpochRepo
 from ai_assistant.cache import AnswerCache
 from ai_assistant.db import metadata
 from ai_assistant.domain.answers import Cached, Fence, cacheable, normalize
@@ -197,15 +197,6 @@ async def test_the_epoch_moves_one_city_at_a_time(sessions):
         assert await repo.current("karachi") == 1  # untouched
 
 
-async def test_no_index_means_no_cache(sessions):
-    """A cache fenced on a placeholder version would survive the first real
-    reindex — the one moment every cached answer becomes meaningless."""
-    cache = AnswerCache(sessions, exact_tier=None, semantic_tier=None)
-    assert await cache.exact("q", "springfield") == (None, None)
-    assert await cache.semantic([0.1], None) is None
-    await cache.remember(None, "q", [0.1], ANSWER)  # a no-op, not a crash
-
-
 async def test_a_write_that_fails_does_not_fail_the_turn(sessions):
     """The answer is already correct and already streaming. A cache write
     that raised would turn a good turn into a failed one to save a future
@@ -216,9 +207,10 @@ async def test_a_write_that_fails_does_not_fail_the_turn(sessions):
             raise RuntimeError("redis is gone")
 
     async with sessions() as session:
-        await IndexStateRepo(session).ensure(model_version="m:512", now=T0)
         await session.commit()
-    cache = AnswerCache(sessions, exact_tier=Broken(), semantic_tier=Broken())
+    cache = AnswerCache(
+        sessions, exact_tier=Broken(), semantic_tier=Broken(), model_version="m:512"
+    )
     await cache.remember(Fence("m:512", "springfield", 1), "q", [0.1], ANSWER)  # no raise
 
 
@@ -234,9 +226,8 @@ async def test_the_fence_is_resolved_per_lookup_not_captured(sessions):
             return None
 
     async with sessions() as session:
-        await IndexStateRepo(session).ensure(model_version="m:512", now=T0)
         await session.commit()
-    cache = AnswerCache(sessions, exact_tier=Spy(), semantic_tier=Spy())
+    cache = AnswerCache(sessions, exact_tier=Spy(), semantic_tier=Spy(), model_version="m:512")
     await cache.exact("q", "springfield")
     async with sessions() as session:
         await EpochRepo(session).bump(city="springfield", now=T0)
@@ -401,12 +392,13 @@ async def test_the_service_writes_both_tiers_and_reads_the_semantic_one(sessions
             self.written = True
 
     async with sessions() as session:
-        await IndexStateRepo(session).ensure(model_version="m:512", now=T0)
         await EpochRepo(session).bump(city="springfield", now=T0)
         await session.commit()
 
     exact_tier, semantic_tier = Tier("exact"), Tier("semantic")
-    cache = AnswerCache(sessions, exact_tier=exact_tier, semantic_tier=semantic_tier)
+    cache = AnswerCache(
+        sessions, exact_tier=exact_tier, semantic_tier=semantic_tier, model_version="m:512"
+    )
 
     fence = Fence("m:512", "springfield", 2)
     assert (await cache.semantic([0.1, 0.2], fence)) == ANSWER
@@ -431,9 +423,13 @@ async def test_an_answer_with_no_vector_is_written_to_the_exact_tier_only(sessio
             written.append(self.name)
 
     async with sessions() as session:
-        await IndexStateRepo(session).ensure(model_version="m:512", now=T0)
         await session.commit()
-    cache = AnswerCache(sessions, exact_tier=Tier("exact"), semantic_tier=Tier("semantic"))
+    cache = AnswerCache(
+        sessions,
+        exact_tier=Tier("exact"),
+        semantic_tier=Tier("semantic"),
+        model_version="m:512",
+    )
     await cache.remember(Fence("m:512", "springfield", 1), "q", [], ANSWER)
     assert written == ["exact"]
 

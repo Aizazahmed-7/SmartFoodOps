@@ -111,11 +111,9 @@ class KnowledgeDrain:
         KNOWLEDGE_BACKLOG_SECONDS.set(_backlog_seconds(pending, now))
         drained = 0
         for row in pending:
-            # Sequentially, not with gather: each restaurant commits before
-            # the next is read, so a vector this pass computed is available
-            # to BORROW for the rest of the batch (`vectors_by_hash`). A
-            # base dish shared by twelve branches is then one provider call
-            # even when all twelve arrive in the same pass.
+            # Sequentially: each restaurant commits before the next is read,
+            # so one slow provider call cannot fan out into N concurrent
+            # ones against a rate-limited endpoint.
             drained += await self._drain_one(row)
         return drained
 
@@ -144,16 +142,14 @@ class KnowledgeDrain:
                 restaurant_id=pending.restaurant_id, model_version=self._model_version
             )
             stale = self._stale(knowledge, stored)
-            borrowed = await store.vectors_by_hash(
-                content_hashes=[text_hash for text_hash, _ in stale],
-                model_version=self._model_version,
-            )
 
-        vectors = dict(borrowed)
-        missing = [(h, text) for h, text in stale if h not in vectors]
-        if missing:
-            computed = await self._embeddings.embed([text for _, text in missing])
-            vectors.update(dict(zip((h for h, _ in missing), computed, strict=True)))
+        # One batched call for everything whose text changed. `_stale` is
+        # keyed by content_hash, so a dish listed twice in this restaurant
+        # is still embedded once.
+        vectors: dict[str, list[float]] = {}
+        if stale:
+            computed = await self._embeddings.embed([text for _, text in stale])
+            vectors = dict(zip((h for h, _ in stale), computed, strict=True))
 
         now = self._clock()
         async with self._sessions() as session:
@@ -192,7 +188,7 @@ class KnowledgeDrain:
                     await EpochRepo(session).bump(city=city, now=now)
             await session.commit()
 
-        self._record(knowledge, stored, borrowed, len(missing), deleted, pending, now)
+        self._record(knowledge, stored, len(stale), deleted, pending, now)
         if not kept:
             log.info(
                 "restaurant changed again mid-drain — re-queued",
@@ -232,7 +228,6 @@ class KnowledgeDrain:
         self,
         knowledge: RestaurantKnowledge,
         stored: dict[str, str],
-        borrowed: dict[str, list[float]],
         embedded: int,
         deleted: int,
         pending: Pending,
@@ -241,12 +236,7 @@ class KnowledgeDrain:
         EMBED_REQUESTS.labels(outcome="sent" if embedded else "skipped").inc()
 
         def count(kind: str, chunk_id: str, content_hash: str) -> None:
-            if stored.get(chunk_id) == content_hash:
-                result = "unchanged"
-            elif content_hash in borrowed:
-                result = "borrowed"
-            else:
-                result = "embedded"
+            result = "unchanged" if stored.get(chunk_id) == content_hash else "embedded"
             KNOWLEDGE_CHUNKS.labels(kind=kind, result=result).inc()
 
         count("restaurant", knowledge.restaurant.id, knowledge.restaurant.content_hash)
@@ -263,6 +253,5 @@ class KnowledgeDrain:
             restaurant_id=pending.restaurant_id,
             items=len(knowledge.items),
             embedded=embedded,
-            borrowed=len(borrowed),
             deleted=deleted,
         )

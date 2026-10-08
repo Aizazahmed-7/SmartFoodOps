@@ -15,7 +15,7 @@ worth testing, and a coarse `service=` override would skip both.
 import asyncio
 from collections.abc import Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -29,7 +29,6 @@ from sqlalchemy.pool import StaticPool
 from .adapters.catalog_client import CatalogClient
 from .adapters.inventory_client import InventoryClient
 from .adapters.order_client import DeliveryClient, FeedbackClient, OrderTimelineClient
-from .adapters.repo import IndexStateRepo
 from .adapters.retriever import PostgresRetriever
 from .api.chat import STREAM_PREFIX as CHAT_STREAM_PREFIX
 from .api.chat import router as chat_router
@@ -96,7 +95,7 @@ def _embeddings(settings: Settings, http: httpx.AsyncClient | None) -> Embedding
     return FakeEmbeddings(dimensions=settings.embedding_dimensions)
 
 
-def _answer_cache(settings: Settings, sessions: Any, redis: Any) -> Any:
+def _answer_cache(settings: Settings, sessions: Any, redis: Any, model_version: str = "") -> Any:
     """Both tiers, or neither.
 
     An exact tier without Redis is not a degraded cache, it is a lookup that
@@ -113,6 +112,7 @@ def _answer_cache(settings: Settings, sessions: Any, redis: Any) -> Any:
         sessions,
         exact_tier=RedisExactCache(redis, ttl_s=settings.answer_cache_ttl_s),
         semantic_tier=PostgresSemanticCache(sessions, threshold=settings.answer_cache_distance),
+        model_version=model_version,
     )
 
 
@@ -385,7 +385,11 @@ def create_app(
             drain.run,
             features_consumer.run,
             views_consumer.run,
-            ProfileBuilder(sessions, interval_s=settings.profile_interval_seconds).run,
+            ProfileBuilder(
+                sessions,
+                interval_s=settings.profile_interval_seconds,
+                model_version=active_version,
+            ).run,
         ]
 
     own_producer: Any | None = None
@@ -435,15 +439,6 @@ def create_app(
                 await conn.run_sync(metadata.create_all)
         else:
             await asyncio.to_thread(_run_migrations, settings.database_url)  # pragma: no cover
-        async with sessions() as session:
-            # Insert-if-absent, never an update: a fresh database adopts the
-            # configured vector space, and an existing one keeps whatever
-            # the last reindex activated. Changing `embedding_model` must
-            # not silently repoint queries at a generation with no rows.
-            await IndexStateRepo(session).ensure(
-                model_version=active_version, now=datetime.now(UTC)
-            )
-            await session.commit()
         tasks = [asyncio.create_task(runner()) for runner in live_runners]
         if poller is not None:
             if own_producer is not None:  # pragma: no cover — live path
@@ -510,12 +505,16 @@ def create_app(
         history=settings.history_limit,
         shown=_record_answer_shown(app),
     )
-    app.state.answer_cache = _answer_cache(settings, sessions, own_redis)
-    app.state.cards = CardService(sessions, CatalogClient(settings.catalog_base_url, internal_http))
+    app.state.answer_cache = _answer_cache(settings, sessions, own_redis, active_version)
+    app.state.cards = CardService(
+        sessions,
+        CatalogClient(settings.catalog_base_url, internal_http),
+        model_version=active_version,
+    )
     app.state.kitchen_load = InventoryClient(settings.inventory_base_url, internal_http)
     app.state.drafts = DraftStore(sessions)
-    app.state.menu_facts = MenuFactsReader(sessions)
-    app.state.restaurant_facts = RestaurantFactsReader(sessions)
+    app.state.menu_facts = MenuFactsReader(sessions, model_version=active_version)
+    app.state.restaurant_facts = RestaurantFactsReader(sessions, model_version=active_version)
     app.state.feedback = FeedbackClient(settings.order_base_url, internal_http)
     # Enqueue is injected rather than imported, so the API can be exercised
     # without a broker — and so a test can assert WHICH ids were enqueued,
@@ -532,8 +531,10 @@ def create_app(
         # FR-87, arrived at by the machinery rather than by a flag.
         templates=PolishedTemplates(TemplateCache(), router=app.state.service.router),
     )
-    app.state.retriever = PostgresRetriever(sessions, embeddings, ef_search=settings.hnsw_ef_search)
-    app.state.recommender = Recommender(sessions)
+    app.state.retriever = PostgresRetriever(
+        sessions, embeddings, ef_search=settings.hnsw_ef_search, model_version=active_version
+    )
+    app.state.recommender = Recommender(sessions, model_version=active_version)
     app.state.recommend_limit = settings.recommend_limit
     app.state.stream_lifetime_s = settings.stream_lifetime_seconds
     app.include_router(router)

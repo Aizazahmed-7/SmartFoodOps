@@ -15,6 +15,8 @@ from ai_assistant.adapters.retriever import LEG_OVERFETCH, PostgresRetriever
 from ai_assistant.domain.retrieval import Candidate, Filters
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+ACTIVE = "fake:512"
+
 
 class StubEmbeddings:
     model = "stub"
@@ -63,6 +65,7 @@ def _retriever(session: StubSession, embeddings, **kwargs) -> PostgresRetriever:
     stub stands in as both — exactly how catalog's search adapter is tested.
     The cast says what the stub is: the slice of AsyncSession this code
     touches, not the whole class."""
+    kwargs.setdefault("model_version", ACTIVE)
     return PostgresRetriever(
         cast(async_sessionmaker[AsyncSession], lambda: session), embeddings, **kwargs
     )
@@ -79,31 +82,6 @@ def _candidate(chunk_id: str) -> Candidate:
 @pytest.fixture
 def embeddings():
     return StubEmbeddings()
-
-
-async def test_an_index_that_does_not_exist_yet_costs_no_provider_call(embeddings):
-    """No pointer means no corpus. Embedding the query anyway would be a
-    charge for a comparison against nothing."""
-    session = StubSession(active=None)
-    result = await _retriever(session, embeddings).retrieve(
-        query="biryani", filters=Filters(city="springfield"), limit=5
-    )
-    assert result.items == () and result.restaurants == ()
-    assert embeddings.calls == []
-    assert session.statements == []
-
-
-async def test_the_active_version_is_what_gets_queried(embeddings):
-    """Not the configured one. During a rolling reindex those differ, and
-    querying the configured version would read a generation that is still
-    being built."""
-    session = StubSession(active="new-model:512", rows=[_row("r1:i1")])
-    await _retriever(session, embeddings).retrieve(
-        query="x", filters=Filters(city="springfield"), limit=5
-    )
-    assert all(
-        p["model_version"] == "new-model:512" for p in session.params if "model_version" in p
-    )
 
 
 async def test_the_trigram_threshold_is_applied_to_the_session(embeddings):

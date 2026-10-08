@@ -13,7 +13,7 @@ from typing import Any
 from smartfood_otel import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .adapters.repo import EpochRepo, IndexStateRepo
+from .adapters.repo import EpochRepo
 from .domain.answers import Cached, Fence
 
 log = get_logger("ai-assistant.cache")
@@ -36,23 +36,22 @@ class AnswerCache:
         *,
         exact_tier: Any,
         semantic_tier: Any,
+        model_version: str,
     ) -> None:
         self._sessions = sessions
+        self._model_version = model_version
         self._exact = exact_tier
         self._semantic = semantic_tier
 
-    async def _fence(self, city: str) -> Fence | None:
-        """None when no index exists yet — there is nothing to be fenced
-        against, and a cache with a placeholder version would survive the
-        first real reindex."""
+    async def _fence(self, city: str) -> Fence:
+        """Always resolvable now that the model version is configuration
+        rather than a row: the only variable left is the city's epoch, and
+        a city with no bumps yet is epoch 0, not an absence."""
         async with self._sessions() as session:
-            model_version = await IndexStateRepo(session).active()
-            if model_version is None:
-                return None
             epoch = await EpochRepo(session).current(city)
-        return Fence(model_version=model_version, city=city, epoch=epoch)
+        return Fence(model_version=self._model_version, city=city, epoch=epoch)
 
-    async def exact(self, question: str, city: str) -> tuple[Cached | None, Fence | None]:
+    async def exact(self, question: str, city: str) -> tuple[Cached | None, Fence]:
         """The hit, AND the fence it was looked up under.
 
         The fence travels out so the write-back can use the one that was
@@ -64,19 +63,15 @@ class AnswerCache:
         claims does not exist.
         """
         fence = await self._fence(city)
-        if fence is None:
-            return None, None
         return await self._exact.get(fence=fence, question=question), fence
 
-    async def semantic(self, query_vector: Sequence[float], fence: Fence | None) -> Cached | None:
+    async def semantic(self, query_vector: Sequence[float], fence: Fence) -> Cached | None:
         """Takes the fence rather than resolving one: by now retrieval has
         happened, and the answer belongs to the corpus that was read."""
-        if fence is None:
-            return None
         return await self._semantic.get(fence=fence, query_vector=query_vector)
 
     async def remember(
-        self, fence: Fence | None, question: str, query_vector: Sequence[float], cached: Cached
+        self, fence: Fence, question: str, query_vector: Sequence[float], cached: Cached
     ) -> None:
         """Write both tiers, and never let either break the turn.
 
@@ -89,8 +84,6 @@ class AnswerCache:
         read it. A write under a future one is the bug above.
         """
         try:
-            if fence is None:
-                return
             await self._exact.put(fence=fence, question=question, cached=cached)
             # Only the exact tier can serve a turn that never retrieved, so
             # a missing vector is a write the semantic tier cannot make.

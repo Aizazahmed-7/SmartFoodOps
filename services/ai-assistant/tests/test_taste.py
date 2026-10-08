@@ -9,7 +9,6 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from ai_assistant.adapters.features import FeatureRepo
-from ai_assistant.adapters.repo import IndexStateRepo
 from ai_assistant.consumers import FeatureHandler, ViewHandler
 from ai_assistant.db import item_chunks, metadata
 from ai_assistant.domain.taste import (
@@ -201,7 +200,6 @@ async def sessions():
 
 async def _menu(sessions, *items):
     async with sessions() as session:
-        await IndexStateRepo(session).ensure(model_version=VERSION, now=NOW)
         for item_id, restaurant, cuisines, tags in items:
             await session.execute(
                 item_chunks.insert().values(
@@ -267,7 +265,7 @@ async def test_a_profile_is_built_from_the_index_not_the_payload(sessions):
         [_order("ord_1", "itm_karahi"), _order("ord_2", "itm_biryani")]
     )
 
-    summary = await build_profiles(sessions, now=NOW)
+    summary = await build_profiles(sessions, model_version=VERSION, now=NOW)
     assert summary == {"users": 1, "built": 1}
 
     async with sessions() as session:
@@ -285,7 +283,7 @@ async def test_browsing_adds_familiarity_and_nothing_else(sessions):
         [_order("ord_1", "itm_karahi"), _order("ord_2", "itm_karahi")]
     )
     await ViewHandler(sessions).handle_batch([_view(restaurant="rst_browsed")])
-    await build_profiles(sessions, now=NOW)
+    await build_profiles(sessions, model_version=VERSION, now=NOW)
     async with sessions() as session:
         profile = await FeatureRepo(session).profile("usr_1")
     assert profile is not None
@@ -316,18 +314,11 @@ async def test_rebuilding_is_its_own_retry_policy(sessions):
     await FeatureHandler(sessions).handle_batch(
         [_order("ord_1", "itm_karahi"), _order("ord_2", "itm_karahi")]
     )
-    await build_profiles(sessions, now=NOW)
-    await build_profiles(sessions, now=NOW)
+    await build_profiles(sessions, model_version=VERSION, now=NOW)
+    await build_profiles(sessions, model_version=VERSION, now=NOW)
     async with sessions() as session:
         profile = await FeatureRepo(session).profile("usr_1")
     assert profile is not None and profile.orders == 2  # not four
-
-
-async def test_no_index_means_no_profiles(sessions):
-    """A profile of empty counts is worse than none, because it is not
-    `thin` and would be trusted."""
-    await FeatureHandler(sessions).handle_batch([_order("ord_1", "itm_karahi")])
-    assert (await build_profiles(sessions, now=NOW))["skipped"] == "no index"
 
 
 async def test_a_customer_who_stopped_ordering_is_not_rebuilt(sessions):
@@ -338,7 +329,7 @@ async def test_a_customer_who_stopped_ordering_is_not_rebuilt(sessions):
     await FeatureHandler(sessions).handle_batch(
         [_order("ord_old", "itm_karahi", at=NOW - WINDOW - timedelta(days=1))]
     )
-    assert (await build_profiles(sessions, now=NOW))["users"] == 0
+    assert (await build_profiles(sessions, model_version=VERSION, now=NOW))["users"] == 0
 
 
 # ── the read ────────────────────────────────────────────────────────
@@ -356,9 +347,9 @@ async def test_a_customer_with_history_gets_a_taste_list(sessions):
     await FeatureHandler(sessions).handle_batch(
         [_order("ord_1", "itm_karahi"), _order("ord_2", "itm_karahi")]
     )
-    await build_profiles(sessions, now=NOW)
+    await build_profiles(sessions, model_version=VERSION, now=NOW)
 
-    basis, dishes = await Recommender(sessions).for_user(
+    basis, dishes = await Recommender(sessions, model_version=VERSION).for_user(
         user_id="usr_1", city="springfield", limit=3, at=NOW
     )
     assert basis == "taste"
@@ -370,8 +361,8 @@ async def test_a_customer_with_history_gets_a_taste_list(sessions):
 async def test_a_customer_with_one_order_gets_the_baseline(sessions):
     await _menu(sessions, ("itm_karahi", "rst_1", ["pakistani"], ["spicy"]))
     await FeatureHandler(sessions).handle_batch([_order("ord_1", "itm_karahi")])
-    await build_profiles(sessions, now=NOW)
-    basis, _ = await Recommender(sessions).for_user(
+    await build_profiles(sessions, model_version=VERSION, now=NOW)
+    basis, _ = await Recommender(sessions, model_version=VERSION).for_user(
         user_id="usr_1", city="springfield", limit=3, at=NOW
     )
     assert basis == "popular"
@@ -379,7 +370,7 @@ async def test_a_customer_with_one_order_gets_the_baseline(sessions):
 
 async def test_a_customer_with_no_profile_at_all_gets_the_baseline(sessions):
     await _menu(sessions, ("itm_karahi", "rst_1", ["pakistani"], ["spicy"]))
-    basis, _ = await Recommender(sessions).for_user(
+    basis, _ = await Recommender(sessions, model_version=VERSION).for_user(
         user_id="usr_stranger", city="springfield", limit=3, at=NOW
     )
     assert basis == "popular"
@@ -392,8 +383,8 @@ async def test_a_city_with_no_menu_falls_back_to_the_baseline(sessions):
     await FeatureHandler(sessions).handle_batch(
         [_order("ord_1", "itm_karahi"), _order("ord_2", "itm_karahi")]
     )
-    await build_profiles(sessions, now=NOW)
-    basis, dishes = await Recommender(sessions).for_user(
+    await build_profiles(sessions, model_version=VERSION, now=NOW)
+    basis, dishes = await Recommender(sessions, model_version=VERSION).for_user(
         user_id="usr_1", city="nowhereville", limit=3, at=NOW
     )
     assert basis == "popular" and dishes == []
@@ -407,11 +398,11 @@ async def test_a_profile_over_an_empty_menu_recommends_nothing(sessions):
     await FeatureHandler(sessions).handle_batch(
         [_order("ord_1", "itm_karahi"), _order("ord_2", "itm_karahi")]
     )
-    await build_profiles(sessions, now=NOW)
+    await build_profiles(sessions, model_version=VERSION, now=NOW)
     async with sessions() as session:
         await session.execute(item_chunks.delete())
         await session.commit()
-    basis, dishes = await Recommender(sessions).for_user(
+    basis, dishes = await Recommender(sessions, model_version=VERSION).for_user(
         user_id="usr_1", city="springfield", limit=3, at=NOW
     )
     assert basis == "popular" and dishes == []
@@ -426,7 +417,7 @@ async def test_a_reindex_mid_pass_does_not_blank_a_good_profile(sessions):
     await FeatureHandler(sessions).handle_batch(
         [_order("ord_1", "itm_karahi"), _order("ord_2", "itm_karahi")]
     )
-    await build_profiles(sessions, now=NOW)
+    await build_profiles(sessions, model_version=VERSION, now=NOW)
     async with sessions() as session:
         before = await FeatureRepo(session).profile("usr_1")
     assert before is not None and before.orders == 2
@@ -435,7 +426,7 @@ async def test_a_reindex_mid_pass_does_not_blank_a_good_profile(sessions):
     async with sessions() as session:
         await session.execute(item_chunks.delete())
         await session.commit()
-    await build_profiles(sessions, now=NOW)
+    await build_profiles(sessions, model_version=VERSION, now=NOW)
 
     async with sessions() as session:
         after = await FeatureRepo(session).profile("usr_1")

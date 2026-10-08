@@ -548,6 +548,106 @@ The sweeper's query is exactly that reading, and now it is one table: `status = 
 
 ---
 
+## assistant_db — the knowledge index (Part B, B1)
+
+The first database in this system that is **entirely derived**. Every row
+here can be deleted and rebuilt from `c1.catalog.changes`, which is compacted
+and therefore still holds the latest state of every restaurant. Nothing is
+authored here; nothing is a source of truth.
+
+```mermaid
+erDiagram
+    knowledge_pending {
+        text restaurant_id PK "ONE row per restaurant — this IS the debounce"
+        json payload "catalog's full-state snapshot; latest wins"
+        text payload_hash "fingerprint — the guard on the drain's delete"
+        timestamptz due_at "kept EARLIEST on conflict: fixed window, not sliding"
+        timestamptz first_seen_at "never updated — answers 'waiting how long?'"
+    }
+    item_chunks {
+        text id PK "rst_9:itm_4"
+        text model_version PK "gemini-embedding-001:512"
+        text restaurant_id "the BRANCH"
+        text item_id
+        text name "a column, not just line 1 of content"
+        text city "hard predicate — every query is geo-scoped"
+        text brand_id
+        slugs cuisines
+        text category
+        slugs tags
+        int price_cents "VOLATILE pre-filter — narrows here, truth in catalog"
+        bool available "VOLATILE pre-filter"
+        text status "open|paused — denormalised so the item leg needs no join"
+        text content "the exact text embedded — durable facts only"
+        text content_hash "lets the drain skip unchanged chunks"
+        vector embedding
+        timestamptz updated_at
+    }
+    restaurant_chunks {
+        text id PK "rst_9:_self"
+        text model_version PK
+        text restaurant_id
+        text city
+        text brand_id
+        slugs cuisines
+        text status
+        text content
+        text content_hash
+        vector embedding
+        timestamptz updated_at
+    }
+    knowledge_pending ||--o{ item_chunks : "drained into (logical, no FK)"
+    knowledge_pending ||--o| restaurant_chunks : "drained into (logical, no FK)"
+```
+
+Indexes: `ix_item_chunks_scope (model_version, city)` and the same on
+restaurant chunks — retrieval's hard-predicate prefix, so two embedding
+generations can never mix in one result set. `ix_*_restaurant (restaurant_id,
+model_version)` serves the ingestion path, and **both** tables need it:
+without the second, every drain pass sequentially scans `restaurant_chunks`.
+`ix_knowledge_pending_due (due_at)` is what `due()` reads.
+
+**`model_version` is configuration, not state.** The embedding model and
+dimensions are fixed by `Settings`, and every reader derives the version from
+the same place the drain writes it — so there is no second source of truth to
+disagree. It stays in the primary key and as the leading column of both
+retrieval indexes because it costs nothing there and it is what stops two
+vector spaces mixing in one result set if the model is ever changed without
+rebuilding.
+
+**Changing the model is a rebuild, not a migration.** Truncate the chunk
+tables and reset the `assistant.knowledge.v1` consumer group; `catalog.changes`
+is compacted, so replaying it restores the index from the latest state of
+every restaurant. Search answers nothing while that runs — the accepted trade
+for removing the rolling reindex and the `knowledge_index_state` table it
+needed.
+
+**Three kinds of column, and the distinction is load-bearing:**
+
+| Kind | Columns | Why it is where it is |
+| --- | --- | --- |
+| Hard predicates | `city`, `cuisines`, `category`, `tags`, `brand_id` | Stored as columns so the *database* can filter. A filter living in the prose is a filter the database cannot use |
+| Volatile pre-filters | `price_cents`, `available`, `status` | Make "under $10" and "not 86'd" cheap in SQL instead of an over-fetch — but they are up to one debounce window stale, and are **never** what the customer is shown. Narrowing here, truth in catalog |
+| Embedded text | `content` | **Durable facts only.** No price, no availability (FR-60) |
+
+That last row is the one to defend in review. The index may be 60 s stale. A
+stale description is harmless; a stale **price** shown to a customer is a
+consumer-protection problem. Keeping price out of `content` makes it
+structurally impossible for the indexed copy to be quoted — not a rule
+someone has to remember, but an absence.
+
+`content` is kept rather than discarded after embedding for two reasons: the
+rolling reindex re-embeds **from here** (no catalog call, no Kafka replay),
+and B2's lexical search leg reads it directly.
+
+**Brand rows are never chunked at all.** A brand is a menu *template*, not a
+place (ADR-0028) — catalog leaves `city` and `status` null on them. Every
+branch receives its own full effective-state event through the fan-out, so
+skipping brands loses nothing and keeps template rows out of results *by
+construction* rather than by a filter someone must remember (FR-63).
+
+---
+
 ## Cross-service references — ids, not FKs
 
 These lines are _conventions kept true by events and idempotent consumers_, never constraints the databases enforce:

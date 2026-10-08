@@ -687,7 +687,7 @@ sequenceDiagram
     end
     Note over T,DB: COMMIT — status, milestone and event land together or not at all
     T->>R: publish_status(ord_42, READY)
-    Note over R: POST-commit on purpose: a stream hint must never describe a<br/>write that rolled back, and Redis being down must never undo<br/>one that landed. The EVENT is transactional; the HINT is not
+    Note over R: POST-commit on purpose: a stream hint must never describe a<br/>write that rolled back, and Redis being down must never undo<br/>one that landed. The EVENT is transactional — the HINT is not
     T-->>C: TransitionResult(applied=True)
 ```
 
@@ -736,6 +736,103 @@ is requested, because a summary must reflect the corpus **as it stands at
 that moment** — a customer who edits their review must not still be quoted
 saying the old thing. An event stream would make the summariser's input a
 replay of history rather than the current truth.
+
+---
+
+## 16. Knowledge ingestion — a menu edit becomes searchable (B1, FR-57/58/59)
+
+The whole of B1. A restaurant owner edits a dish; within 60 seconds the
+assistant can find it *by meaning*. Nothing in this path is authored — every
+row it writes is derived and rebuildable.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant O as Restaurant owner
+    participant CAT as catalog
+    participant K as Kafka c1.catalog.changes
+    participant KH as KnowledgeHandler
+    participant PQ as knowledge_pending
+    participant DR as KnowledgeDrain (every 5s)
+    participant EMB as Embedding provider
+    participant VS as item_chunks / restaurant_chunks
+
+    O->>CAT: PATCH /v1/menu-items/{id}  "add: slow-cooked, buttery"
+    Note over CAT: ONE TX — the menu row AND an outbox row.<br/>Never a direct Kafka publish (ADR-0002)
+    CAT->>K: poller drains the outbox → full-state snapshot, key = restaurant_id
+    Note over K: COMPACTED: the latest message per key is retained forever.<br/>This is what makes the whole index rebuildable (FR-59)
+
+    K->>KH: one event
+    KH->>KH: aggregate_type != "restaurant"? → return, offset commits
+    KH->>KH: json.loads(payload)
+    Note over KH: a payload that will not parse RAISES — bounded retry,<br/>then the DLQ, where it is inspectable and replayable.<br/>Swallowing it would leave a restaurant silently missing<br/>from search with nothing to point at
+    KH->>KH: is_indexable(payload)?
+    Note over KH: false for a BRAND (a template, not a place — every branch gets<br/>its own event anyway) and for a branch with no city (every query<br/>is geo-scoped, so the row would be unreachable). Returning<br/>commits the offset: queueing work the drain would discard would<br/>make the backlog lie about how stale the index is
+    KH->>PQ: INSERT .. ON CONFLICT (restaurant_id) DO UPDATE
+    Note over PQ: THE DEBOUNCE, and it is deliberately asymmetric:<br/>payload  → overwritten (full-state snapshots supersede)<br/>due_at   → keeps the EARLIER (fixed window, not sliding)<br/>first_seen_at → never touched ("waiting 4 minutes" stays answerable)<br/>One upsert, not read-then-write: two partitions or a redelivery<br/>racing a drain would otherwise interleave into a lost update
+
+    loop every 5s
+        DR->>PQ: SELECT .. WHERE due_at <= now ORDER BY due_at LIMIT batch
+    end
+    Note over DR: oldest-deadline first, so a backlog drains in the order it<br/>accumulated — the restaurant stale longest is the one whose<br/>customers are seeing the wrong menu
+
+    DR->>DR: chunk(restaurant_id, payload) → 1 restaurant chunk + N item chunks
+    Note over DR: restaurant_id comes from the ENVELOPE (aggregate_id = topic key),<br/>not the payload. Price and availability are NOT embedded — they<br/>become filter COLUMNS. content holds durable facts only (FR-60)
+    DR->>VS: hashes_for(restaurant, model_version) — what is already embedded
+    DR->>DR: _stale() = chunks whose content_hash differs
+    Note over DR: de-duplicated WITHIN the restaurant too: the same drink listed<br/>under two categories is two chunks and ONE vector
+    DR->>EMB: embed([every stale text, in ONE batched request])
+    Note over DR,EMB: cross-restaurant vector reuse was removed deliberately — the<br/>three-dict hot path it needed cost more in readability than it<br/>saved, and it was the only thing forcing this loop to stay<br/>sequential
+    Note over DR,EMB: OUTSIDE any transaction — this is seconds of network
+
+    rect rgb(0,0,0)
+        Note over DR,VS: ONE TX
+        DR->>VS: upsert restaurant chunk + item chunks, then reconcile<br/>(delete chunks for items no longer on the menu)
+        DR->>PQ: DELETE WHERE restaurant_id=:id AND payload_hash=:hash
+        Note over PQ: GUARDED on the fingerprint. The drain spent seconds embedding<br/>with no transaction open, an unguarded delete would silently<br/>discard an edit that landed in that gap, and the index would<br/>stay wrong until the restaurant happened to change again.<br/>rowcount 0 → the row stays and the next tick picks it up
+        DR->>DR: bump the answer-cache epoch for every city it WAS in and IS in
+        Note over DR: only when something retrieval can SEE changed — an 86'd dish<br/>leaves every content_hash identical while changing results.<br/>A pass that re-confirms an unchanged menu must not cold-start<br/>the whole city's cache on a catalog heartbeat
+    end
+    Note over DR: KNOWLEDGE_BACKLOG_SECONDS gauge is set BEFORE this pass runs,<br/>so a pass that fails on every row still reports the backlog<br/>it could not clear (NFR-28's alarm)
+```
+
+### Why a queue at all, rather than embedding on the event
+
+Three reasons, in order of how much they cost to get wrong:
+
+1. **Money.** Embedding is a paid API call. ADR-0028's brand fan-out means one
+   base-menu edit stages a full-state event *per branch*; an owner fixing six
+   dishes across twelve branches produces seventy-two events in twenty
+   seconds, all converging on the same final state. The debounce and the
+   `content_hash` comparison are what collapse that to one pass and one
+   embedding per changed text.
+2. **Back-pressure.** A consumer that blocks on a provider call holds its
+   partition. The queue lets the consumer commit offsets immediately and the
+   drain fall behind visibly — as a measurable backlog — instead of silently.
+3. **Retry shape.** A failed embedding leaves the row queued, so the retry is
+   "run again" rather than "replay Kafka".
+
+### The fixed window, specifically
+
+`due_at` keeps the **earlier** value on conflict. A trailing (sliding)
+debounce restarts its clock on every event, so an owner editing twenty dishes
+over five minutes would be indexed *never* — each edit pushing the deadline
+out — and would blow past NFR-28's 60 s budget with nothing reporting it.
+A fixed window bounds staleness at `debounce + drain time` by construction.
+
+### Rebuildability, concretely
+
+```bash
+TRUNCATE item_chunks, restaurant_chunks;          # throw the index away
+# reset the consumer group to the beginning
+# the compacted topic replays the latest state of every restaurant
+```
+
+The index comes back identical. **This is now also the model-migration
+procedure**: with the rolling reindex removed, changing `embedding_model` or
+`embedding_dimensions` means truncate, reset, replay — accepting an empty
+index while it runs. It is the same property B7 leans on to populate
+`restaurant_brands` without a backfill.
 
 ---
 

@@ -86,7 +86,6 @@ KNOWLEDGE_CHUNKS = Counter(
     "assistant_knowledge_chunks_total",
     "Chunks the drain acted on, by what it cost.",
     # embedded  — text changed; a provider call was made for it
-    # borrowed  — text already embedded elsewhere in the index, vector reused
     #             (the ADR-0028 fan-out: one base dish, twelve branches)
     # unchanged — content_hash matched; columns rewritten, no vector touched
     # deleted   — reconciled away because the snapshot no longer lists it

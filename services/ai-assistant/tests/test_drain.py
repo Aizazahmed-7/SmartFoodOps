@@ -254,11 +254,18 @@ async def test_a_real_edit_does_embed(drain, sessions, clock, embeddings):
     assert embeddings.calls == before + 1
 
 
-async def test_a_shared_dish_across_branches_is_embedded_once(drain, sessions, clock, embeddings):
+async def test_a_shared_dish_across_branches_has_identical_text(drain, sessions, clock, embeddings):
     """THE fan-out test. ADR-0028 sends one base-menu edit as a full-state
-    event per branch; item chunks omit the restaurant name precisely so the
-    text is byte-identical, and the second branch borrows the first's
-    vector instead of buying its own."""
+    event per branch, and item chunks omit the restaurant name precisely so
+    the text is byte-identical across all of them.
+
+    Cross-restaurant vector reuse was removed deliberately: the three-dict
+    hot path it required (stale / borrowed / missing) cost more in
+    readability than it saved, and it was the only thing forcing the drain
+    loop to stay sequential. So each branch now buys its own vector for the
+    same sentence — the identical text below is what a future reuse pass
+    would key on if that trade is ever revisited.
+    """
     await _stage(sessions, "r1", _payload(branch_label="Downtown"))
     await _stage(sessions, "r2", _payload(branch_label="Airport"))
     clock.advance(31)
@@ -266,13 +273,17 @@ async def test_a_shared_dish_across_branches_is_embedded_once(drain, sessions, c
 
     dishes = [r for r in await _rows(sessions, item_chunks)]
     assert len(dishes) == 2
+    # Still byte-identical, and still the same vector — an embedding is a
+    # pure function of (text, model), so paying twice buys the same answer.
     assert dishes[0]["content_hash"] == dishes[1]["content_hash"]
     assert list(dishes[0]["embedding"]) == list(dishes[1]["embedding"])
-    # The dish once, plus each branch's own restaurant chunk (their labels
-    # differ, so those genuinely are two different texts).
+    dish = "Chicken Karahi\nWok-cooked.\nCategory: Mains\nTags: spicy\nCuisines: pakistani"
+    # The dish TWICE now — once per branch — plus each branch's own
+    # restaurant chunk, whose labels genuinely differ.
     assert sorted(embeddings.texts) == sorted(
         [
-            "Chicken Karahi\nWok-cooked.\nCategory: Mains\nTags: spicy\nCuisines: pakistani",
+            dish,
+            dish,
             "Biryani House — Downtown\nCuisines: pakistani",
             "Biryani House — Airport\nCuisines: pakistani",
         ]

@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import knowledge_epochs, knowledge_index_state, knowledge_pending
+from ..db import knowledge_epochs, knowledge_pending
 
 
 @dataclass(frozen=True)
@@ -141,53 +141,6 @@ class PendingRepo:
             )
         )
         return bool(cast("CursorResult[Any]", result).rowcount)
-
-
-class IndexStateRepo:
-    """Which vector space retrieval reads (FR-61)."""
-
-    SINGLETON = "current"
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._s = session
-
-    @property
-    def _dialect(self) -> str:
-        return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
-
-    async def ensure(self, *, model_version: str, now: datetime) -> None:
-        """Adopt this version if there is no opinion yet — and ONLY then.
-
-        Insert-if-absent rather than upsert, and the distinction is the
-        whole feature. An upsert here would mean that changing
-        `embedding_model` and restarting silently repoints every query at a
-        generation with zero rows in it: the index would answer nothing,
-        recover gradually as the drain caught up, and never report that it
-        had been wrong. Only the reindex moves this pointer.
-        """
-        insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
-        stmt = insert(knowledge_index_state).values(
-            id=self.SINGLETON, active_model_version=model_version, updated_at=now
-        )
-        await self._s.execute(
-            stmt.on_conflict_do_nothing(index_elements=[knowledge_index_state.c.id])
-        )
-
-    async def active(self) -> str | None:
-        return await self._s.scalar(
-            sa.select(knowledge_index_state.c.active_model_version).where(
-                knowledge_index_state.c.id == self.SINGLETON
-            )
-        )
-
-    async def activate(self, *, model_version: str, now: datetime) -> None:
-        """The cutover. Called by the reindex once every chunk exists under
-        the new version — never by a boot, a config change or a drain."""
-        await self._s.execute(
-            sa.update(knowledge_index_state)
-            .where(knowledge_index_state.c.id == self.SINGLETON)
-            .values(active_model_version=model_version, updated_at=now)
-        )
 
 
 class EpochRepo:

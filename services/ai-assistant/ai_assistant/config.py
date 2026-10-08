@@ -123,14 +123,8 @@ class Settings(BaseSettings):
     # starve the retrieval API sharing this event loop.
     knowledge_drain_batch: int = 20
 
-    # --- Rolling reindex (FR-61) ----------------------------------------
+    # --- Worker (B6 content studio) -------------------------------------
     celery_broker_url: str = ""
-    # Chunks per embed round trip, and round trips per invocation. The cap
-    # keeps one task from holding a worker for an hour on a large corpus:
-    # the operator (or a beat schedule) re-runs until `done`, and the work
-    # is resumable by construction so re-running is also the retry policy.
-    reindex_batch: int = 200
-    reindex_max_batches: int = 50
 
     # --- Retrieval (B2) -------------------------------------------------
     # An OVERRIDE for a specific deployment, not the mechanism: correct

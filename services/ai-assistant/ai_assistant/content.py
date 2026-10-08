@@ -96,9 +96,9 @@ async def generate(
 async def run_draft(*, store, generator, draft_id: str) -> str:
     """Generate one draft and settle its row. Raises for the task to catch.
 
-    Lives here rather than in `tasks.py` for the reason `run_reindex`
-    does: everything worth testing should need no broker and no Celery to
-    exercise, leaving the task as a shell that builds wiring and calls this.
+    Lives here rather than in `tasks.py` so that everything worth testing
+    needs no broker and no Celery to exercise, leaving the task as a shell
+    that builds wiring and calls this.
 
     The `queued` check is a courtesy, not the guard. The guard is in
     `store.complete`, which is conditional on the same status — execution

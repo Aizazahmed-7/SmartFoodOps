@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .adapters.attribution import AttributionRepo
 from .adapters.features import FeatureRepo
-from .adapters.repo import IndexStateRepo
 from .adapters.vector_store import PostgresVectorStore
 from .domain.popularity import WINDOW, rank
 from .domain.retrieval import Passage
@@ -25,8 +24,9 @@ log = get_logger("ai-assistant.recommend")
 
 
 class Recommender:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession], *, model_version: str) -> None:
         self._sessions = sessions
+        self._model_version = model_version
 
     async def record_shown(
         self, *, user_id: str, city: str, surface: str, basis: str, item_ids: Any
@@ -78,11 +78,11 @@ class Recommender:
         from datetime import UTC, datetime  # noqa: PLC0415 — a clock, not a dependency
 
         async with self._sessions() as session:
-            active = await IndexStateRepo(session).active()
-            if active is None:
-                return []
             return await FeatureRepo(session).co_ordered(
-                city=city, since=datetime.now(UTC) - WINDOW, model_version=active, limit=limit
+                city=city,
+                since=datetime.now(UTC) - WINDOW,
+                model_version=self._model_version,
+                limit=limit,
             )
 
     async def goes_with(self, *, item_ids: Sequence[str], city: str, limit: int) -> list[Passage]:
@@ -122,14 +122,13 @@ class Recommender:
         if not wanted:
             return []
         async with self._sessions() as session:
-            active = await IndexStateRepo(session).active()
-            if active is None:  # pragma: no cover — callers check first
-                return []
             store = PostgresVectorStore(session)
             found: list[Passage] = []
             for restaurant_id, item_id in wanted:
                 texts = await store.texts_by_item(
-                    item_ids=[item_id], model_version=active, restaurant_id=restaurant_id
+                    item_ids=[item_id],
+                    model_version=self._model_version,
+                    restaurant_id=restaurant_id,
                 )
                 if item_id in texts:
                     found.append(
@@ -162,10 +161,7 @@ class Recommender:
                 # worse than the baseline because it looks like it knows
                 # something.
                 return "popular", await self.popular(city=city, limit=limit, at=at)
-            active = await IndexStateRepo(session).active()
-            if active is None:  # pragma: no cover — a profile implies an index
-                return "popular", []
-            candidates = await repo.menu_attributes(city=city, model_version=active)
+            candidates = await repo.menu_attributes(city=city, model_version=self._model_version)
         if not candidates:
             return "popular", await self.popular(city=city, limit=limit, at=at)
         # Deduped BEFORE ranking too: `menu_attributes` yields one row per
@@ -175,7 +171,9 @@ class Recommender:
         for candidate in candidates:
             unique.setdefault(candidate.item_id, candidate)
         chosen = recommend(profile, list(unique.values()), limit)
-        return "taste", await self._passages([c.item_id for c in chosen], active, city=city)
+        return "taste", await self._passages(
+            [c.item_id for c in chosen], self._model_version, city=city
+        )
 
     async def _passages(
         self, item_ids: list[str], model_version: str, *, city: str
@@ -219,21 +217,19 @@ class Recommender:
 
         when = at or datetime.now(UTC)
         async with self._sessions() as session:
-            active = await IndexStateRepo(session).active()
-            if active is None:
-                # No index means no text to show, whatever the history says.
-                return []
             repo = FeatureRepo(session)
-            counted = await repo.popular_in(city=city, at=when, model_version=active)
+            counted = await repo.popular_in(city=city, at=when, model_version=self._model_version)
             ordered = rank(counted, limit)
             if not ordered:
                 # FR-80's floor: a city with no order history in this hour
                 # band still has a menu, and "never an empty response" is
                 # the requirement this endpoint exists for.
-                fallback = await repo.any_in(city=city, model_version=active, limit=limit)
-                return await self._passages(fallback, active, city=city)
+                fallback = await repo.any_in(
+                    city=city, model_version=self._model_version, limit=limit
+                )
+                return await self._passages(fallback, self._model_version, city=city)
             found = await PostgresVectorStore(session).texts_by_item(
-                item_ids=[p.item_id for p in ordered], model_version=active, city=city
+                item_ids=[p.item_id for p in ordered], model_version=self._model_version, city=city
             )
         seen: set[str] = set()
         passages: list[Passage] = []

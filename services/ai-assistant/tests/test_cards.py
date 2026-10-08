@@ -12,7 +12,6 @@ from typing import Any
 
 import pytest
 from ai_assistant.adapters.conversations import COMPLETE, STREAMING, ConversationRepo
-from ai_assistant.adapters.repo import IndexStateRepo
 from ai_assistant.cards import CardService
 from ai_assistant.db import item_chunks, metadata
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -77,7 +76,6 @@ async def _cards(service, *, message_id="msg_1", user="usr_1") -> list[dict[str,
 async def _answer(sessions, item_ids, *, user="usr_1", message_id="msg_1"):
     async with sessions() as session:
         repo = ConversationRepo(session)
-        await IndexStateRepo(session).ensure(model_version=VERSION, now=T0)
         await repo.ensure_conversation(
             conversation_id="cnv_1", user_id=user, city="springfield", now=T0
         )
@@ -133,7 +131,7 @@ async def test_a_cited_dish_becomes_a_card_priced_now(sessions):
     await _index(sessions, {"itm_raita": "rst_1"})
     catalog = FakeCatalog({"rst_1": _snapshot(_item())})
 
-    (card,) = await _cards(CardService(sessions, catalog))
+    (card,) = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert card["item_id"] == "itm_raita" and card["name"] == "Raita"
     assert card["price_cents"] == 350 and card["currency"] == "USD"
     assert card["orderable"] is True
@@ -151,7 +149,7 @@ async def test_cards_come_back_in_the_order_the_answer_cited_them(sessions):
             "rst_2": _snapshot(_item(), id="rst_2"),
         }
     )
-    cards = await _cards(CardService(sessions, catalog))
+    cards = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert [c["item_id"] for c in cards] == ["itm_raita", "itm_karahi"]
 
 
@@ -162,7 +160,7 @@ async def test_one_snapshot_call_per_restaurant(sessions):
     await _answer(sessions, ["itm_raita", "itm_karahi"])
     await _index(sessions, {"itm_raita": "rst_1", "itm_karahi": "rst_1"})
     catalog = FakeCatalog({"rst_1": _snapshot(_item(), _item("itm_karahi", "Karahi", 1200))})
-    await _cards(CardService(sessions, catalog))
+    await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert catalog.calls == [("rst_1", ["itm_raita", "itm_karahi"])]
 
 
@@ -176,7 +174,7 @@ async def test_a_restaurant_that_has_gone_costs_a_card_not_the_answer(sessions):
     await _index(sessions, {"itm_raita": "rst_1", "itm_karahi": "rst_gone"})
     catalog = FakeCatalog({"rst_1": _snapshot(_item())})  # rst_gone answers None
 
-    cards = await _cards(CardService(sessions, catalog))
+    cards = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert [c["item_id"] for c in cards] == ["itm_raita"]
 
 
@@ -184,7 +182,7 @@ async def test_an_item_the_index_no_longer_knows_is_skipped(sessions):
     await _answer(sessions, ["itm_raita", "itm_removed"])
     await _index(sessions, {"itm_raita": "rst_1"})
     catalog = FakeCatalog({"rst_1": _snapshot(_item())})
-    cards = await _cards(CardService(sessions, catalog))
+    cards = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert [c["item_id"] for c in cards] == ["itm_raita"]
 
 
@@ -194,7 +192,7 @@ async def test_an_86d_dish_is_shown_but_not_orderable(sessions):
     await _answer(sessions, ["itm_raita"])
     await _index(sessions, {"itm_raita": "rst_1"})
     catalog = FakeCatalog({"rst_1": _snapshot(_item(available=False))})
-    (card,) = await _cards(CardService(sessions, catalog))
+    (card,) = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert card["available"] is False and card["orderable"] is False
 
 
@@ -205,7 +203,7 @@ async def test_a_closed_kitchen_keeps_the_dish_available(sessions):
     await _answer(sessions, ["itm_raita"])
     await _index(sessions, {"itm_raita": "rst_1"})
     catalog = FakeCatalog({"rst_1": _snapshot(_item(), open_now=False)})
-    (card,) = await _cards(CardService(sessions, catalog))
+    (card,) = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert card["available"] is True  # the dish is fine
     assert card["open_now"] is False and card["orderable"] is False  # the kitchen is not
 
@@ -214,7 +212,7 @@ async def test_a_paused_restaurant_is_not_orderable(sessions):
     await _answer(sessions, ["itm_raita"])
     await _index(sessions, {"itm_raita": "rst_1"})
     catalog = FakeCatalog({"rst_1": _snapshot(_item(), status="paused")})
-    (card,) = await _cards(CardService(sessions, catalog))
+    (card,) = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert card["orderable"] is False
 
 
@@ -224,7 +222,7 @@ async def test_a_missing_open_now_is_not_read_as_closed(sessions):
     await _answer(sessions, ["itm_raita"])
     await _index(sessions, {"itm_raita": "rst_1"})
     catalog = FakeCatalog({"rst_1": _snapshot(_item(), open_now=None)})
-    (card,) = await _cards(CardService(sessions, catalog))
+    (card,) = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert card["orderable"] is True
 
 
@@ -235,14 +233,14 @@ async def test_somebody_elses_answer_is_not_readable(sessions):
     """None for both not-yours and not-found, so this cannot be used to
     discover which message ids exist."""
     await _answer(sessions, ["itm_raita"], user="usr_1")
-    service = CardService(sessions, FakeCatalog())
+    service = CardService(sessions, FakeCatalog(), model_version=VERSION)
     assert await service.for_message(message_id="msg_1", user_id="usr_2") is None
     assert await service.for_message(message_id="msg_nope", user_id="usr_1") is None
 
 
 async def test_an_answer_that_cited_nothing_has_no_cards(sessions):
     await _answer(sessions, [])
-    assert await _cards(CardService(sessions, FakeCatalog())) == []
+    assert await _cards(CardService(sessions, FakeCatalog(), model_version=VERSION)) == []
 
 
 # ── the catalog hop ─────────────────────────────────────────────────
@@ -347,7 +345,7 @@ async def test_a_dish_with_a_required_choice_is_flagged(sessions):
     sized = _item()
     sized["modifier_groups"] = [{"id": "g1", "name": "Size", "min_select": 1, "options": []}]
     catalog = FakeCatalog({"rst_1": _snapshot(sized)})
-    (card,) = await _cards(CardService(sessions, catalog))
+    (card,) = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert card["needs_choice"] is True
 
 
@@ -357,7 +355,7 @@ async def test_a_dish_with_only_optional_extras_is_addable(sessions):
     extras = _item()
     extras["modifier_groups"] = [{"id": "g1", "name": "Extras", "min_select": 0, "options": []}]
     catalog = FakeCatalog({"rst_1": _snapshot(extras)})
-    (card,) = await _cards(CardService(sessions, catalog))
+    (card,) = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert card["needs_choice"] is False and card["orderable"] is True
 
 
@@ -379,7 +377,7 @@ async def test_restaurants_are_priced_concurrently(sessions):
             inflight -= 1
             return _snapshot(_item(item_ids[0], "Dish"), id=restaurant_id)
 
-    await _cards(CardService(sessions, Slow()))
+    await _cards(CardService(sessions, Slow(), model_version=VERSION))
     assert peak == 3  # all three in flight at once, not one after another
 
 
@@ -389,7 +387,7 @@ async def test_a_recommendation_is_priced_by_the_same_path_as_a_citation(session
     from ai_assistant.domain.retrieval import Passage
 
     catalog = FakeCatalog({"rst_1": _snapshot(_item())})
-    cards = await CardService(sessions, catalog).for_items(
+    cards = await CardService(sessions, catalog, model_version=VERSION).for_items(
         passages=[Passage("itm_raita", "rst_1", "Raita")]
     )
     assert [c["item_id"] for c in cards] == ["itm_raita"]
@@ -398,7 +396,7 @@ async def test_a_recommendation_is_priced_by_the_same_path_as_a_citation(session
 
 async def test_recommending_nothing_calls_no_catalog(sessions):
     catalog = FakeCatalog()
-    assert await CardService(sessions, catalog).for_items(passages=[]) == []
+    assert await CardService(sessions, catalog, model_version=VERSION).for_items(passages=[]) == []
     assert catalog.calls == []
 
 
@@ -420,7 +418,7 @@ async def test_a_real_card_carries_its_own_price_floor(sessions):
         }
     ]
     catalog = FakeCatalog({"rst_1": _snapshot(priced)})
-    (card,) = await _cards(CardService(sessions, catalog))
+    (card,) = await _cards(CardService(sessions, catalog, model_version=VERSION))
     # Base 350, cheapest mandatory Size +300.
     assert card["price_cents"] == 350 and card["min_total_cents"] == 650
 
@@ -429,5 +427,5 @@ async def test_a_card_with_no_required_options_floors_at_its_price(sessions):
     await _answer(sessions, ["itm_raita"])
     await _index(sessions, {"itm_raita": "rst_1"})
     catalog = FakeCatalog({"rst_1": _snapshot(_item())})
-    (card,) = await _cards(CardService(sessions, catalog))
+    (card,) = await _cards(CardService(sessions, catalog, model_version=VERSION))
     assert card["min_total_cents"] == card["price_cents"] == 350

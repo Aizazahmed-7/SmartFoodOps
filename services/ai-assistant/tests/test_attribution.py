@@ -228,7 +228,7 @@ async def test_failing_to_record_a_showing_does_not_cost_the_customer_the_list(s
         async def __aexit__(self, *exc):  # pragma: no cover — never entered
             return False
 
-    recommender = Recommender(sessions)
+    recommender = Recommender(sessions, model_version="m:512")
     recommender._sessions = cast(Any, lambda: Broken())  # noqa: SLF001
     assert (
         await recommender.record_shown(
@@ -241,7 +241,7 @@ async def test_failing_to_record_a_showing_does_not_cost_the_customer_the_list(s
 async def test_a_showing_records_and_returns_its_id(sessions):
     from ai_assistant.recommend import Recommender
 
-    shown_id = await Recommender(sessions).record_shown(
+    shown_id = await Recommender(sessions, model_version="m:512").record_shown(
         user_id="usr_1", city="islamabad", surface="answer", basis="", item_ids=["itm_a"]
     )
     assert shown_id is not None and shown_id.startswith("rec_")

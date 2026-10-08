@@ -14,7 +14,7 @@ and nothing else: retrieval is B2's, and a port guessed a milestone early is
 worse than a port declared on time.
 """
 
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol
@@ -259,21 +259,6 @@ class VectorStore(Protocol):
         The drain diffs against this to decide what to EMBED, never what to
         write: rows are rewritten unconditionally because Postgres writes are
         cheap and provider calls are not (FR-58, FR-59).
-        """
-        ...
-
-    async def vectors_by_hash(
-        self, *, content_hashes: Iterable[str], model_version: str
-    ) -> dict[str, list[float]]:
-        """Vectors already computed for these exact texts, ANYWHERE in the
-        index — not just this restaurant's rows.
-
-        An embedding is a pure function of (text, model), so a vector
-        computed for one restaurant is the correct vector for another with
-        the same text, not an approximation of it. That is what makes the
-        ADR-0028 fan-out affordable: a base dish inherited by twelve
-        branches is twelve rows and one provider call, because item chunks
-        deliberately omit the restaurant's name (ADR-0033 §4).
         """
         ...
 

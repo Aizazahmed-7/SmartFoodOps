@@ -98,8 +98,6 @@ seed:
 eval: ## Evaluation rubric against the golden set (FR-104) — nightly in CI, never per-PR
 	uv run --package eval python -m eval
 
-reindex: ## Rolling reindex of the knowledge index (FR-61) — re-run until done=True
-	uv run --package ai-assistant python -m ai_assistant.reindex
 
 riders: ## Simulated couriers against the live stack: make riders [RIDERS=2 ACCEPT_RATE=1.0]
 	uv run --package rider-sim python -m rider_sim.main

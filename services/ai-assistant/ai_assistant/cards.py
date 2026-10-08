@@ -18,7 +18,6 @@ from smartfood_otel import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .adapters.conversations import ConversationRepo
-from .adapters.repo import IndexStateRepo
 from .adapters.vector_store import PostgresVectorStore
 from .domain.combos import minimum_total
 from .domain.retrieval import Passage
@@ -43,9 +42,16 @@ class CardService:
     is not a reason to fail the read.
     """
 
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], catalog: Any) -> None:
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        catalog: Any,
+        *,
+        model_version: str,
+    ) -> None:
         self._sessions = sessions
         self._catalog = catalog
+        self._model_version = model_version
 
     async def for_message(self, *, message_id: str, user_id: str) -> list[dict[str, Any]] | None:
         """None when the message is not this customer's, or does not exist —
@@ -57,11 +63,8 @@ class CardService:
             message = await repo.message(message_id)
             if message is None or not message.item_ids:  # pragma: no cover — owner implies a row
                 return []
-            active = await IndexStateRepo(session).active()
-            if active is None:  # pragma: no cover — an answer implies an index
-                return []
             by_restaurant = await PostgresVectorStore(session).restaurants_for(
-                item_ids=message.item_ids, model_version=active
+                item_ids=message.item_ids, model_version=self._model_version
             )
 
         return await self._price(message.item_ids, by_restaurant)

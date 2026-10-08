@@ -23,7 +23,6 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .adapters.repo import IndexStateRepo
 from .db import item_chunks, order_items
 
 WINDOW_DAYS = 90
@@ -82,24 +81,9 @@ class RestaurantFacts:
 
 
 class RestaurantFactsReader:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, sessions: async_sessionmaker[AsyncSession], *, model_version: str) -> None:
         self._sessions = sessions
-
-    async def _active(self, session: AsyncSession) -> str | None:
-        """The generation retrieval is actually reading, resolved per call.
-
-               NOT the configured one. Every other index reader in this service
-               asks `IndexStateRepo` for the same reason: an operator who changes
-               `embedding_model` and restarts leaves the old generation active
-               until a reindex finishes, and a reader pinned to config would query
-               a version with no rows. For the studio that showed up as "N not
-               found on this menu" against the admin's own menu — and worse, as a
-               promotion quoting an undercounted order total, which is precisely
-               the fabricated statistic this reader exists to prevent.
-        has been built yet — no rows to read, and
-               certainly not a licence to read every generation at once.
-        """
-        return await IndexStateRepo(session).active()
+        self._model_version = model_version
 
     async def for_restaurant(self, claim: str, *, now: datetime | None = None) -> RestaurantFacts:
         now = now or datetime.now(UTC)
@@ -110,9 +94,6 @@ class RestaurantFactsReader:
         # assumed, because a claim may name a BRAND (ADR-0028) and
         # `order_items` only knows branches.
         async with self._sessions() as session:
-            version = await self._active(session)
-            if version is None:
-                return RestaurantFacts(0, 0, 0, 0, [])
             branches = [
                 row.restaurant_id
                 for row in (
@@ -120,7 +101,7 @@ class RestaurantFactsReader:
                         sa.select(item_chunks.c.restaurant_id)
                         .where(
                             sa.and_(
-                                item_chunks.c.model_version == version,
+                                item_chunks.c.model_version == self._model_version,
                                 sa.or_(
                                     item_chunks.c.restaurant_id == claim,
                                     item_chunks.c.brand_id == claim,
@@ -184,7 +165,9 @@ class RestaurantFactsReader:
                     .limit(TOP_DISHES)
                 )
             ).all()
-            names = await self._names([row.item_id for row in top], branches, session, version)
+            names = await self._names(
+                [row.item_id for row in top], branches, session, self._model_version
+            )
 
         return RestaurantFacts(
             orders=int(totals[0] or 0),
@@ -208,7 +191,7 @@ class RestaurantFactsReader:
             await session.execute(
                 sa.select(item_chunks.c.item_id, item_chunks.c.name).where(
                     sa.and_(
-                        item_chunks.c.model_version == version,
+                        item_chunks.c.model_version == self._model_version,
                         item_chunks.c.restaurant_id.in_(branches),
                         item_chunks.c.item_id.in_(item_ids),
                     )

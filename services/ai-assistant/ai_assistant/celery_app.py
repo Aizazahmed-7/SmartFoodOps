@@ -43,7 +43,6 @@ celery_app.conf.update(
     enable_utc=True,
     broker_connection_retry_on_startup=True,
     task_routes={
-        "assistant.reindex": {"queue": "assistant.reindex"},
         # Its own queue, not the reindex's: a reindex is hours of batch
         # work and a draft is a restaurant admin waiting at a console.
         # Sharing one queue would put every draft behind a corpus

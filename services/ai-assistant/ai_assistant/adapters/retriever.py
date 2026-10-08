@@ -23,7 +23,6 @@ from ..domain.retrieval import (
     lexical_sql,
     vector_sql,
 )
-from .repo import IndexStateRepo
 from .vector_store import PostgresVectorStore
 
 LEG_OVERFETCH = 4
@@ -44,10 +43,12 @@ class PostgresRetriever:
         embeddings: EmbeddingPort,
         *,
         ef_search: int | None = None,
+        model_version: str,
     ) -> None:
         self._sessions = sessions
         self._embeddings = embeddings
         self._ef_search = ef_search
+        self._model_version = model_version
 
     async def retrieve(self, *, query: str, filters: Filters, limit: int) -> Retrieved:
         """A sessionmaker rather than a session, matching catalog's
@@ -60,17 +61,10 @@ class PostgresRetriever:
     async def _retrieve(
         self, session: AsyncSession, query: str, filters: Filters, limit: int
     ) -> Retrieved:
-        active = await IndexStateRepo(session).active()
-        if active is None:
-            # No index has ever been built. Returning empty is the honest
-            # answer and, more importantly, stops us paying a provider to
-            # embed a query with nothing to match it against.
-            return Retrieved(items=(), restaurants=())
-
         await self._apply_settings(session)
         (vector,) = await self._embeddings.embed([query])
         fetch = limit * LEG_OVERFETCH
-        common = {"model_version": active, "q": query, "leg_limit": fetch}
+        common = {"model_version": self._model_version, "q": query, "leg_limit": fetch}
         # pgvector binds a vector from its text form; going through the
         # driver's list adaptation would need the dialect's type on a raw
         # textual query, which is exactly what this SQL avoids.
@@ -92,11 +86,8 @@ class PostgresRetriever:
         if not candidates:
             return []
         async with self._sessions() as session:
-            active = await IndexStateRepo(session).active()
-            if active is None:  # pragma: no cover — no index, no candidates
-                return []
             found = await PostgresVectorStore(session).texts_for(
-                chunk_ids=[c.chunk_id for c in candidates], model_version=active
+                chunk_ids=[c.chunk_id for c in candidates], model_version=self._model_version
             )
         return [
             Passage(
