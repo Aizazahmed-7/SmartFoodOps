@@ -22,7 +22,6 @@ Three properties the rest of the pipeline depends on:
 """
 
 import hashlib
-import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -86,18 +85,6 @@ def _slugs(values: object) -> list[str]:
 
 def _hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
-
-
-def fingerprint(payload: Mapping[str, Any]) -> str:
-    """A stable identity for one staged payload.
-
-    `sort_keys` because JSON object order is not semantic: the same menu
-    re-serialised with its keys shuffled is the same menu, and treating it
-    as new work would cost a re-drain every time an upstream library
-    changed its dict ordering. The drain's guarded completion compares this,
-    so the only thing that must be true is that DIFFERENT states differ.
-    """
-    return _hash(json.dumps(payload, sort_keys=True, default=str))
 
 
 def _restaurant_text(name: str, branch_label: str | None, cuisines: Sequence[str]) -> str:

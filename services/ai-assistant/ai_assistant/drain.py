@@ -145,7 +145,7 @@ class KnowledgeDrain:
                 now=now,
             )
             kept = await PendingRepo(session).complete(
-                restaurant_id=pending.restaurant_id, payload_hash=pending.payload_hash
+                restaurant_id=pending.restaurant_id, payload=pending.payload
             )
             # The answer cache's fence, moved in the same transaction as the
             # chunks it fences (FR-74). Only when something ACTUALLY changed:
@@ -205,7 +205,7 @@ class KnowledgeDrain:
     async def _complete(self, pending: Pending) -> None:
         async with self._sessions() as session:
             await PendingRepo(session).complete(
-                restaurant_id=pending.restaurant_id, payload_hash=pending.payload_hash
+                restaurant_id=pending.restaurant_id, payload=pending.payload
             )
             await session.commit()
 

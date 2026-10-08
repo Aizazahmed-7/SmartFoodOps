@@ -24,7 +24,6 @@ class Pending:
 
     restaurant_id: str
     payload: dict[str, Any]
-    payload_hash: str
     first_seen_at: datetime
 
 
@@ -41,7 +40,6 @@ class PendingRepo:
         *,
         restaurant_id: str,
         payload: dict[str, Any],
-        payload_hash: str,
         now: datetime,
         debounce_s: float,
     ) -> None:
@@ -53,7 +51,9 @@ class PendingRepo:
 
         - `payload` is overwritten, because catalog's events are full-state
           snapshots and the newest one supersedes every earlier one
-          completely. There is no merge to do and no history to keep.
+          completely. There is no merge to do and no history to keep. It is
+          also what `complete` guards on, so overwriting it is what makes a
+          mid-drain edit survive.
         - `due_at` keeps the EARLIER of the two. That makes this a fixed
           window rather than a sliding one: an owner editing twenty dishes
           over five minutes is indexed once, `debounce_s` after the first
@@ -76,7 +76,6 @@ class PendingRepo:
         stmt = insert(knowledge_pending).values(
             restaurant_id=restaurant_id,
             payload=payload,
-            payload_hash=payload_hash,
             due_at=due_at,
             first_seen_at=now,
         )
@@ -85,7 +84,6 @@ class PendingRepo:
                 index_elements=[knowledge_pending.c.restaurant_id],
                 set_={
                     "payload": stmt.excluded.payload,
-                    "payload_hash": stmt.excluded.payload_hash,
                     "due_at": sa.case(
                         (
                             knowledge_pending.c.due_at < stmt.excluded.due_at,
@@ -114,13 +112,12 @@ class PendingRepo:
             Pending(
                 restaurant_id=row.restaurant_id,
                 payload=row.payload,
-                payload_hash=row.payload_hash,
                 first_seen_at=row.first_seen_at,
             )
             for row in rows
         ]
 
-    async def complete(self, *, restaurant_id: str, payload_hash: str) -> bool:
+    async def complete(self, *, restaurant_id: str, payload: dict[str, Any]) -> bool:
         """Remove a drained row — but ONLY if it still holds the payload we
         drained. Returns whether it did.
 
@@ -128,16 +125,19 @@ class PendingRepo:
         transaction open. An unguarded delete would silently discard any
         edit that landed in that gap, and nothing would report it: the index
         would simply stay wrong until the restaurant happened to change
-        again. Keyed on the payload's fingerprint, a mid-flight edit leaves
+        again. Compared against the PAYLOAD itself, a mid-flight edit leaves
         the row in place and the next tick picks it up.
 
-        A redelivery of the SAME payload fingerprints identically and is
-        therefore correctly treated as already done.
+        A redelivery of the SAME payload compares equal and is therefore
+        correctly treated as already done. The comparison is sound on both
+        dialects: JSONB equality is semantic, so a payload whose keys
+        Postgres re-ordered on write still matches, and sqlite's JSON
+        round-trips deterministically.
         """
         result = await self._s.execute(
             sa.delete(knowledge_pending).where(
                 knowledge_pending.c.restaurant_id == restaurant_id,
-                knowledge_pending.c.payload_hash == payload_hash,
+                knowledge_pending.c.payload == payload,
             )
         )
         return bool(cast("CursorResult[Any]", result).rowcount)

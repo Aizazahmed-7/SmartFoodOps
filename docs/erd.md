@@ -559,8 +559,7 @@ authored here; nothing is a source of truth.
 erDiagram
     knowledge_pending {
         text restaurant_id PK "ONE row per restaurant — this IS the debounce"
-        json payload "catalog's full-state snapshot; latest wins"
-        text payload_hash "fingerprint — the guard on the drain's delete"
+        json payload "catalog's full-state snapshot, latest wins —<br>AND the guard on the drain's completing delete"
         timestamptz due_at "kept EARLIEST on conflict: fixed window, not sliding"
         timestamptz first_seen_at "never updated — answers 'waiting how long?'"
     }

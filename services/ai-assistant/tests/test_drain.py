@@ -19,7 +19,6 @@ from ai_assistant.adapters.embeddings_fake import FakeEmbeddings
 from ai_assistant.adapters.repo import PendingRepo
 from ai_assistant.consumers import KnowledgeHandler
 from ai_assistant.db import item_chunks, knowledge_pending, metadata, restaurant_chunks
-from ai_assistant.domain.knowledge import fingerprint
 from ai_assistant.drain import KnowledgeDrain
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -113,7 +112,7 @@ def drain(sessions, embeddings, clock):
 
 async def _stage(sessions, restaurant_id="r1", payload=None, now=T0):
     """Through the real handler, so the tests exercise the same staging path
-    production does — fingerprint included."""
+    production does."""
     await KnowledgeHandler(sessions, debounce_s=30.0, clock=lambda: now).handle(
         {
             "aggregate_type": "restaurant",
@@ -359,9 +358,8 @@ async def test_an_edit_arriving_mid_drain_is_not_lost(sessions, embeddings, cloc
 
 
 async def test_a_redelivery_of_the_same_payload_still_completes(drain, sessions, clock):
-    """The other half: an identical payload fingerprints identically, so it
-    is correctly treated as work already done rather than re-queued
-    forever."""
+    """The other half: an identical payload compares equal, so it is
+    correctly treated as work already done rather than re-queued forever."""
     await _stage(sessions)
     clock.advance(31)
     await drain.tick()
@@ -404,7 +402,6 @@ async def test_a_hand_staged_unindexable_row_is_cleared_not_retried(drain, sessi
         await PendingRepo(session).stage(
             restaurant_id="b1",
             payload=payload,
-            payload_hash=fingerprint(payload),
             now=T0,
             debounce_s=30.0,
         )

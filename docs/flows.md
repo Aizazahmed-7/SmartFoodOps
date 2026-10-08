@@ -769,7 +769,7 @@ sequenceDiagram
     KH->>KH: is_indexable(payload)?
     Note over KH: false for a BRAND (a template, not a place — every branch gets<br/>its own event anyway) and for a branch with no city (every query<br/>is geo-scoped, so the row would be unreachable). Returning<br/>commits the offset: queueing work the drain would discard would<br/>make the backlog lie about how stale the index is
     KH->>PQ: INSERT .. ON CONFLICT (restaurant_id) DO UPDATE
-    Note over PQ: THE DEBOUNCE, and it is deliberately asymmetric:<br/>payload  → overwritten (full-state snapshots supersede)<br/>due_at   → keeps the EARLIER (fixed window, not sliding)<br/>first_seen_at → never touched ("waiting 4 minutes" stays answerable)<br/>One upsert, not read-then-write: two partitions or a redelivery<br/>racing a drain would otherwise interleave into a lost update
+    Note over PQ: THE DEBOUNCE, and it is deliberately asymmetric:<br/>payload  → overwritten (full-state snapshots supersede), which<br/>           is also what makes a mid-drain edit survive the delete<br/>due_at   → keeps the EARLIER (fixed window, not sliding)<br/>first_seen_at → never touched ("waiting 4 minutes" stays answerable)<br/>One upsert, not read-then-write: two partitions or a redelivery<br/>racing a drain would otherwise interleave into a lost update
 
     loop every 5s
         DR->>PQ: SELECT .. WHERE due_at <= now ORDER BY due_at LIMIT batch
@@ -788,8 +788,8 @@ sequenceDiagram
     rect rgb(0,0,0)
         Note over DR,VS: ONE TX
         DR->>VS: upsert restaurant chunk + item chunks, then reconcile<br/>(delete chunks for items no longer on the menu)
-        DR->>PQ: DELETE WHERE restaurant_id=:id AND payload_hash=:hash
-        Note over PQ: GUARDED on the fingerprint. The drain spent seconds embedding<br/>with no transaction open, an unguarded delete would silently<br/>discard an edit that landed in that gap, and the index would<br/>stay wrong until the restaurant happened to change again.<br/>rowcount 0 → the row stays and the next tick picks it up
+        DR->>PQ: DELETE WHERE restaurant_id=:id AND payload=:payload
+        Note over PQ: GUARDED on the PAYLOAD itself. The drain spent seconds embedding<br/>with no transaction open, an unguarded delete would silently<br/>discard an edit that landed in that gap, and the index would<br/>stay wrong until the restaurant happened to change again.<br/>rowcount 0 → the row stays and the next tick picks it up
         DR->>DR: bump the answer-cache epoch for every city it WAS in and IS in
         Note over DR: only when something retrieval can SEE changed — an 86'd dish<br/>leaves every chunk's TEXT identical while changing results.<br/>A pass that re-confirms an unchanged menu must not cold-start<br/>the whole city's cache on a catalog heartbeat
     end

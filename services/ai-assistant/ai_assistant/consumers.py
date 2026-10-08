@@ -52,7 +52,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .adapters.attribution import AttributionRepo
 from .adapters.features import FeatureRepo
 from .adapters.repo import PendingRepo
-from .domain.knowledge import fingerprint, is_indexable
+from .domain.knowledge import is_indexable
 from .metrics import RECOMMENDATIONS
 
 log = get_logger("ai-assistant.consumers")
@@ -109,7 +109,6 @@ class KnowledgeHandler:
             await PendingRepo(session).stage(
                 restaurant_id=restaurant_id,
                 payload=payload,
-                payload_hash=fingerprint(payload),
                 now=self._clock(),
                 debounce_s=self._debounce_s,
             )

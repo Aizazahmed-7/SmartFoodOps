@@ -190,16 +190,14 @@ knowledge_pending = sa.Table(
     # so the LATEST one is sufficient on its own — the drain needs no
     # history, no catalog call, and cannot read a state newer than the
     # event it is acting on.
+    # Also the guard on the drain's delete. The drain reads this row, spends
+    # seconds embedding outside any transaction, and must not then delete
+    # work that arrived while it was away — so it deletes WHERE the payload
+    # is still the one it drained. JSONB equality is semantic, so a payload
+    # Postgres re-ordered on write still matches; sqlite's JSON round-trips
+    # deterministically. ADR-0039's rule exactly: key the write on the state
+    # it protects.
     sa.Column("payload", sa.JSON().with_variant(JSONB, "postgresql"), nullable=False),
-    # The fingerprint of the payload above, refreshed on EVERY staging —
-    # unlike due_at and first_seen_at, which deliberately keep their oldest
-    # values. It exists so the drain can finish with a GUARDED delete: the
-    # drain reads a row, spends seconds embedding outside any transaction,
-    # and must not then delete work that arrived while it was away. Deleting
-    # on restaurant_id alone would lose that edit until the NEXT one, with
-    # nothing anywhere reporting a stale index. ADR-0039's rule exactly —
-    # key the write on the state it protects, never on a counter.
-    sa.Column("payload_hash", sa.Text, nullable=False),
     # A FIXED window, not a sliding one: on conflict this keeps the EARLIER
     # due_at, so the clock starts at the first unprocessed change. A trailing
     # debounce would restart on every keystroke of a long menu edit and could
