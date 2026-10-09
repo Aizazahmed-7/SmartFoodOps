@@ -46,6 +46,17 @@ class RedisRealtime:
     async def publish(self, channel: str, data: str) -> None:
         await self._r.publish(channel, data)  # pyright: ignore[reportUnknownMemberType]
 
+    async def readers(self, channel: str) -> int:
+        """How many subscribers are attached to `channel` right now.
+
+        Pub/sub drops anything published into an empty channel — correct for
+        a live hint, wrong for a token stream whose first frame may be the
+        whole answer. `wait_for_reader` uses this so a turn never speaks
+        into an empty room.
+        """
+        counts = await self._r.pubsub_numsub(channel)  # pyright: ignore[reportUnknownMemberType]
+        return int(counts[0][1]) if counts else 0
+
     @asynccontextmanager
     async def subscription(self, channel: str) -> AsyncIterator["Subscription"]:
         pubsub = self._r.pubsub()

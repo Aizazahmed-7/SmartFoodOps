@@ -15,8 +15,7 @@ from ai_assistant.adapters.conversations import (
     STREAMING,
     ConversationRepo,
 )
-from ai_assistant.db import conversations, message_chunks, messages, metadata
-from sqlalchemy.exc import IntegrityError
+from ai_assistant.db import conversations, messages, metadata
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -84,48 +83,9 @@ async def test_messages_without_a_key_never_collide(sessions):
     assert await _message(sessions, "m2") is True
 
 
-# ── the replay buffer (FR-69) ───────────────────────────────────────
-
-
-async def test_a_reconnect_reads_exactly_what_it_missed(sessions):
-    await _conversation(sessions)
-    await _message(sessions)
-    async with sessions() as s:
-        repo = ConversationRepo(s)
-        for seq, text in [(1, "Try "), (2, "the "), (3, "Raita")]:
-            await repo.append_chunk(message_id="m1", seq=seq, content=text, now=T0)
-        await s.commit()
-
-    async with sessions() as s:
-        repo = ConversationRepo(s)
-        assert await repo.chunks_after(message_id="m1", seq_upto=0) == [
-            (1, "Try "),
-            (2, "the "),
-            (3, "Raita"),
-        ]
-        # A reader that already has 2 gets only what follows — the `seq`
-        # filter is what pays for subscribing before snapshotting.
-        assert await repo.chunks_after(message_id="m1", seq_upto=2) == [(3, "Raita")]
-        assert await repo.chunks_after(message_id="m1", seq_upto=9) == []
-
-
-async def test_a_reused_seq_is_refused_by_the_database(sessions):
-    """A producer that reused a seq would corrupt a reconnect silently, so
-    the composite PK refuses instead of trusting the caller."""
-    await _conversation(sessions)
-    await _message(sessions)
-    async with sessions() as s:
-        await ConversationRepo(s).append_chunk(message_id="m1", seq=1, content="a", now=T0)
-        await s.commit()
-    with pytest.raises(IntegrityError):  # the PK, not a hopeful catch-all
-        async with sessions() as s:
-            await ConversationRepo(s).append_chunk(message_id="m1", seq=1, content="b", now=T0)
-            await s.commit()
-
-
 async def test_a_finished_message_carries_the_assembled_answer(sessions):
-    """Nothing downstream reconstructs a message by concatenating chunks
-    (ADR-0042 §6) — the status tells a reconnect to replay and close."""
+    """`content` is the answer's only durable form: chunks are published and
+    never stored, so a conversation reloaded tomorrow reads this row."""
     await _conversation(sessions)
     await _message(sessions)
     async with sessions() as s:
@@ -190,14 +150,12 @@ async def test_history_is_scoped_to_its_conversation(sessions):
 # ── retention (NFR-32) ──────────────────────────────────────────────
 
 
-async def test_purging_a_conversation_takes_its_messages_and_chunks(sessions):
-    """The 90-day purge is ONE delete. A retention rule that needs someone to
-    remember a second table is a rule that fails an audit, not a test."""
+async def test_purging_a_conversation_takes_its_messages(sessions):
+    """The 90-day purge is ONE delete. Dropping the chunk table removed the
+    second thing a retention rule had to remember; the CASCADE onto
+    `messages` is what is left of it, and it still has to hold."""
     await _conversation(sessions)
     await _message(sessions)
-    async with sessions() as s:
-        await ConversationRepo(s).append_chunk(message_id="m1", seq=1, content="a", now=T0)
-        await s.commit()
 
     async with sessions() as s:
         await s.execute(sa.delete(conversations).where(conversations.c.id == "c1"))
@@ -205,4 +163,3 @@ async def test_purging_a_conversation_takes_its_messages_and_chunks(sessions):
 
     async with sessions() as s:
         assert await s.scalar(sa.select(sa.func.count()).select_from(messages)) == 0
-        assert await s.scalar(sa.select(sa.func.count()).select_from(message_chunks)) == 0

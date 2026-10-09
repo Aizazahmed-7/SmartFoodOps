@@ -114,7 +114,7 @@ Priorities: **P0** = required for acceptance; **P1** = completeness; **P2** = st
 |---|---|---|---|
 | FR-67 | Conversational food Q&A | P0 | `POST /v1/assistant/messages` (auth `customer`\|`restaurant_admin`, `Idempotency-Key`); conversation history persisted; answers cite real dishes with live prices |
 | FR-68 | Streaming responses | P0 | Tokens stream over SSE within the existing ticket-auth pattern; time-to-first-token p95 < 1.5 s (NFR-21); the stream path is registered in `stream_prefixes` so it never enters the HTTP latency histogram |
-| FR-69 | Stream resume without loss or duplication | P0 | Generation runs decoupled from the connection; chunks carry a `seq`; the stream subscribes **before** it snapshots and drops `seq <= seq_upto`. Kill the connection mid-answer → reconnect resumes exactly (demonstrated live) |
+| FR-69 | Stream resume without loss or duplication | P0 | **Built and demonstrated, then withdrawn (2026-10-09).** Resume worked exactly as written — the connection could be killed mid-answer and rejoined with no gap or duplicate — and was removed with `message_chunks` (migration `0021`, ADR-0042 amendment) because it is the most intricate machinery in B3 and buys an experience rather than a fact. **What is retained:** generation still runs decoupled from the connection, so a disconnect never kills a turn, and the finished answer is always readable from `messages.content`. **What replaced the ordering guarantee:** the turn waits for a subscriber before its first frame, because pub/sub drops a frame published into an empty channel and a refusal is ready in under a millisecond |
 | FR-70 | Grounded output | P0 | Every `item_id` in an answer came from the retrieved candidate set; violations are dropped and counted on `assistant_ungrounded_total`; the metric is 0 across the eval run |
 | FR-71 | Prompt-injection resistance | P0 | Restaurant- and customer-authored text is delimited and labelled as data; the eval suite plants injection strings in menu descriptions and feedback and asserts the instruction is not followed |
 | FR-72 | Safety refusals | P0 | Allergen-safety and medical questions are refused with a hand-off, never answered from `item_tags`; declared tags may be *surfaced*, never asserted as safety |
@@ -210,7 +210,7 @@ against the running stack — CI never runs compose, so live proof is the standa
 | **B0 — Foundations** | ADRs 0029–0031, this PRD, service skeleton, all ports + fakes, `ModelRouter`, budget breaker, metrics, compose/Makefile/CI wiring, eval harness skeleton | Part A on `main`, green | `make up-ai` green; `/healthz`+`/readyz`+`/metrics`; an internal echo route streams tokens live from **both** providers; 100% coverage with the fake LLM and no key present |
 | **B1 — Knowledge pipeline** | Chunking, `EmbeddingPort`, pgvector schema + per-city HNSW, `assistant.knowledge.v1` | B0 exit **+ ADR-0032 accepted** — it picks the pgvector route (pinned image, rebuilt volume) and the vector substrate; the obvious tag swap is a glibc downgrade the existing volume rejects (found live in B0, `docs/local-dev.md` §3). ADR-0033 (chunking + embedding projection) lands *inside* B1, with the code it describes | Live menu edit visible in `menu_chunks` inside the debounce window; **truncate the table, replay the topic, the index rebuilds identically**; duplicate-delivery + poison tests green |
 | **B2 — Semantic discovery** | Hybrid retriever + RRF, internal retrieval API, Catalog `HybridSearch` adapter with lexical fallback, FE search | B1 exit | Vague-query golden set passes; retrieval p99 < 150 ms; **kill the assistant → `/v1/search` still answers** |
-| **B3 — Food Q&A + streaming** | LangGraph turn, SSE token relay, conversation store, grounding validator, guardrails, FE chat panel, first `assistant.events` | B2 exit; **ADR-0042** (stream-resume contract) and **ADR-0043** (grounding/guardrail posture) accepted before the code lands | Streamed grounded answer end-to-end; **connection killed mid-answer resumes with no gap or duplicate**; planted injection not followed; provider down → 503 and the panel degrades |
+| **B3 — Food Q&A + streaming** | LangGraph turn, SSE token relay, conversation store, grounding validator, guardrails, FE chat panel, first `assistant.events` | B2 exit; **ADR-0042** (stream-resume contract) and **ADR-0043** (grounding/guardrail posture) accepted before the code lands | Streamed grounded answer end-to-end; planted injection not followed; provider down → 503 and the panel degrades. *(The resume exit criterion — connection killed mid-answer rejoins with no gap or duplicate — was met live, then withdrawn with FR-69.)* |
 | **B4 — Recommendations** | `order_item_facts`, taste profiles, budget/cuisine/combo recommenders, acceptance tracking, FE surfaces | B3 exit | Every recommendation exists, is available, and is priced live; acceptance rate measurable end to end |
 | **B5 — Explanation engine** | Order milestone timestamps + events, reason resolver, stage-based ETA, template cache + renderer, FE on order detail | B4 exit | A stalled order yields the correct `ReasonCode` and a truthful explanation; **`llm_api_key=""` → templates still answer** |
 | **B6 — Restaurant content studio** | Feedback capture, draft generation, summarisation, approve→publish, Celery queues + DLQ, partner console tab | B5 exit | Draft → edit → publish updates the menu **and** re-embeds; a parked job is visible and replayable; a summary cites only real rows |
@@ -237,7 +237,7 @@ delivering milestone. Reviewers: this is the completeness check against the Part
 | FR-66 | Reranking | ai-assistant, cheap-tier model | `RERANK` task | B2 (P2) |
 | FR-67 | Conversational Q&A | ai-assistant `api/`, `domain/graph` | `GENERATE` task | B3 |
 | FR-68 | Streaming responses | ai-assistant, `smartfood-realtime`, nginx `/sse/assistant` | `sfo:assist:{message_id}` | B3 |
-| FR-69 | Stream resume | `smartfood-realtime.stream_relay`, `message_chunks` | `sfo:assist:{message_id}` | B3 |
+| FR-69 | Stream resume | *withdrawn — see §3.3* | — | B3 |
 | FR-70 | Grounded output | ai-assistant `domain/grounding` | — | B3 |
 | FR-71 | Injection resistance | ai-assistant prompt assembly, eval suite | — | B3 |
 | FR-72 | Safety refusals | ai-assistant `domain/policy` | — | B3 |
@@ -290,8 +290,8 @@ already exists. It **does not hold** in four places, listed here rather than qui
 | 3 | `restaurant_load` read endpoint (FR-85) | `active`/`capacity` is the only kitchen-congestion signal in the system and is not published anywhere | Inventory | B5 |
 | 4 | `order_feedback` capture (FR-91) | The brief asks for feedback summaries; Part A captures **no customer feedback of any kind**. Summarising proxies (cancel reasons, delivery times) would be dishonest framing | Order, FE | B6 |
 
-Plus these mechanical additions, which change no Part A behaviour: `stream_relay()` in
-`smartfood-realtime`; `Topic.ASSISTANT_EVENTS` and the new `EventType` members; an edge rule
+Plus these mechanical additions, which change no Part A behaviour: `wait_for_reader()` in
+`smartfood-realtime` (`stream_relay()` was added here and later removed with FR-69); `Topic.ASSISTANT_EVENTS` and the new `EventType` members; an edge rule
 and `AI` rate-limit class; an `/sse/assistant` nginx lane; the ADR-0014 ladder split;
 `SERVICE_PACKAGES` in the layer-contracts scan; and the usual compose/Makefile/pyright/cov
 wiring.

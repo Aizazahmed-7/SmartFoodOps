@@ -18,7 +18,7 @@ number below came off Gemini through the full stack.
 | 3.2 | Safety refusals, PII redaction, retrieved-text fencing | `domain/policy.py` |
 | 3.3 | Citation validation — markers, not names | `domain/grounding.py` |
 | 3.4 | The turn as a LangGraph `StateGraph`, four short circuits | `domain/graph/turn.py` |
-| 3.5 | `stream_relay` (subscribe → snapshot → drop), the publisher | `smartfood_realtime/stream.py`, `turns.py` |
+| 3.5 | `stream_relay` (subscribe → snapshot → drop), the publisher | `smartfood_realtime/stream.py`, `turns.py` — *`stream_relay` later removed with FR-69; the lane now uses `stream_events` plus `wait_for_reader`* |
 | 3.6 | `POST /v1/assistant/messages`, the SSE stream, re-ticketing | `api/chat.py`, `chat.py` |
 | 3.7 | `AssistantInteraction` through the outbox (ADR-0044) | `turns.py`, `adapters/conversations.py` |
 | 3.8 | Two-tier answer cache and its fence (ADR-0045) | `domain/answers.py`, `adapters/answer_cache.py`, `cache.py` |
@@ -145,6 +145,10 @@ of them would have surfaced from unit tests:
 - **`EventSource` can never send `Last-Event-ID` here.** Its automatic
   reconnect reuses the spent ticket, so it 401s; a manual reconnect cannot
   set headers. `?after=` exists because of this. ADR-0042 amended.
+  *(Later note, 2026-10-09: resume was withdrawn entirely — `?after=`, the
+  re-ticket endpoint and `message_chunks` are all gone. The 401 on automatic
+  reconnect is now the intended end of a stream rather than a problem to
+  route around. See ADR-0042's amendment.)*
 - **A failed turn emitted nothing**, rendering as a blank bubble that
   appears and then stops.
 - **Markers leaked into the live stream.** `validate()` needs a whole

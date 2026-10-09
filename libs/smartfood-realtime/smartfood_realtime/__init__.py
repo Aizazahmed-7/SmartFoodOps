@@ -15,15 +15,13 @@ structurally, not by convention.
 """
 
 from .bus import RedisRealtime, Subscription
-from .stream import Snapshot, StreamConfig, sse_chunk, sse_event, stream_events, stream_relay
+from .stream import StreamConfig, sse_event, stream_events, wait_for_reader
 
 __all__ = [
     "RedisRealtime",
-    "Snapshot",
     "StreamConfig",
     "Subscription",
-    "sse_chunk",
     "sse_event",
     "stream_events",
-    "stream_relay",
+    "wait_for_reader",
 ]

@@ -80,7 +80,7 @@ class Graph:
 async def _turn(sessions, graph=None, **kwargs):
     await run_turn(
         graph=graph or Graph(),
-        publisher=Publisher(sessions, Bus().publish, message_id="msg_1"),
+        publisher=Publisher(Bus().publish, message_id="msg_1"),
         sessions=sessions,
         message_id="msg_1",
         question="something light?",

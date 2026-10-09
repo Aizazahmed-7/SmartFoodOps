@@ -22,7 +22,7 @@ import httpx
 from fastapi import FastAPI
 from smartfood_api import install_error_handlers, mount_observability
 from smartfood_otel import RequestContextMiddleware, setup_logging, setup_tracing
-from smartfood_realtime import StreamConfig
+from smartfood_realtime import StreamConfig, wait_for_reader
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -105,6 +105,20 @@ def _publish(bus: Any) -> Any:
         await bus.publish(channel, data)
 
     return publish
+
+
+def _ready(bus: Any, settings: Settings) -> Any:
+    """The turn's wait-for-a-reader hook.
+
+    Lives here rather than inside `Publisher` so the service stays testable
+    with a plain callable and no bus at all — a test that does not care about
+    the race passes `ready=None` and nothing waits.
+    """
+
+    async def ready(channel: str) -> bool:
+        return await wait_for_reader(bus, channel, timeout_s=settings.reader_wait_seconds)
+
+    return ready
 
 
 def _graph_builder(app: FastAPI, settings: Settings) -> Any:
@@ -468,6 +482,7 @@ def create_app(
         graph_builder or _graph_builder(app, settings),
         history=settings.history_limit,
         shown=_record_answer_shown(app),
+        ready=_ready(own_realtime, settings) if own_realtime is not None else None,
     )
     app.state.cards = CardService(sessions, CatalogClient(settings.catalog_base_url, internal_http))
     app.state.kitchen_load = InventoryClient(settings.inventory_base_url, internal_http)

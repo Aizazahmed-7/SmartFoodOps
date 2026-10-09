@@ -45,8 +45,8 @@ needs a bounded loop. Expressing that as a graph is clearer than expressing it a
 | All I/O | our ports | ADR-0029, ADR-0030, ADR-0032 |
 
 **The checkpointer stays off, deliberately.** A half-finished turn is not resumed; it is
-abandoned and the user re-asks. The durable record is the `messages` row and its
-`message_chunks` — written by us, in our schema, with our migration story — not a
+abandoned and the user re-asks. The durable record is the `messages` row —
+written by us, in our schema, with our migration story — not a
 framework-owned state blob whose format is a dependency's private business. This also keeps
 the turn free of the one thing that would make it a workflow: nothing in it needs
 compensating, because nothing in it has an external effect.
@@ -113,6 +113,10 @@ moves it to a broker.
 The split stands. The Celery column's workload list does not: the rolling
 reindex (FR-61) and the explanation-rewrite jobs were removed, and taste
 profiles and content drafts are what remain of batch work.
+
+(The `message_chunks` table that sentence used to name alongside `messages`
+was itself dropped with FR-69 — migration `0021`, ADR-0042 amendment. The
+argument is unchanged and now simpler: one row, ours, is the record.)
 
 An embedding-model change is now a **rebuild, not a job**: truncate the
 chunk tables, reset the `assistant.knowledge.v1` consumer group, and replay

@@ -255,36 +255,13 @@ messages = sa.Table(
     # What the answer CITED, after grounding dropped the fabrications
     # (FR-70). Stored rather than re-derived: the markers are stripped from
     # `content` before anybody reads it, so the ids are unrecoverable from
-    # the text — and a reader who reconnects after the turn finished would
-    # otherwise get the prose with no cards under it. A list, not a table:
-    # it is read whole, written once, and never queried by member.
+    # the text — and a reloaded conversation would otherwise render the
+    # prose with no cards under it. A list, not a table: it is read whole,
+    # written once, and never queried by member.
     sa.Column("item_ids", sa.JSON, nullable=False, server_default="[]"),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
 )
 sa.Index("ix_messages_conversation", messages.c.conversation_id, messages.c.created_at)
-
-message_chunks = sa.Table(
-    "message_chunks",
-    metadata,
-    sa.Column(
-        "message_id", sa.Text, sa.ForeignKey("messages.id", ondelete="CASCADE"), primary_key=True
-    ),
-    # Monotonic per message, and the composite PK is what enforces it: a
-    # producer that reused a seq would corrupt a reconnect silently
-    # (ADR-0042), so the database refuses instead.
-    sa.Column("seq", sa.Integer, primary_key=True),
-    sa.Column("content", sa.Text, nullable=False),
-    sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
-)
-
-
-"""One index over every cached question, not one per fence.
-
-The same reasoning as ADR-0032 §5: a partial index per city would be DDL
-keyed on data, and `city` is a cheap filter on top of an ANN scan. The fence
-columns are indexed separately so the planner can use either.
-"""
-
 
 # ── B4: order features (FR-75, FR-80) ───────────────────────────────
 

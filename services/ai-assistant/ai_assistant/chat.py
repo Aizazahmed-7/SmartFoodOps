@@ -12,11 +12,10 @@ from typing import Any
 from uuid import uuid4
 
 from smartfood_otel import get_logger
-from smartfood_realtime import Snapshot
 
-from .adapters.conversations import COMPLETE, FAILED, STREAMING, ConversationRepo
+from .adapters.conversations import COMPLETE, STREAMING, ConversationRepo
 from .domain.ports import Message
-from .turns import Publisher, frame, run_turn
+from .turns import Publisher, run_turn
 
 log = get_logger("ai-assistant.chat")
 
@@ -29,8 +28,8 @@ class ChatService:
     """What the routes are allowed to know about turns.
 
     The API layer may not import adapters (the layer contract), and it has no
-    business owning a task handle either — so starting a turn, snapshotting
-    one, and keeping the background tasks alive all live here.
+    business owning a task handle either — so starting a turn and keeping
+    its background task alive both live here.
     """
 
     def __init__(
@@ -41,12 +40,14 @@ class ChatService:
         *,
         history: int = 6,
         shown: Any = None,
+        ready: Any = None,
     ) -> None:
         self._sessions = sessions
         self._publish = publish
         self._build_graph = build_graph
         self._history = history
         self._shown = shown
+        self._ready = ready
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def start(
@@ -95,9 +96,9 @@ class ChatService:
             )
             # History is what came BEFORE this question, so both of this
             # turn's own rows are excluded. Keeping the user row in would
-            # send the question to the model twice — once as context, once
-            # as the question — and would make every turn look like a reply,
-            # which disables the answer cache outright (ADR-0045).
+            # send the question to the model twice — once as context and
+            # once as the question — and the assistant row is still empty,
+            # which would put a blank turn in front of the model.
             history = [
                 m
                 for m in await repo.history(conversation_id=conversation_id, limit=self._history)
@@ -105,7 +106,7 @@ class ChatService:
             ]
             await session.commit()
 
-        publisher = Publisher(self._sessions, self._publish, message_id=message_id)
+        publisher = Publisher(self._publish, message_id=message_id, ready=self._ready)
         task = asyncio.create_task(
             run_turn(
                 graph=self._build_graph(publisher.emit),
@@ -125,34 +126,6 @@ class ChatService:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return message_id
-
-    async def owner(self, message_id: str) -> str | None:
-        async with self._sessions() as session:
-            return await ConversationRepo(session).owner_of(message_id)
-
-    async def snapshot(self, *, message_id: str, seq_upto: int) -> Snapshot:
-        """What a connecting reader has missed, and whether more is coming.
-
-        A finished turn gets a terminal frame APPENDED here, because the one
-        the live reader saw was published while this reader was away and
-        nothing republishes it. Without it the relay replays the prose and
-        then simply stops — and an `EventSource` cannot tell a finished
-        answer from a dropped connection, so it reconnects forever.
-
-        The citations come off the row for the same reason: the markers are
-        stripped from the text before anybody reads it, so a reader arriving
-        late would get the prose with no cards under it (ADR-0042 §5).
-        """
-        async with self._sessions() as session:
-            repo = ConversationRepo(session)
-            message = await repo.message(message_id)
-            chunks = await repo.chunks_after(message_id=message_id, seq_upto=seq_upto)
-        done = message is None or message.status in (COMPLETE, FAILED)
-        if done:
-            last = chunks[-1][0] if chunks else seq_upto
-            item_ids = message.item_ids if message is not None else ()
-            chunks = [*chunks, (last + 1, frame(seq=last + 1, done=True, item_ids=item_ids))]
-        return Snapshot(chunks=chunks, done=done)
 
 
 def _as_message(stored: Any) -> Message:

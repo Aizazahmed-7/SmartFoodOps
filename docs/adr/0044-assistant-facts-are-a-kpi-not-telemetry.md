@@ -82,9 +82,11 @@ disagree, the store and the dashboard disagree.
 
 **Negative**
 
-- A row per turn in `assistant_db`. Small next to `message_chunks`, but it
-  is a second thing the 90-day purge has to cover, and unlike chunks it does
-  not cascade from a conversation — the outbox is flat by design.
+- A row per turn in `assistant_db`. Small, but it is a second thing the
+  90-day purge has to cover, and it does not cascade from a conversation —
+  the outbox is flat by design. (This originally read "small next to
+  `message_chunks`"; that table was dropped with FR-69, so the outbox row is
+  now the only per-turn write besides the message itself.)
 - Staging inside the settle transaction makes that transaction do two
   writes on the answer's critical path. It is off the request path (the turn
   is detached), so the cost lands on the turn's tail rather than on a

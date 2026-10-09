@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     stream_heartbeat_seconds: float = 15.0
     stream_lifetime_seconds: float = 120.0
 
+    # How long a turn waits for its reader before publishing into the void.
+    # There is no stored replay, so a frame sent before the browser attaches
+    # is lost — and a refusal is ready in under a millisecond. Two seconds is
+    # far more than the round trip needs and still bounded, because a client
+    # that never connects must not pin a turn open.
+    reader_wait_seconds: float = 2.0
+
     # Generation concurrency cap (ADR-0031): the turn runs as a background
     # task in this process, so this is what stops a chat burst from
     # starving the retrieval API on the same event loop.

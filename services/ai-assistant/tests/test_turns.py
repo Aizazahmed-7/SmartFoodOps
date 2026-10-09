@@ -1,18 +1,17 @@
-"""Running a turn detached, and getting its tokens out (ADR-0042).
+"""Running a turn detached, and getting its tokens out.
 
-The ordering under test is write-then-publish. It looks like an
-implementation detail and is the difference between a reconnecting reader
-finding the chunk it missed and being told it never existed.
+Chunks are published and never stored, so there is no replay to verify.
+What replaces it is the wait: the bus drops a frame published into a
+channel nobody has subscribed to, and a refusal is ready before the
+browser has finished reading the response that told it where to listen.
 """
 
 import json
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import pytest
-import sqlalchemy as sa
 from ai_assistant.adapters.conversations import COMPLETE, FAILED, ConversationRepo
-from ai_assistant.db import message_chunks, metadata
+from ai_assistant.db import metadata
 from ai_assistant.turns import (
     TRUNCATED,
     UNAVAILABLE,
@@ -20,7 +19,6 @@ from ai_assistant.turns import (
     channel_for,
     is_done,
     run_turn,
-    seq_of,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -57,16 +55,20 @@ async def sessions():
 class Bus:
     def __init__(self):
         self.published: list[tuple[str, str]] = []
-        self.rows_at_publish: list[int] = []
-        # Set by the ordering test to observe the table AT the moment of
-        # publish — the only way to prove write-before-publish rather than
-        # assert it by reading the code.
-        self.count_rows: Callable[[], Awaitable[int]] | None = None
 
     async def publish(self, channel: str, data: str) -> None:
-        if self.count_rows is not None:
-            self.rows_at_publish.append(await self.count_rows())
         self.published.append((channel, data))
+
+
+class Reader:
+    """A `ready` hook that records when it was asked and what for."""
+
+    def __init__(self) -> None:
+        self.waited_for: list[str] = []
+
+    async def __call__(self, channel: str) -> bool:
+        self.waited_for.append(channel)
+        return True
 
 
 class Graph:
@@ -82,68 +84,77 @@ class Graph:
         return self.state
 
 
-async def _rows(sessions) -> list[tuple[int, str]]:
-    async with sessions() as s:
-        result = await s.execute(
-            sa.select(message_chunks.c.seq, message_chunks.c.content).order_by(message_chunks.c.seq)
-        )
-        return [(r.seq, r.content) for r in result]
+# ── publishing, and waiting for somebody to publish TO ──────────────
 
 
-# ── the ordering (ADR-0042 §2) ──────────────────────────────────────
-
-
-async def test_a_chunk_is_written_before_it_is_published(sessions):
-    """THE ordering. A chunk on the bus that is not yet in the table is one
-    a reconnecting reader cannot be told about."""
-    bus = Bus()
-
-    async def count() -> int:
-        return len(await _rows(sessions))
-
-    bus.count_rows = count
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+async def test_nothing_is_published_before_a_reader_is_attached():
+    """The replacement for the stored replay. Pub/sub drops a frame sent
+    into an empty channel, so the wait has to happen BEFORE the first
+    publish — not beside it, and not after."""
+    bus, ready = Bus(), Reader()
+    publisher = Publisher(bus.publish, message_id="m1", ready=ready)
+    assert ready.waited_for == []  # constructing one waits for nothing
     await publisher.emit("hello")
-    await publisher.emit("world")
-    # At the moment of each publish, the row was already there.
-    assert bus.rows_at_publish == [1, 2]
+    assert ready.waited_for == ["sfo:assist:m1"]
+    assert len(bus.published) == 1
 
 
-async def test_sequences_are_monotonic_from_one(sessions):
-    publisher = Publisher(sessions, Bus().publish, message_id="m1")
+async def test_the_reader_is_waited_for_exactly_once():
+    """Per turn, not per token. A poll on every frame would put the bus in
+    front of every chunk of every answer."""
+    bus, ready = Bus(), Reader()
+    publisher = Publisher(bus.publish, message_id="m1", ready=ready)
     for text in ("a", "b", "c"):
         await publisher.emit(text)
-    assert [seq for seq, _ in await _rows(sessions)] == [1, 2, 3]
+    await publisher.close()
+    assert ready.waited_for == ["sfo:assist:m1"]
 
 
-async def test_the_published_frame_matches_the_stored_one(sessions):
-    """A reader reconstructs from both, so they must be the same bytes."""
+async def test_a_turn_that_only_refuses_still_waits_before_the_terminal_frame():
+    """THE case this exists for. A safety refusal emits nothing through the
+    graph, so `close()` is the first and only thing on the bus — and it is
+    published in under a millisecond, before any browser could have
+    subscribed. Without the wait in `close` too, the reader gets silence and
+    heartbeats to the lifetime."""
+    bus, ready = Bus(), Reader()
+    await Publisher(bus.publish, message_id="m1", ready=ready).close()
+    assert ready.waited_for == ["sfo:assist:m1"]
+    assert is_done(bus.published[-1][1])
+
+
+async def test_a_publisher_with_no_ready_hook_simply_publishes():
+    """A test (or a deployment with no bus) must not have to supply one."""
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
-    await publisher.emit("hello")
-    stored = (await _rows(sessions))[0][1]
-    assert bus.published[0][1] == stored
-    assert json.loads(stored) == {"seq": 1, "text": "hello", "done": False}
+    await Publisher(bus.publish, message_id="m1").emit("hello")
+    assert len(bus.published) == 1
 
 
-async def test_the_channel_is_per_message(sessions):
+async def test_the_frame_carries_text_and_no_sequence_number():
+    """`seq` existed so a reconnecting reader could drop what it already
+    held. There is no reconnect, so a sequence number would be a field
+    nothing reads and one more thing to keep consistent."""
+    bus = Bus()
+    await Publisher(bus.publish, message_id="m1").emit("hello")
+    assert json.loads(bus.published[0][1]) == {"text": "hello", "done": False}
+
+
+async def test_the_channel_is_per_message():
     """A channel carrying a whole conversation would deliver another turn's
     tokens into the middle of this one."""
     bus = Bus()
-    await Publisher(sessions, bus.publish, message_id="m1").emit("x")
+    await Publisher(bus.publish, message_id="m1").emit("x")
     assert bus.published[0][0] == channel_for("m1") == "sfo:assist:m1"
 
 
-async def test_the_terminal_frame_is_published_but_not_stored(sessions):
-    """A late reader learns the message finished from its status, not from a
-    row — two sources of truth for one fact eventually disagree."""
+async def test_the_terminal_frame_carries_the_citations():
+    """A client renders cards from these, priced live — never from the
+    prose, which has had its markers stripped."""
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+    publisher = Publisher(bus.publish, message_id="m1")
     await publisher.emit("hello")
-    await publisher.close()
-    assert len(await _rows(sessions)) == 1
+    await publisher.close(["itm_a"])
     assert is_done(bus.published[-1][1])
-    assert seq_of(bus.published[-1][1]) == 2
+    assert json.loads(bus.published[-1][1])["item_ids"] == ["itm_a"]
 
 
 # ── the detached turn ───────────────────────────────────────────────
@@ -151,7 +162,7 @@ async def test_the_terminal_frame_is_published_but_not_stored(sessions):
 
 async def test_a_completed_turn_records_the_assembled_answer(sessions):
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+    publisher = Publisher(bus.publish, message_id="m1")
 
     async def emitting(state):
         await publisher.emit("Try the ")
@@ -178,7 +189,7 @@ async def test_an_answer_no_token_carried_is_still_sent(sessions):
     """A refusal and a no-match are produced without a model, so nothing was
     emitted — without this the panel shows an empty bubble and closes."""
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+    publisher = Publisher(bus.publish, message_id="m1")
     await run_turn(
         graph=Graph({"answer": "I can't advise on allergies.", "refusal_reason": "allergen"}),
         publisher=publisher,
@@ -194,7 +205,7 @@ async def test_a_failed_turn_marks_the_message_and_closes_the_stream(sessions):
     """It runs detached, so there is no caller to raise at. A reader watching
     a dead generation forever is worse than one told it broke."""
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+    publisher = Publisher(bus.publish, message_id="m1")
     await run_turn(
         graph=Graph(raises=RuntimeError("provider down")),
         publisher=publisher,
@@ -218,7 +229,7 @@ async def test_a_turn_that_fails_mid_answer_keeps_what_it_already_said(sessions)
     sentences has already put them on the reader's screen, and re-emitting
     over them would make the panel contradict itself."""
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+    publisher = Publisher(bus.publish, message_id="m1")
     await publisher.emit("Raita is light. ")  # the graph got this far
     await run_turn(
         graph=Graph(raises=RuntimeError("provider died")),
@@ -245,7 +256,7 @@ async def test_a_turn_that_fails_mid_answer_keeps_what_it_already_said(sessions)
 
 async def test_the_stream_is_closed_even_when_the_turn_succeeds(sessions):
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+    publisher = Publisher(bus.publish, message_id="m1")
     await run_turn(
         graph=Graph(),
         publisher=publisher,
@@ -263,7 +274,7 @@ async def test_cancellation_is_not_swallowed(sessions):
     import asyncio
 
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+    publisher = Publisher(bus.publish, message_id="m1")
     with pytest.raises(asyncio.CancelledError):
         await run_turn(
             graph=Graph(raises=asyncio.CancelledError()),
@@ -281,7 +292,7 @@ async def test_an_ungrounded_citation_is_counted(sessions):
     from ai_assistant.metrics import UNGROUNDED
 
     before = UNGROUNDED._value.get()
-    publisher = Publisher(sessions, Bus().publish, message_id="m1")
+    publisher = Publisher(Bus().publish, message_id="m1")
     await run_turn(
         graph=Graph({"answer": "Try it.", "item_ids": [], "dropped": 2}),
         publisher=publisher,
@@ -297,7 +308,7 @@ async def test_closing_flushes_text_held_behind_an_unfinished_marker(sessions):
     """A model that stopped mid-marker left real characters in the buffer.
     Closing without flushing would silently drop the end of the answer."""
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+    publisher = Publisher(bus.publish, message_id="m1")
     await publisher.emit("Try the [item:itm_ab")
     # Only the fragment is held — the prose before it went out at once,
     # because no amount of further text can turn it into a marker.
@@ -308,11 +319,11 @@ async def test_closing_flushes_text_held_behind_an_unfinished_marker(sessions):
     assert is_done(bus.published[-1][1])
 
 
-async def test_a_marker_never_reaches_the_reader_or_the_replay_table(sessions):
-    """One strip, before the row is written, so a reconnect cannot read
-    different text than the reader already saw."""
+async def test_a_marker_never_reaches_the_reader():
+    """One strip, on the way out, so the opaque id the model cites is never
+    something a customer sees."""
     bus = Bus()
-    publisher = Publisher(sessions, bus.publish, message_id="m1")
+    publisher = Publisher(bus.publish, message_id="m1")
     for chunk in (" [item:itm_e8", "d9] R", "aita."):
         await publisher.emit(chunk)
     await publisher.close(item_ids=["itm_raita"])
@@ -320,5 +331,4 @@ async def test_a_marker_never_reaches_the_reader_or_the_replay_table(sessions):
     # No leading space either: the marker opened the answer, and an answer
     # that starts with a blank is a rendering bug in every panel.
     assert live == "Raita."
-    assert "".join(json.loads(c)["text"] for _, c in await _rows(sessions)) == "Raita."
     assert json.loads(bus.published[-1][1])["item_ids"] == ["itm_raita"]

@@ -671,38 +671,51 @@ erDiagram
         slugs item_ids "what the answer CITED, after grounding"
         timestamptz created_at
     }
-    message_chunks {
-        text message_id PK "FK, ON DELETE CASCADE"
-        int seq PK "monotonic per message — the composite PK enforces it"
-        text content "one SSE frame, verbatim"
-        timestamptz created_at
-    }
     conversations ||--o{ messages : "CASCADE"
-    messages ||--o{ message_chunks : "CASCADE"
 ```
 
-**The CASCADEs are a retention mechanism, not a convenience.** NFR-32 purges
-a conversation after 90 days, and *a retention rule that requires remembering
+**The CASCADE is a retention mechanism, not a convenience.** NFR-32 purges a
+conversation after 90 days, and *a retention rule that requires remembering
 to delete a second table is a rule that fails an audit rather than a test*.
-Deleting the conversation row takes its messages and their chunks with it.
+Deleting the conversation row takes its messages with it.
 
-**`messages.content` versus `message_chunks`.** Two representations of the
-same answer, and they are not redundant: `content` is the assembled, durable
-record, and nothing downstream reconstructs a message by concatenating
-chunks. The chunks exist only to serve a reconnect (ADR-0042 §6).
-
-**`message_chunks (message_id, seq)` composite PK.** A producer that reused a
-sequence number would corrupt a reconnect silently, so the database refuses
-instead of trusting the producer.
+**`messages.content` is the answer's only durable form.** Tokens are
+published to the bus and never stored, so this row is what a conversation
+reloaded tomorrow reads — and it is written once, by the guarded
+`finish_message`, from the grounded answer.
 
 **`messages.item_ids` is stored rather than re-derived.** The `[item:...]`
 markers are stripped from `content` before anybody reads it, so the ids are
-unrecoverable from the text — a reader reconnecting after the turn finished
+unrecoverable from the text — a reader loading the conversation later
 would otherwise get the prose with no cards under it.
 
-**`messages.status`** is what a reconnect reads to know whether to
-replay-and-close or replay-and-follow, and it is what makes a turn that died
-mid-generation distinguishable from one still running.
+**`messages.status`** is the guard on `finish_message` — the `UPDATE` carries
+`WHERE status = 'streaming'`, so the turn that settles the row is the only
+one that stages an analytics fact beside it. It is also what makes a turn
+that died mid-generation distinguishable from one still running.
+
+### What is deliberately NOT here: the replay buffer
+
+A third table, `message_chunks`, held one row per SSE frame so a reader that
+reconnected mid-answer could be replayed what it missed. It was **removed**
+(migration `0021`), and with it the whole resume contract: ADR-0042,
+`stream_relay`, the per-frame `seq`, `Last-Event-ID`/`?after=`, and the
+re-ticket endpoint.
+
+**There is no resume.** A reader that disconnects has lost the stream. What
+survives is `messages.content`, so reloading the conversation shows the
+finished answer — just not the rest of it arriving token by token.
+
+The one thing this cost had to be paid back. The bus is pub/sub, so a frame
+published into a channel with no subscriber is *dropped, not queued*, and
+the replay used to cover the window between the POST returning and the
+browser subscribing. A generated answer spends hundreds of milliseconds in
+retrieval and a provider, so the reader normally wins that race — but **a
+safety refusal and an empty retrieval are answered with no model at all**,
+within a millisecond of the turn starting. Those are exactly the answers
+that would have been lost. The turn therefore waits for a subscriber before
+its first frame (`wait_for_reader`), bounded, and gives up rather than
+pinning a turn open for a client that closed the tab.
 
 ### What is deliberately NOT here: the answer cache
 

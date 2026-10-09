@@ -1,13 +1,12 @@
 """The conversation store (ADR-0042).
 
-Two readers with different needs share these tables, and the split is what
-the API shape is for: a TURN appends (a question, then chunks, then the
-assembled answer), while a RECONNECT only ever reads — what was already
-said, and from which `seq`.
+A turn writes a question, reserves a row for its answer, and settles that
+row once the answer exists. Nothing here stores the stream itself: chunks
+are published and never persisted, so the assembled `content` is the only
+durable form an answer has.
 
-Nothing here decides anything. The monotonic `seq`, the write-before-publish
-ordering and the status transitions are the turn's business; this is where
-they land.
+Nothing here decides anything either. The status transitions are the turn's
+business; this is where they land.
 """
 
 from collections.abc import Sequence
@@ -23,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import conversations, message_chunks, messages, outbox
+from ..db import conversations, messages, outbox
 
 STREAMING = "streaming"
 COMPLETE = "complete"
@@ -112,16 +111,6 @@ class ConversationRepo:
         result = await self._s.execute(stmt)
         return bool(cast("CursorResult[Any]", result).rowcount)
 
-    async def append_chunk(self, *, message_id: str, seq: int, content: str, now: datetime) -> None:
-        """Persist one chunk. Called BEFORE the chunk is published to the bus
-        (ADR-0042 §2): a chunk on the bus that is not yet here is one a
-        reconnecting reader cannot be told about."""
-        await self._s.execute(
-            message_chunks.insert().values(
-                message_id=message_id, seq=seq, content=content, created_at=now
-            )
-        )
-
     async def finish_message(
         self, *, message_id: str, content: str, status: str, item_ids: Sequence[str] = ()
     ) -> bool:
@@ -164,7 +153,7 @@ class ConversationRepo:
             now=now,
         )
 
-    # ── the reconnect's reads ───────────────────────────────────────
+    # ── reads ───────────────────────────────────────────────────────
 
     async def message(self, message_id: str) -> Message | None:
         row = (
@@ -202,16 +191,6 @@ class ConversationRepo:
             .select_from(messages.join(conversations))
             .where(messages.c.id == message_id)
         )
-
-    async def chunks_after(self, *, message_id: str, seq_upto: int) -> list[tuple[int, str]]:
-        """The replay buffer: everything already written past the reader's
-        position, in order. `seq_upto=0` is a fresh reader and gets all of it."""
-        rows = await self._s.execute(
-            sa.select(message_chunks.c.seq, message_chunks.c.content)
-            .where(message_chunks.c.message_id == message_id, message_chunks.c.seq > seq_upto)
-            .order_by(message_chunks.c.seq)
-        )
-        return [(row.seq, row.content) for row in rows]
 
     async def history(self, *, conversation_id: str, limit: int) -> Sequence[Message]:
         """The most recent turns, oldest-first for the prompt.

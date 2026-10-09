@@ -1,6 +1,6 @@
 # 0042 — The stream-resume contract: subscribe, then snapshot, then drop
 
-**Status**: Accepted (2026-09-21)
+**Status**: Superseded by the amendment below (2026-10-09) — implemented and proven, then removed with FR-69. The ordering argument is retained.
 
 ## Context
 
@@ -158,3 +158,46 @@ and the reader sees an answer with a hole in the middle that nothing reports.
 load; a reader population where reconnects are rare enough that the table
 earns nothing; or generation moving out of the API process, which would make
 the bus the only path and force this to be reconsidered end to end.
+
+
+## Amendment (2026-10-09) — resume was removed; the gap it covered was not
+
+Everything above shipped and was demonstrated live. It is now gone:
+`message_chunks` (migration `0021`), `stream_relay` and `Snapshot` in
+smartfood-realtime, the per-frame `seq`, `Last-Event-ID` / `?after=`, and the
+re-ticket endpoint that §5 called the difference between FR-69 working in a
+browser and not working at all.
+
+**Why.** Resume is the most intricate thing in B3 and it buys an experience,
+not a fact: the answer survives a disconnect either way, in
+`messages.content`. What it cost was a table on the hot path of every token,
+a sequence number that had to be unique across two producers that do not
+exist, a second endpoint whose only job was to re-authorize a stream, and a
+relay function in a shared library with exactly one caller. A reader that
+drops now reloads and sees the finished answer.
+
+**What did NOT go away is §2's real subject.** This ADR is usually
+remembered for "subscribe, then snapshot" — but the reason that ordering
+existed is that **pub/sub drops a frame published into an empty channel**,
+and that is still true with no snapshot to subscribe before. The window just
+moved: it is now between the POST returning and the browser opening the
+stream.
+
+That window is survivable for a generated answer, which spends hundreds of
+milliseconds in retrieval and a provider. It is NOT survivable for the two
+answers this system produces without a model at all — a safety refusal
+(§ADR-0043) and an empty retrieval — which are ready within a millisecond of
+the turn starting. Those would be published into an empty room and lost, and
+the reader would heartbeat to the stream lifetime seeing nothing: the exact
+silent-loss failure §3 warned about, arriving through a different door.
+
+So the producer now waits for a consumer — `wait_for_reader`, bounded, once
+per turn, before the first frame. Giving up is not an error: a client that
+closed the tab must not pin a turn open, and the durable row is written
+regardless.
+
+**Retained for whoever reinstates resume**: subscribe BEFORE you snapshot,
+because a duplicate is removable from something the reader holds and a gap is
+not; a terminal frame must end a stream whatever its sequence; and resume is
+per-MESSAGE, so a cursor from another message must cost a replay, never a
+hang.

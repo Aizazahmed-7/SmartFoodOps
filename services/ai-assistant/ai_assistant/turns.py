@@ -6,10 +6,15 @@ so the socket is not allowed to own it. A reader who never connects,
 disconnects, or reconnects three times changes nothing about what is being
 written.
 
-Each chunk goes to the table FIRST and the bus SECOND. The window between
-those two calls is the only moment a chunk exists and is unreplayable, and
-doing it the other way round would widen that window to "until the write
-lands" — which is exactly when a reconnecting reader asks.
+Chunks are published and never stored. There is no resume: a reader who
+disconnects mid-answer has lost the stream, and the durable record is the
+assembled `messages` row the turn writes at the end.
+
+That makes one thing load-bearing which used to be covered by the replay —
+the bus is pub/sub, so a frame published before the reader subscribes is
+DROPPED. `Publisher` therefore waits for a reader before its first frame
+(`wait_for_reader`), because a refusal and an empty retrieval are answered
+with no model at all and would otherwise be published into an empty room.
 """
 
 import asyncio
@@ -39,18 +44,18 @@ def channel_for(message_id: str) -> str:
     return f"sfo:assist:{message_id}"
 
 
-def frame(*, seq: int, text: str = "", done: bool = False, item_ids: Sequence[str] = ()) -> str:
+def frame(*, text: str = "", done: bool = False, item_ids: Sequence[str] = ()) -> str:
     """One SSE payload. `item_ids` rides the TERMINAL frame only — they are
     known once grounding has run, and a client renders cards from them
-    (priced live, FR-60) rather than from anything in the prose."""
-    body: dict[str, Any] = {"seq": seq, "text": text, "done": done}
+    (priced live, FR-60) rather than from anything in the prose.
+
+    No sequence number: it existed so a reconnecting reader could drop what
+    it already held, and there is no reconnect to serve.
+    """
+    body: dict[str, Any] = {"text": text, "done": done}
     if item_ids:
         body["item_ids"] = list(item_ids)
     return json.dumps(body)
-
-
-def seq_of(raw: str) -> int:
-    return int(json.loads(raw)["seq"])
 
 
 def is_done(raw: str) -> bool:
@@ -58,26 +63,42 @@ def is_done(raw: str) -> bool:
 
 
 class Publisher:
-    """Write, then publish. Nothing else.
+    """Publish. Nothing else.
 
-    Owns the sequence counter, and it is the ONLY thing that does: ADR-0042
-    notes that a producer which reuses or reorders a `seq` corrupts a
-    reconnect silently, so there is exactly one place that can.
+    No database: chunks are not stored, so the only durable write a turn
+    makes is the assembled row at the end. It keeps `text` because two
+    decisions need to know whether the reader has words on screen already —
+    which apology to send on failure, and whether the graph's answer still
+    has to be emitted.
     """
 
     def __init__(
         self,
-        sessions: async_sessionmaker[AsyncSession],
         publish: Callable[[str, str], Awaitable[None]],
         *,
         message_id: str,
+        ready: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
-        self._sessions = sessions
         self._publish = publish
         self._message_id = message_id
-        self._seq = 0
+        self._ready = ready
+        self._waited = False
         self._stripper = Stripper()
         self.text: list[str] = []
+
+    async def _attached(self) -> None:
+        """Wait for a reader, ONCE, before anything goes on the bus.
+
+        Lazy rather than at the top of the turn: by the time a generated
+        answer produces its first token the reader has long since arrived,
+        so this costs nothing on the common path and pays only where it
+        matters — the model-free answers that are ready immediately.
+        """
+        if self._waited:
+            return
+        self._waited = True
+        if self._ready is not None:
+            await self._ready(channel_for(self._message_id))
 
     async def emit(self, text: str) -> None:
         """Strip, then write, then publish.
@@ -93,53 +114,36 @@ class Publisher:
         await self._write(safe)
 
     async def _write(self, text: str) -> None:
-        self._seq += 1
+        await self._attached()
         self.text.append(text)
-        payload = frame(seq=self._seq, text=text)
-        async with self._sessions() as session:
-            await ConversationRepo(session).append_chunk(
-                message_id=self._message_id, seq=self._seq, content=payload, now=_now()
-            )
-            await session.commit()
-        await self._publish(channel_for(self._message_id), payload)
+        await self._publish(channel_for(self._message_id), frame(text=text))
 
     async def flush(self) -> None:
-        """Write whatever the stripper is still holding.
+        """Send whatever the stripper is still holding.
 
-        Separate from `close`, and called BEFORE the message is settled.
-        When this lived inside `close` it ran in `run_turn`'s `finally` —
-        *after* `finish_message` had already committed — so a reader who
-        snapshotted in that window saw `done=True` with the residue missing,
-        and the synthetic terminal frame took the same `seq` the residue was
-        about to be written under. Two readers, two different meanings for
-        one sequence number, and a tail nobody could ever fetch: exactly the
-        gap ADR-0042 §2 claims is impossible. Found by the B3 review.
+        Separate from `close` so the residue reaches the reader BEFORE the
+        terminal frame tells it the answer is over. It also has to land
+        before `finish_message`, because `publisher.text` is what the stored
+        content falls back to — a tail still inside the stripper is a tail
+        missing from the durable row.
         """
         residue = self._stripper.flush()
         if residue:
             await self._write(residue)
 
     async def close(self, item_ids: Sequence[str] = ()) -> None:
-        """Publish the terminal frame. **No database work.**
+        """Publish the terminal frame, on every path including failure.
 
-        The one thing in here that every attached reader depends on is also
-        the one thing that does not need the database, so nothing is allowed
-        to stand in front of it. It used to flush the stripper first, which
-        meant a database outage suppressed the terminal frame entirely and
-        left every reader waiting out the stream lifetime with no error.
+        `_attached` again, and not redundantly: a turn that refused before
+        emitting anything reaches here having never called `_write`, and the
+        terminal frame is then the only thing the reader will ever get. It
+        is idempotent, so the ordinary path pays nothing.
 
-        The terminal frame is published but NOT stored.
-
-        A reader that arrives after the end learns the message is finished
-        from its `status`, not from a row — so persisting a terminal chunk
-        would be a second source of truth for the same fact, and the two
-        would eventually disagree.
+        Without this frame an `EventSource` cannot tell a finished answer
+        from a dropped connection, and reconnects forever.
         """
-        self._seq += 1
-        await self._publish(
-            channel_for(self._message_id),
-            frame(seq=self._seq, done=True, item_ids=item_ids),
-        )
+        await self._attached()
+        await self._publish(channel_for(self._message_id), frame(done=True, item_ids=item_ids))
 
 
 TRUNCATED = " …sorry, I couldn't finish that — please ask again."

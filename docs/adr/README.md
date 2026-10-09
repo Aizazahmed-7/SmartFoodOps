@@ -45,7 +45,7 @@ Source of truth for *why* the architecture is the way it is. Each ADR is short (
 | [0039](0039-no-table-carries-a-version-column.md) | No table carries a version column | Accepted |
 | [0040](0040-refund-notifications-run-as-a-workflow.md) | Refund notifications run as a Temporal workflow | Accepted |
 | [0041](0041-semantic-search-costs-a-round-trip.md) | Semantic search is the primary path; NFR-22's 150 ms search budget superseded | Accepted |
-| [0042](0042-the-stream-resume-contract.md) | The stream-resume contract: subscribe, then snapshot, then drop | Accepted |
+| [0042](0042-the-stream-resume-contract.md) | The stream-resume contract: subscribe, then snapshot, then drop | Superseded (resume removed — ordering argument retained) |
 | [0043](0043-grounding-and-guardrails.md) | Grounding and guardrails: what the model is allowed to be trusted with | Accepted |
 | [0044](0044-assistant-facts-are-a-kpi-not-telemetry.md) | Assistant interaction facts are a KPI, not telemetry | Accepted |
 | [0045](0045-the-answer-cache-and-its-fence.md) | The answer cache, and what it is fenced against | Superseded (implemented, then removed — design retained) |

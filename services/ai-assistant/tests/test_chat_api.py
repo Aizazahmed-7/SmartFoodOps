@@ -46,6 +46,10 @@ class FakeRealtime:
         self.tickets: dict[str, dict[str, Any]] = {}
         self.buses: dict[str, asyncio.Queue[str]] = {}
         self.published: list[tuple[str, str]] = []
+        # Real counts, not a stub: the turn now waits on this before its
+        # first frame, so a fake that always claimed a reader would hide
+        # the very race the wait exists for.
+        self.subscribers: dict[str, int] = {}
 
     async def put_ticket(self, ticket: str, channel: str, sub: str, *, ttl_s: int) -> None:
         self.tickets[ticket] = {"channel": channel, "sub": sub, "ttl": ttl_s}
@@ -57,9 +61,13 @@ class FakeRealtime:
         self.published.append((channel, data))
         self.buses.setdefault(channel, asyncio.Queue()).put_nowait(data)
 
+    async def readers(self, channel: str) -> int:
+        return self.subscribers.get(channel, 0)
+
     @asynccontextmanager
     async def subscription(self, channel: str):
         queue = self.buses.setdefault(channel, asyncio.Queue())
+        self.subscribers[channel] = self.subscribers.get(channel, 0) + 1
 
         class Sub:
             async def next_message(self) -> str | None:
@@ -68,7 +76,10 @@ class FakeRealtime:
                 except TimeoutError:
                     return None
 
-        yield Sub()
+        try:
+            yield Sub()
+        finally:
+            self.subscribers[channel] -= 1
 
 
 SEEN_HISTORY: list[list[tuple[str, str]]] = []
@@ -96,6 +107,10 @@ def make_app(realtime: FakeRealtime | None, **knobs: Any):
             # Short, because ASGITransport does not cancel the generator when
             # the client breaks early — a default lifetime would be waited out.
             stream_lifetime_seconds=knobs.pop("life", 0.4),
+            # Most tests here never open the stream at all, and a turn that
+            # waits the production 2s for a reader who is not coming would
+            # add that to every one of them.
+            reader_wait_seconds=knobs.pop("wait", 0.01),
         ),
         providers={"anthropic": FakeLlm()},
         budget_store=FakeBudgetStore(),
@@ -207,6 +222,46 @@ def test_a_streamed_route_is_excluded_from_the_latency_histogram():
     assert STREAM_PREFIX in str(registered[0].kwargs["stream_prefixes"])
 
 
+# ── speaking only once somebody is listening ────────────────────────
+
+
+async def test_a_turn_holds_its_first_frame_until_a_reader_subscribes():
+    """The gate that replaced the replay table.
+
+    The bus is pub/sub, so a frame published before the browser subscribes
+    is DROPPED. The browser cannot subscribe until the POST tells it which
+    channel to open, and a refusal or an empty retrieval is ready in under a
+    millisecond — so without this gate the fastest answers are exactly the
+    ones that never arrive.
+    """
+    fake = FakeRealtime()
+    app = make_app(fake, wait=5.0)
+    await _schema(app)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        started = (await client.post(ASK, json=QUESTION, headers=CUSTOMER)).json()
+        await asyncio.sleep(0.05)  # give the detached turn every chance to run
+        assert fake.published == []  # parked: nobody is listening yet
+        fake.subscribers[channel_for(started["message_id"])] = 1
+        await _drain(app)
+    assert fake.published  # released the moment a reader appeared
+
+
+async def test_a_turn_whose_reader_never_arrives_gives_up_and_finishes():
+    """Bounded, and the timeout is not an error. A client that closed the
+    tab must not pin a turn open, and the durable row is written either way
+    — it is what a reloaded conversation reads."""
+    fake = FakeRealtime()
+    app = make_app(fake, wait=0.02)
+    async with _asking(app) as client:
+        started = (await client.post(ASK, json=QUESTION, headers=CUSTOMER)).json()
+
+    async with app.state.sessions() as session:
+        stored = await ConversationRepo(session).message(started["message_id"])
+    assert stored is not None
+    assert stored.status == COMPLETE and "itm_raita" in stored.item_ids
+
+
 # ── following an answer ─────────────────────────────────────────────
 
 
@@ -231,73 +286,11 @@ def _texts(lines: list[str]) -> list[str]:
     return [f["text"] for f in _frames(lines)]
 
 
-async def test_a_finished_answer_replays_from_the_table_and_closes():
-    """ADR-0042 §5: reconnecting after completion re-runs nothing. The
-    snapshot IS the answer, and the stream ends rather than listening to a
-    channel nobody will ever publish on again."""
-    fake = FakeRealtime()
-    app = make_app(fake)
-    async with _asking(app) as client:
-        started = (await client.post(ASK, json=QUESTION, headers=CUSTOMER)).json()
-
-    await fake.put_ticket("tkt", channel_for(started["message_id"]), "usr_1", ttl_s=60)
-    status, lines = await _stream(app, f"{ASK}/{started['message_id']}?ticket=tkt")
-
-    assert status == 200
-    # The marker never reaches the reader — neither live nor on replay, and
-    # the citation rides the terminal frame instead.
-    assert "".join(_texts(lines)) == "Try the . "
-    # Four ids: three chunks of prose, then the terminal frame the snapshot
-    # appended — the live reader's copy of it was published while this
-    # reader was away, and nothing republishes it.
-    assert [ln for ln in lines if ln.startswith("id: ")] == ["id: 1", "id: 2", "id: 3", "id: 4"]
-    assert _frames(lines)[-1] == {"seq": 4, "text": "", "done": True, "item_ids": ["itm_raita"]}
-    # Reaching here proves the generator RETURNED rather than waiting out
-    # its lifetime on a channel that is finished.
-
-
-async def test_a_reconnect_resumes_from_the_last_event_id():
-    """FR-69. The browser resends the header unprompted, so it is the only
-    cursor there is — and everything at or below it is already on screen."""
-    fake = FakeRealtime()
-    app = make_app(fake)
-    async with _asking(app) as client:
-        started = (await client.post(ASK, json=QUESTION, headers=CUSTOMER)).json()
-
-    await fake.put_ticket("tkt", channel_for(started["message_id"]), "usr_1", ttl_s=60)
-    status, lines = await _stream(
-        app, f"{ASK}/{started['message_id']}?ticket=tkt", headers={"Last-Event-ID": "2"}
-    )
-    assert status == 200
-    assert [ln for ln in lines if ln.startswith("id: ")] == ["id: 3", "id: 4"]
-
-
-async def test_a_garbled_cursor_replays_the_whole_answer():
-    """A reader holding a corrupt cursor should see the answer again, not an
-    error: 400 here would strand a reconnect that the browser retries
-    forever (ADR-0042 §4)."""
-    fake = FakeRealtime()
-    app = make_app(fake)
-    async with _asking(app) as client:
-        started = (await client.post(ASK, json=QUESTION, headers=CUSTOMER)).json()
-
-    for cursor in ("not-a-number", "-5"):
-        await fake.put_ticket("tkt", channel_for(started["message_id"]), "usr_1", ttl_s=60)
-        _, lines = await _stream(
-            app, f"{ASK}/{started['message_id']}?ticket=tkt", headers={"Last-Event-ID": cursor}
-        )
-        assert [ln for ln in lines if ln.startswith("id: ")] == [
-            "id: 1",
-            "id: 2",
-            "id: 3",
-            "id: 4",
-        ]
-
-
 async def test_a_live_turn_relays_chunks_and_closes_on_the_terminal_frame():
-    """The in-flight case: nothing written yet, tokens arriving on the bus.
-    The reader gets them in order and the stream ends on `done` rather than
-    idling to its lifetime."""
+    """Follow-only, which is now the ONLY case. Tokens arrive on the bus and
+    the reader gets them in order; the stream ends on `done` rather than
+    idling to its lifetime. Nothing is replayed because nothing is stored —
+    a frame published before this reader subscribed is simply gone."""
     fake = FakeRealtime()
     app = make_app(fake)
     await _schema(app)
@@ -319,10 +312,9 @@ async def test_a_live_turn_relays_chunks_and_closes_on_the_terminal_frame():
 
     channel = channel_for("msg_live")
     await fake.put_ticket("tkt", channel, "usr_1", ttl_s=60)
-    await fake.publish(channel, frame(seq=1, text="Raita "))
-    await fake.publish(channel, frame(seq=1, text="Raita "))  # duplicate: dropped by seq
-    await fake.publish(channel, frame(seq=2, text="is light."))
-    await fake.publish(channel, frame(seq=3, done=True))
+    await fake.publish(channel, frame(text="Raita "))
+    await fake.publish(channel, frame(text="is light."))
+    await fake.publish(channel, frame(done=True))
 
     status, lines = await _stream(app, f"{ASK}/msg_live?ticket=tkt")
     assert status == 200
@@ -374,21 +366,6 @@ async def test_a_turn_records_its_answer_on_the_message_row():
     assert stored.status == COMPLETE and "itm_raita" in stored.content
 
 
-async def test_a_reader_can_buy_a_fresh_ticket_for_a_stream_in_flight():
-    """FR-69 in a browser. `EventSource` reconnects to the same URL with the
-    same spent ticket, so without a re-ticket every reconnect after the first
-    is a 401 the retry loop never escapes."""
-    app = make_app(FakeRealtime())
-    async with _asking(app) as client:
-        started = (await client.post(ASK, json=QUESTION, headers=CUSTOMER)).json()
-        again = await client.post(f"{ASK}/{started['message_id']}/ticket", headers=CUSTOMER)
-    assert again.status_code == 201
-    body = again.json()
-    assert body["ticket"] != started["ticket"]
-    assert body["stream"] == f"/sse/assistant/{started['message_id']}"
-    assert body["expires_in"] == 60
-
-
 async def test_a_ticket_for_somebody_elses_conversation_is_a_404():
     """Not-yours and not-found answer identically — a distinguishable 403
     would turn this into an oracle for which message ids exist."""
@@ -399,12 +376,6 @@ async def test_a_ticket_for_somebody_elses_conversation_is_a_404():
         theirs = await client.post(f"{ASK}/{started['message_id']}/ticket", headers=stranger)
         missing = await client.post(f"{ASK}/msg_nope/ticket", headers=CUSTOMER)
     assert theirs.status_code == 404 and missing.status_code == 404
-
-
-def test_a_reticket_needs_a_bus_too():
-    app = make_app(None)
-    with TestClient(app) as client:
-        assert client.post(f"{ASK}/msg_1/ticket", headers=CUSTOMER).status_code == 503
 
 
 async def test_history_is_what_came_before_not_this_turn():
@@ -484,35 +455,6 @@ def test_reading_cards_requires_signing_in():
     app = make_app(FakeRealtime())
     with TestClient(app) as client:
         assert client.get(f"{ASK}/msg_1/items").status_code == 401
-
-
-async def test_a_browser_resumes_with_a_query_parameter():
-    """`EventSource` cannot set a header, and its own reconnect reuses the
-    ticket it already spent — so the header path is unreachable from a
-    browser that has to re-ticket. `?after=` is how it resumes."""
-    fake = FakeRealtime()
-    app = make_app(fake)
-    async with _asking(app) as client:
-        started = (await client.post(ASK, json=QUESTION, headers=CUSTOMER)).json()
-    await fake.put_ticket("tkt", channel_for(started["message_id"]), "usr_1", ttl_s=60)
-    _, lines = await _stream(app, f"{ASK}/{started['message_id']}?ticket=tkt&after=2")
-    assert [ln for ln in lines if ln.startswith("id: ")] == ["id: 3", "id: 4"]
-
-
-async def test_the_header_wins_over_the_query_parameter():
-    """The browser sets the header without being asked, so it is the one
-    that cannot be stale — a URL can be bookmarked, retyped or shared."""
-    fake = FakeRealtime()
-    app = make_app(fake)
-    async with _asking(app) as client:
-        started = (await client.post(ASK, json=QUESTION, headers=CUSTOMER)).json()
-    await fake.put_ticket("tkt", channel_for(started["message_id"]), "usr_1", ttl_s=60)
-    _, lines = await _stream(
-        app,
-        f"{ASK}/{started['message_id']}?ticket=tkt&after=0",
-        headers={"Last-Event-ID": "3"},
-    )
-    assert [ln for ln in lines if ln.startswith("id: ")] == ["id: 4"]
 
 
 async def test_a_turn_cannot_be_filed_into_somebody_elses_conversation():

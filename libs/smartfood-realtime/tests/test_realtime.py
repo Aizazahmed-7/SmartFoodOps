@@ -34,6 +34,7 @@ class FakeRedis:
         self.store: dict[str, str] = {}
         self.published: list[tuple[str, str]] = []
         self._pubsub = FakePubSub(feed)
+        self.numsub: dict[str, int] = {}
         self.closed = False
 
     async def set(self, key, value, ex=None):
@@ -44,6 +45,9 @@ class FakeRedis:
 
     async def publish(self, channel, message):
         self.published.append((channel, message))
+
+    async def pubsub_numsub(self, *channels):
+        return [(c, self.numsub.get(c, 0)) for c in channels]
 
     def pubsub(self):
         return self._pubsub
@@ -69,6 +73,28 @@ async def test_publish_targets_the_named_channel():
     r = FakeRedis()
     await RedisRealtime(r).publish("sfo:track:ord_9", "CONFIRMED")  # type: ignore[arg-type]
     assert r.published == [("sfo:track:ord_9", "CONFIRMED")]
+
+
+async def test_readers_reports_the_subscriber_count():
+    """What `wait_for_reader` polls. Pub/sub drops a frame published into an
+    empty channel, so the assistant's turn asks this before it speaks."""
+    r = FakeRedis()
+    r.numsub["sfo:assist:msg_1"] = 2
+    bus = RedisRealtime(r)  # type: ignore[arg-type]
+    assert await bus.readers("sfo:assist:msg_1") == 2
+    assert await bus.readers("sfo:assist:msg_nobody") == 0
+
+
+async def test_readers_treats_an_empty_reply_as_nobody():
+    """A Redis that answers with no rows at all must read as zero, not
+    raise — the caller is deciding whether to wait, and an exception there
+    would fail a turn over a bookkeeping question."""
+
+    class Silent(FakeRedis):
+        async def pubsub_numsub(self, *channels):
+            return []
+
+    assert await RedisRealtime(Silent()).readers("c") == 0  # type: ignore[arg-type]
 
 
 async def test_subscription_lifecycle_and_message_shapes():

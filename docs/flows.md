@@ -1096,9 +1096,9 @@ sequenceDiagram
     T->>DB: history(conversation) EXCLUDING both rows just written
     Note over T,DB: keeping the user row in would send the question twice —<br/>once as context, once as the question — and would make every<br/>turn look like a REPLY to itself
 
-    C->>SSE: GET with ticket (and optional Last-Event-ID)
-    SSE->>DB: replay stored chunks after Last-Event-ID
+    C->>SSE: GET with ticket
     SSE->>BUS: subscribe to the live channel
+    Note over SSE,BUS: follow-only. Nothing is stored, so there is nothing to<br/>replay — a frame published before this subscribe is GONE
 
     rect rgb(0,0,0)
         Note over T,G: the graph — two short circuits before any spend
@@ -1115,11 +1115,10 @@ sequenceDiagram
             M-->>G: chunk
             G->>T: emit(text)
             T->>T: stripper removes [item:...] markers
-            T->>DB: append_chunk(seq, payload)
-            T->>BUS: publish the same payload
-            Note over T,DB: table FIRST, bus SECOND. The window between them is the<br/>only moment a chunk exists and is unreplayable
+            T->>BUS: publish (first frame waits for a subscriber)
+            Note over T,BUS: THE GATE. pub/sub drops a frame sent into an empty<br/>channel, and a refusal is ready in under a millisecond —<br/>so the turn asks who is listening before it speaks, once
             BUS-->>SSE: frame
-            SSE-->>C: data: {"seq": 7, "text": "Try the "}
+            SSE-->>C: data: {"text": "Try the "}
         end
         G->>G: ground — every [item:id] checked against what was retrieved
         Note over G: an unknown id is STRIPPED and counted, it does not fail<br/>the turn. Refusing over one bad id would turn a cosmetic<br/>model error into an outage
@@ -1129,8 +1128,8 @@ sequenceDiagram
     Note over T: BEFORE the message is settled. When this ran inside close()<br/>it fired after finish_message committed, so a reader could see<br/>done=true with the tail missing (found by the B3 review)
     T->>DB: finish_message(status=COMPLETE)
     T->>BUS: terminal frame {done: true, item_ids: [...]}
-    Note over T,BUS: published, NOT stored. A late reader learns the message is<br/>finished from its status, so persisting a terminal chunk would<br/>be a second source of truth for the same fact
-    SSE-->>C: data: {"seq": 12, "done": true, "item_ids": ["itm_a"]}
+    Note over T,BUS: also gated. A turn that REFUSED emitted nothing, so this<br/>is the only frame its reader will ever get — without it an<br/>EventSource cannot tell a finished answer from a dead socket
+    SSE-->>C: data: {"done": true, "item_ids": ["itm_a"]}
     C->>C: render cards from item_ids, priced LIVE from catalog
 ```
 
@@ -1183,66 +1182,87 @@ still tested; only the key that would feed it is missing.
 
 ---
 
-## 20. Stream resume — a tunnel, and no gap (B3, FR-69, ADR-0042)
+## 20. What a disconnect costs, and the gate that pays for it (B3)
 
-The property that makes the socket disposable.
+**There is no resume.** B3 originally shipped one — `message_chunks` stored
+every frame, the stream subscribed before it snapshotted, and a reader could
+be killed mid-answer and rejoin with no gap and no duplicate. All of it was
+removed (migration `0021`, ADR-0042 superseded).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant C as Customer
-    participant SSE as GET /sse/assistant/{id}
-    participant DB as message_chunks
+    participant API as POST /v1/assistant/messages
+    participant T as TurnRunner (background task)
     participant BUS as Redis pub/sub
-    participant T as TurnRunner
+    participant SSE as GET /sse/assistant/{id}
+    participant DB as assistant_db
 
-    Note over T: the turn is running regardless of whether anyone is listening
-    T->>DB: seq 1..6 written
-    T->>BUS: seq 1..6 published
+    C->>API: question
+    API-->>C: 202 {message_id, ticket}
+    Note over API,T: the turn is spawned HERE, before the reader exists
 
-    C->>SSE: connect, ticket, no Last-Event-ID
-    SSE->>DB: SELECT chunks ORDER BY seq
-    SSE-->>C: replay 1..6
-    SSE->>BUS: subscribe
-    T->>BUS: seq 7
-    BUS-->>SSE: seq 7
-    SSE-->>C: seq 7
+    rect rgb(0,0,0)
+        Note over T,BUS: THE GAP — and why a producer waits for a consumer
+        T->>BUS: readers("sfo:assist:msg_1")?
+        BUS-->>T: 0
+        Note over T: parked. A refusal or an empty retrieval is ready NOW,<br/>and pub/sub would drop it into an empty channel
+        C->>SSE: GET with ticket
+        SSE->>BUS: subscribe
+        T->>BUS: readers()?
+        BUS-->>T: 1
+        Note over T: released, once per turn — not once per token
+    end
 
-    Note over C,SSE: TRAIN ENTERS TUNNEL — socket drops
-    T->>DB: seq 8, 9, 10 written
-    T->>BUS: seq 8, 9, 10 published (nobody is listening)
+    T->>BUS: frame, frame, frame
+    BUS-->>SSE: each one, in order
+    SSE-->>C: data: {"text": "..."}
 
-    C->>SSE: reconnect, Last-Event-ID: 7
-    SSE->>DB: SELECT chunks WHERE seq > 7
-    SSE-->>C: replay 8, 9, 10
-    SSE->>BUS: subscribe
-    Note over SSE: no gap, and no duplicate — the reader asked for<br/>"after 7" and the table is the record of what was sent
-    T->>BUS: terminal {done: true}
-    BUS-->>SSE: terminal
-    SSE-->>C: done
+    Note over C,SSE: SOCKET DROPS
+    T->>BUS: the rest of the answer (nobody is listening — dropped)
+    T->>T: the turn runs on regardless
+    T->>DB: finish_message(content, status=COMPLETE)
+
+    C->>C: reload
+    C->>API: GET the conversation
+    API-->>C: the ASSEMBLED answer from messages.content
+    Note over C,API: the answer is not lost — only the experience of<br/>watching it arrive is
 ```
 
-### Why the chunk goes to the table before the bus
+### What the gate is, in one line
 
-> The window between those two calls is the only moment a chunk exists and is
-> unreplayable, and doing it the other way round would widen that window to
-> "until the write lands" — which is exactly when a reconnecting reader asks.
+The bus is pub/sub: a frame published into a channel with no subscriber is
+**dropped, not queued**. So the turn asks how many readers are attached and
+waits — bounded, once, before its first frame.
 
-### Why the terminal frame is published but never stored
+### Why it is needed at all
 
-A reader arriving after the end learns the message is finished from its
-`status`, not from a row. Persisting a terminal chunk would be a **second
-source of truth for the same fact**, and two sources eventually disagree.
+The reader cannot subscribe until the POST tells it which channel to open,
+and the turn starts before that response is read. Usually the turn spends the
+gap in retrieval and a provider and loses the race harmlessly. But `guard`
+and an empty `retrieve` answer **without a model**, in under a millisecond —
+so the fastest answers are precisely the ones that would never arrive. The
+failure is silent and looks like a hung stream.
 
-### The bug this design still had
+### Why the timeout is not an error
 
-`flush()` is separate from `close()` and runs **before** the message is
-settled. When flushing lived inside `close()`, it ran in `run_turn`'s
-`finally` — *after* `finish_message` had committed. A reader snapshotting in
-that window saw `done=true` with the tail missing, and the synthetic terminal
-frame reused the sequence number the residue was about to take: two readers,
-two meanings for one `seq`, and a tail nobody could fetch. Exactly the gap
-ADR-0042 §2 claims is impossible. Found by the B3 review.
+A client that closed the tab must not pin a turn open. The wait gives up and
+the turn runs anyway, because the durable answer is the `messages` row and
+that is written whether or not anybody was listening.
+
+### What was given up
+
+| Before | Now |
+| --- | --- |
+| kill the connection mid-answer, reconnect, resume exactly | reconnecting starts from whatever is being published now |
+| `message_chunks`, one row per frame | nothing stored |
+| `seq` on every frame, composite PK, dedupe filter | no sequence number |
+| `Last-Event-ID` / `?after=` / re-ticket endpoint | ticket is single-use; a reconnect gets 401 |
+| `stream_relay` in smartfood-realtime | `stream_events`, which order tracking already used |
+
+Order tracking keeps its own resume and is untouched — it snapshots from a
+durable read model, which is a different mechanism for a different problem.
 
 ---
 

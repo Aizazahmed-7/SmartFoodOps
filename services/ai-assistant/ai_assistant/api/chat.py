@@ -21,12 +21,12 @@ import secrets
 from typing import Annotated, Any, Protocol
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import Field
 from smartfood_api import ApiError, ErrorCode, StrictModel
 from smartfood_auth import AuthContext, Role, require_role
-from smartfood_realtime import Snapshot, StreamConfig, stream_relay
+from smartfood_realtime import StreamConfig, stream_events
 
 from ..domain.combos import affordable, combine
 from ..domain.ports import UpstreamUnavailable
@@ -35,7 +35,7 @@ from ..drafts import Claim, DraftNotFound, WrongState
 from ..explain_service import NotYours
 from ..feedback import counts_for, summarisable
 from ..menu_facts import MAX_ITEMS
-from ..turns import channel_for, is_done, seq_of
+from ..turns import channel_for, is_done
 
 router = APIRouter()
 
@@ -111,33 +111,6 @@ async def _mint(bus: Tickets, request: Request, channel: str, sub: str) -> str:
     ticket = secrets.token_urlsafe(24)
     await bus.put_ticket(ticket, channel, sub, ttl_s=_config(request).ticket_ttl_s)
     return ticket
-
-
-@router.post(STREAM_PREFIX + "{message_id}/ticket", status_code=201)
-async def reticket(message_id: str, ctx: Chatter, request: Request) -> dict[str, Any]:
-    """A fresh ticket for a stream already in flight (FR-69).
-
-    Without this, resumption does not work in a browser at all. `EventSource`
-    reconnects on its own — to the SAME url, carrying the SAME spent ticket —
-    so every reconnect after the first is a 401 and the retry loop never
-    escapes it. The POST that started the turn cannot serve: calling it again
-    starts a second generation, which is the thing FR-67 exists to prevent.
-
-    Not-yours and not-found answer identically, exactly as the tracking
-    ticket does: a distinguishable 403 would turn this into an oracle for
-    which message ids exist.
-    """
-    bus = _bus(request)
-    if bus is None:
-        raise _unavailable("the assistant is unavailable")
-    owner = await _chat(request).owner(message_id)
-    if owner is None or owner != ctx.sub:
-        raise ApiError(ErrorCode.NOT_FOUND, "no such message", 404)
-    return {
-        "ticket": await _mint(bus, request, channel_for(message_id), ctx.sub),
-        "stream": f"/sse/assistant/{message_id}",
-        "expires_in": _config(request).ticket_ttl_s,
-    }
 
 
 Partner = Annotated[AuthContext, Depends(require_role(Role.RESTAURANT_ADMIN))]
@@ -662,26 +635,20 @@ async def stream_answer(
     message_id: str,
     request: Request,
     ticket: Annotated[str, Query(min_length=1)],
-    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
-    after: Annotated[str | None, Query()] = None,
 ) -> StreamingResponse:
-    """Follow one answer, from wherever the reader left off.
+    """Follow one answer as it is written.
 
-    Two ways to say where to resume from, and the second is not redundant.
+    **Follow-only. There is no resume.** A reader that disconnects has lost
+    the stream, and reconnecting starts from whatever is being published
+    now — there is no stored chunk to replay, by design (ADR-0042,
+    superseded). What survives a disconnect is the assembled `messages` row
+    the turn writes when it finishes, which is what a reloaded conversation
+    renders.
 
-    `Last-Event-ID` arrives on its own from any `EventSource` that has seen
-    a frame — no client code at all. But that only happens on the browser's
-    OWN reconnect, which reuses the same URL and therefore the ticket it
-    already spent, so it always 401s here. A browser that wants to resume
-    must buy a fresh ticket and open a new `EventSource` — and `EventSource`
-    cannot set a header. `?after=` is how it says the same thing.
-
-    The header wins when both arrive: it is the one the browser sets
-    without being asked, so it is the one that cannot be stale.
-
-    A garbled cursor is treated as "from the start" rather than rejected. A
-    reader holding a corrupt cursor should see the whole answer again, not
-    an error the browser retries forever (ADR-0042 §4).
+    The ticket is single-use and channel-scoped, so it is spent by the first
+    GET that redeems it. An `EventSource` reconnecting on its own reuses the
+    same URL and therefore the same spent ticket, and gets a 401 — which is
+    the intended end of the stream rather than a bug to work around.
     """
     bus = _bus(request)
     if bus is None:
@@ -693,32 +660,17 @@ async def stream_answer(
         # also make a TRACKING ticket structurally useless here.
         raise ApiError(ErrorCode.AUTH_INVALID_CREDENTIALS, "invalid or spent ticket", 401)
 
-    chat = _chat(request)
-    seq_upto = _cursor(last_event_id or after)
-
-    async def snapshot() -> Snapshot:
-        return await chat.snapshot(message_id=message_id, seq_upto=seq_upto)
-
     return StreamingResponse(
-        stream_relay(
+        stream_events(
             channel_for(message_id),
             bus,
             _config(request),
-            snapshot=snapshot,
-            seq_upto=seq_upto,
-            seq_of=seq_of,
+            event_name="chunk",
             ends_stream=is_done,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
-
-
-def _cursor(last_event_id: str | None) -> int:
-    try:
-        return max(0, int(last_event_id or 0))
-    except ValueError:
-        return 0
 
 
 def _config(request: Request) -> StreamConfig:
