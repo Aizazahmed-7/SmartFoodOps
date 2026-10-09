@@ -293,7 +293,7 @@ Assumption numbering continues the shared namespace; A19–A24 are Part B.
 | A19 | Customers who engage the assistant | 5% of orders | NFR-24 |
 | A20 | Turns per engaged customer | 3 | NFR-24 |
 | A21 | Tokens per turn (prompt + completion) | ~2,220 | (derived — reconciles NFR-24's ~50M tokens/min at 375 turns/s) |
-| A22 | Answer-cache hit rate, steady state | ≥20% | (proposed — the floor `AssistantCacheHitRateCollapsed` defends; NFR-24 names the cache load-bearing) |
+| A22 | Answer-cache hit rate, steady state | **n/a — withdrawn** | The answer cache was removed (migration `0020`). The assumption is kept here, struck, because the ceiling below used to lean on it |
 | A23 | AI cost budget per order | **$0.004** | (proposed — see §7.4) |
 | A24 | Assistant availability target | 99.5% | NFR-23 |
 
@@ -302,8 +302,7 @@ Assumption numbering continues the shared namespace; A19–A24 are Part B.
 | Quantity | Formula | Value |
 |---|---|---|
 | Assistant turns/s | 2,500 × A19 (5%) × A20 (3) | **375/s** |
-| Generations/s (cache cold) | 375 | 375/s |
-| Generations/s (at A22's 20% floor) | 375 × 0.8 | 300/s |
+| Generations/s | 375 (every turn generates) | **375/s** |
 | Tokens/s | 375 × A21 (2,220) | **~833k/s** (~50M/min) |
 | Tokens per order | 833k ÷ 2,500 | **~333** |
 
@@ -311,13 +310,22 @@ Assumption numbering continues the shared namespace; A19–A24 are Part B.
 not ours.** 50M tokens/min is far above a default commercial tier, so the
 ceiling is not reachable on one provider account at any instance count. Three
 things are therefore load-bearing rather than optimisations, exactly as
-NFR-24 says: multi-provider routing (ADR-0030) spreads the quota, the cache
-tiers remove whole generations from the bill, and the templated paths
-(FR-87's explanations) answer without a provider at all.
+NFR-24 says: multi-provider routing (ADR-0030) spreads the quota and the
+templated paths (FR-87's explanations) answer without a provider at all.
 
-A22 is why the cache hit rate has an alert rather than just a panel: each
-point of hit rate is ~3.75 generations/s of quota returned at the ceiling,
-so a collapse is a capacity event that arrives looking like a cost event.
+**Removing the answer cache made this number worse, and that is recorded
+rather than hidden.** The third lever NFR-24 names was the cache tiers, which
+removed whole generations from the bill; at A22's proposed 20% floor the
+ceiling was 300 generations/s, and it is now 375 — each point of hit rate was
+~3.75 generations/s of quota, so withdrawing the assumption costs 75/s of
+provider quota at the ceiling.
+
+That trade is deliberate and it is a *ceiling* concern, not a today concern:
+this system has no load, and the cache cost more in explainability than it
+returned in latency (see `erd.md` and `flows.md` §19). It does mean the cache
+is **the first thing to reinstate before this ceiling is approached**, not an
+optimisation to consider later — which is precisely why the fence design is
+kept in ADR-0045 rather than deleted with the code.
 
 ### 7.3 What is NOT a constraint
 
@@ -362,7 +370,6 @@ runbook as a planned action; the budget itself pages.
 | Signal | Trigger | Action |
 |---|---|---|
 | Provider quota headroom | tokens/min > 60% of the lowest-tier quota | Add provider capacity or shift routing weight (ADR-0030) |
-| Cache hit rate | < A22's 20% floor for 30m | `AssistantCacheHitRateCollapsed` — quota demand has risen ~25% with no traffic change |
 | Cost per order | > $0.0024 | `AssistantCostPerOrderElevated` |
 | Knowledge freshness | p99 > 60s | `AssistantKnowledgeStale` — the drain is behind, not the plane |
 

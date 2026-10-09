@@ -163,21 +163,6 @@ REDACTIONS = Counter(
 )
 
 
-CACHE = Counter(
-    "assistant_cache_total",
-    "Answer-cache lookups by tier and result (FR-74).",
-    labelnames=("tier", "result"),
-    registry=REGISTRY,
-)
-"""`tier` is `exact` or `semantic`, `result` is `hit` or `miss`.
-
-Two tiers on one counter rather than two counters, because the number
-anybody actually wants is the ratio BETWEEN them: an exact tier at 40% and
-a semantic tier at 5% is a healthy cache, while the same total split the
-other way means the normalizer is too strict.
-"""
-
-
 RECOMMENDATIONS = Counter(
     "assistant_recommendations_total",
     "Recommendation surfaces measured (FR-79), by surface and outcome.",

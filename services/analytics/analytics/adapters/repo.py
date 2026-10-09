@@ -563,7 +563,6 @@ class AnalyticsRepo:
                     for column in (
                         "outcome",
                         "refusal_reason",
-                        "cache_tier",
                         "item_ids",
                         "restaurant_ids",
                         "candidates",
@@ -586,7 +585,6 @@ class AnalyticsRepo:
         hit rate rather than with the system getting faster.
         """
         a = assistant_facts.c
-        generated = a.cache_tier == ""
         row = (
             await self._s.execute(
                 sa.select(
@@ -594,11 +592,6 @@ class AnalyticsRepo:
                     _people(a.user_id).label("users"),
                     sa.func.count(sa.distinct(a.conversation_id)).label("conversations"),
                     sa.func.avg(a.duration_ms).label("avg_ms"),
-                    # No `else_`: the other arm is NULL and avg() skips it,
-                    # which is how each mean sees only its own population.
-                    sa.func.avg(sa.case((generated, a.duration_ms))).label("avg_generated"),
-                    sa.func.avg(sa.case((~generated, a.duration_ms))).label("avg_cached"),
-                    sa.func.sum(sa.case((~generated, 1), else_=0)).label("cached"),
                     sa.func.sum(a.candidates).label("candidates"),
                     sa.func.sum(a.ungrounded).label("ungrounded"),
                 ).where(a.occurred_at >= since)
@@ -609,9 +602,6 @@ class AnalyticsRepo:
             "users": row.users or 0,
             "conversations": row.conversations or 0,
             "avg_ms": row.avg_ms,
-            "avg_generated": row.avg_generated,
-            "avg_cached": row.avg_cached,
-            "cached": int(row.cached or 0),
             "candidates": int(row.candidates or 0),
             "ungrounded": int(row.ungrounded or 0),
         }

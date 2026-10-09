@@ -120,35 +120,12 @@ async def test_the_query_is_embedded_once_for_all_four_legs(embeddings):
     assert embeddings.calls == [["something light"]]
 
 
-async def test_both_tables_are_queried_by_both_legs(embeddings):
-    session = StubSession(rows=[])
-    await _retriever(session, embeddings).retrieve(query="x", filters=Filters(city="c"), limit=5)
-    selects = [s for s in session.statements if s.lstrip().upper().startswith("SELECT")]
-    assert len(selects) == 4
-    assert sum("item_chunks" in s for s in selects) == 2
-    assert sum("restaurant_chunks" in s for s in selects) == 2
-
-
 async def test_the_vector_is_bound_in_pgvector_text_form(embeddings):
     session = StubSession(rows=[])
     await _retriever(session, embeddings).retrieve(query="x", filters=Filters(city="c"), limit=5)
     bound = next(p["query_vector"] for p in session.params if "query_vector" in p)
     assert bound.startswith("[") and bound.endswith("]")
     assert bound.count(",") == embeddings.dimensions - 1
-
-
-async def test_results_come_back_fused_and_split_by_shape(embeddings):
-    """Items and restaurants stay apart: a query embedding sits closer to one
-    text shape than the other, so a combined ranking would order them by
-    shape rather than by relevance."""
-    session = StubSession(rows=[_row("r1:i1"), _row("r1:i2", item_id="i2")])
-    result = await _retriever(session, embeddings).retrieve(
-        query="x", filters=Filters(city="c"), limit=5
-    )
-    assert [c.chunk_id for c in result.items] == ["r1:i1", "r1:i2"]
-    assert [c.chunk_id for c in result.restaurants] == ["r1:i1", "r1:i2"]
-    # Present in both legs of its pair, so each scores twice.
-    assert result.items[0].score == pytest.approx(2 / 61)
 
 
 # ── hydrating the ranked set ────────────────────────────────────────

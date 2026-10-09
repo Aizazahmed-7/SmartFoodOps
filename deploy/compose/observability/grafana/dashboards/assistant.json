@@ -88,40 +88,6 @@
       "description": "Asked vs answered. Only `answered` answered anything: a refusal and a no_match are honest replies, and folding them in would make the rate rise as the assistant got less useful. Grouped, not hard-coded, so a new outcome appears on its own."
     },
     {
-      "id": 4,
-      "title": "Response time (ms) \u2014 generated vs cached",
-      "type": "timeseries",
-      "datasource": {
-        "type": "postgres",
-        "uid": "AnalyticsDB"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ms"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "postgres",
-            "uid": "AnalyticsDB"
-          },
-          "rawSql": "SELECT date_trunc('hour', occurred_at) AS time,\n  avg(duration_ms) FILTER (WHERE cache_tier = '') AS generated,\n  avg(duration_ms) FILTER (WHERE cache_tier <> '') AS cached\nFROM assistant_facts WHERE $__timeFilter(occurred_at) GROUP BY 1 ORDER BY 1",
-          "format": "time_series",
-          "refId": "A",
-          "rawQuery": true
-        }
-      ],
-      "description": "Split on purpose. The blended mean drifts with the cache hit rate rather than with the system getting faster, so it describes neither experience. The whole turn, retrieval included \u2014 a provider-only number would flatter us."
-    },
-    {
       "id": 5,
       "title": "Recommendation acceptance (window)",
       "type": "stat",
@@ -336,39 +302,6 @@
         }
       ],
       "description": "Split by task: `explain` is templated and fast, `generate` is a model call. Averaging them lets the fast path hide the slow one."
-    },
-    {
-      "id": 12,
-      "title": "Cache hit rate by tier (NFR-24)",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 32
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "Prometheus"
-          },
-          "expr": "sum by (tier) (rate(assistant_cache_total{result=\"hit\"}[10m])) / sum by (tier) (rate(assistant_cache_total[10m]))",
-          "legendFormat": "{{tier}}",
-          "refId": "A"
-        }
-      ],
-      "description": "Load-bearing, not an optimisation: at the ceiling provider quota is the binding constraint and this is what keeps generations inside it."
     },
     {
       "id": 13,

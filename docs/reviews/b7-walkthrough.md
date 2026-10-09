@@ -189,6 +189,12 @@ later. A new call site cannot forget to ask, because it cannot reach a
 provider without coming through it. `PlaneShed` moved to `ports` alongside
 the other domain exceptions to break the resulting import cycle.
 
+> **Later note (2026-10-09).** The explanation-rewrite path named above was
+> itself removed (ADR-0047 amendment), so "polish" is no longer one of the
+> call sites. That strengthens rather than weakens the finding: the point of
+> moving enforcement to the router was that it holds for call sites nobody
+> enumerated — including ones that later disappear.
+
 Proven live, which is the only way this claim should ever be made again:
 
 ```

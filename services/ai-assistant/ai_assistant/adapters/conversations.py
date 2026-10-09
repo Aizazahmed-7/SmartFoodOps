@@ -65,8 +65,8 @@ class ConversationRepo:
         `conversation_id` is client-supplied, so without this a customer
         could file a turn into a stranger's conversation. `repo.history()`
         would then feed that stranger's questions and answers into their
-        prompt as context, and the idempotency path would hand them a live
-        stream ticket for the stranger's answer.
+        prompt as context, and the caller would be handed a live stream
+        ticket for the stranger's answer.
 
         Insert-if-absent rather than upsert on `city`: a conversation's scope
         is set by the question that started it, and letting a later turn
@@ -98,16 +98,8 @@ class ConversationRepo:
         content: str,
         status: str,
         now: datetime,
-        idempotency_key: str | None = None,
     ) -> bool:
-        """Append a message. Returns False when the idempotency key has
-        already been used in this conversation.
-
-        ADR-0024's pattern rather than a separate key table: the row IS the
-        record, so a retried POST loses to the unique constraint instead of
-        starting a second generation — which would be a second provider bill
-        and two different answers for one question.
-        """
+        """Append a message. Returns False when the id already exists."""
         insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
         stmt = insert(messages).values(
             id=message_id,
@@ -115,16 +107,9 @@ class ConversationRepo:
             role=role,
             content=content,
             status=status,
-            idempotency_key=idempotency_key,
             created_at=now,
         )
-        result = await self._s.execute(
-            stmt.on_conflict_do_nothing(
-                index_elements=[messages.c.conversation_id, messages.c.idempotency_key]
-            )
-            if idempotency_key
-            else stmt
-        )
+        result = await self._s.execute(stmt)
         return bool(cast("CursorResult[Any]", result).rowcount)
 
     async def append_chunk(self, *, message_id: str, seq: int, content: str, now: datetime) -> None:
@@ -201,28 +186,6 @@ class ConversationRepo:
                 status=row.status,
                 item_ids=list(row.item_ids or ()),
             )
-            if row
-            else None
-        )
-
-    async def message_for_key(self, *, conversation_id: str, key: str) -> Message | None:
-        """The message a previous request with this key already created.
-
-        The retry path: `start_message` refused the insert, and the caller
-        needs the id of the turn that IS running so it can stream that one
-        instead of starting a second."""
-        row = (
-            await self._s.execute(
-                sa.select(
-                    messages.c.id, messages.c.role, messages.c.content, messages.c.status
-                ).where(
-                    messages.c.conversation_id == conversation_id,
-                    messages.c.idempotency_key == key,
-                )
-            )
-        ).first()
-        return (
-            Message(id=row.id, role=row.role, content=row.content, status=row.status)
             if row
             else None
         )

@@ -15,7 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import knowledge_epochs, knowledge_pending
+from ..db import knowledge_pending
 
 
 @dataclass(frozen=True)
@@ -141,50 +141,3 @@ class PendingRepo:
             )
         )
         return bool(cast("CursorResult[Any]", result).rowcount)
-
-
-class EpochRepo:
-    """The per-city corpus counter the answer cache is fenced on (FR-74).
-
-    A counter and not a timestamp: two drain passes inside one clock tick
-    would produce the same "version", and the one cache entry written
-    between them would outlive the change that should have killed it.
-    """
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._s = session
-
-    @property
-    def _dialect(self) -> str:
-        return self._s.bind.dialect.name if self._s.bind is not None else "sqlite"
-
-    async def current(self, city: str) -> int:
-        """1 when a city has never been drained — so a fresh deployment has
-        a usable fence rather than a missing one."""
-        return int(
-            await self._s.scalar(
-                sa.select(knowledge_epochs.c.epoch).where(knowledge_epochs.c.city == city)
-            )
-            or 1
-        )
-
-    async def bump(self, *, city: str, now: datetime) -> None:
-        """Move a city on by one, in the CALLER's transaction.
-
-        Upsert-and-increment in one statement: read-then-write would let two
-        drain passes for different restaurants in the same city read the
-        same value and write the same one back, leaving a cache entry from
-        before both of them still reachable.
-        """
-        insert = pg_insert if self._dialect == "postgresql" else sqlite_insert
-        # 2, not 1, on the INSERT branch. A city with no row already reads as
-        # epoch 1, so inserting 1 would leave the fence exactly where it was
-        # and the first menu change a city ever sees would invalidate
-        # nothing — the one case a cold cache hides in testing.
-        stmt = insert(knowledge_epochs).values(city=city, epoch=2, updated_at=now)
-        await self._s.execute(
-            stmt.on_conflict_do_update(
-                index_elements=[knowledge_epochs.c.city],
-                set_={"epoch": knowledge_epochs.c.epoch + 1, "updated_at": now},
-            )
-        )

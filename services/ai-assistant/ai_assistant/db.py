@@ -252,11 +252,6 @@ messages = sa.Table(
     # to replay-and-close or replay-and-follow, and it is what makes a
     # turn that died mid-generation distinguishable from one still running.
     sa.Column("status", sa.Text, nullable=False),
-    # The caller's Idempotency-Key (FR-67), on the USER message. ADR-0024's
-    # pattern: the business row is the idempotency record, so a retried
-    # POST collides here rather than starting a second generation — which
-    # would be a second provider bill and two different answers.
-    sa.Column("idempotency_key", sa.Text, nullable=True),
     # What the answer CITED, after grounding dropped the fabrications
     # (FR-70). Stored rather than re-derived: the markers are stripped from
     # `content` before anybody reads it, so the ids are unrecoverable from
@@ -265,7 +260,6 @@ messages = sa.Table(
     # it is read whole, written once, and never queried by member.
     sa.Column("item_ids", sa.JSON, nullable=False, server_default="[]"),
     sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
-    sa.UniqueConstraint("conversation_id", "idempotency_key", name="uq_messages_idempotency"),
 )
 sa.Index("ix_messages_conversation", messages.c.conversation_id, messages.c.created_at)
 
@@ -284,51 +278,6 @@ message_chunks = sa.Table(
 )
 
 
-# ── B3: the answer cache (FR-74, ADR-0045) ──────────────────────────
-
-knowledge_epochs = sa.Table(
-    "knowledge_epochs",
-    metadata,
-    # One row per city, because the cache is geo-bucketed and a menu change
-    # in Springfield must not cold-start Karachi.
-    sa.Column("city", sa.Text, primary_key=True),
-    # Bumped in the SAME transaction as the chunk write that changed the
-    # city's corpus. That is what makes it a fence rather than a hint: a
-    # cache entry keyed on epoch N is unreachable the instant N+1 commits,
-    # so invalidation costs nothing and stale rows die by TTL.
-    sa.Column("epoch", sa.BigInteger, nullable=False, server_default="1"),
-    sa.Column("updated_at", sa.TIMESTAMP(timezone=True), nullable=False),
-)
-
-answer_cache = sa.Table(
-    "answer_cache",
-    metadata,
-    # The normalized question's hash. A PK rather than a surrogate: writing
-    # the same question twice must collide, not accumulate.
-    sa.Column("id", sa.Text, primary_key=True),
-    # The fence, now two parts. `model_version` left with the second vector
-    # space it existed to separate: the model is fixed by Settings, and a
-    # model change means a rebuild, which bumps every city's epoch anyway.
-    # In the KEY, not just a filter. With the key as (question, model) alone,
-    # two cities asking the same question overwrote each other's row and
-    # both then missed on the city predicate — the more popular a question
-    # was across cities, the closer its tier-2 hit rate got to zero
-    # (B3 review).
-    sa.Column("city", sa.Text, primary_key=True),
-    sa.Column("epoch", sa.BigInteger, nullable=False),
-    sa.Column("question", sa.Text, nullable=False),
-    sa.Column("embedding", _vector(), nullable=False),
-    sa.Column("answer", sa.Text, nullable=False),
-    # The citations, so a hit renders the same cards a fresh answer would.
-    # Ids only — never a price or a name (FR-60): the client re-resolves
-    # those live, which is the whole reason an answer is cacheable at all.
-    sa.Column("item_ids", _slugs(), nullable=False),
-    sa.Column("restaurant_ids", _slugs(), nullable=False),
-    sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False),
-)
-sa.Index("ix_answer_cache_fence", answer_cache.c.city, answer_cache.c.epoch)
-
-ANSWER_HNSW_INDEX = "ix_answer_cache_embedding_hnsw"
 """One index over every cached question, not one per fence.
 
 The same reasoning as ADR-0032 §5: a partial index per city would be DDL

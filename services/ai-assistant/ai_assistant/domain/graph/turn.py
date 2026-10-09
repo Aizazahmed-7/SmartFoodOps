@@ -45,8 +45,6 @@ from typing import Any, Protocol, cast
 
 from langgraph.graph import END, START, StateGraph
 
-from ..answers import EXACT, SEMANTIC, Cached, cacheable
-from ..assistance import asks_for_pairing
 from ..grounding import render_candidates, validate
 from ..policy import REFUSAL, SafetyReason, as_data, safety_check, sanitize
 from ..ports import Message, TokenChunk
@@ -64,9 +62,6 @@ never gets an empty response, and a fixed apology with nothing under it is
 an empty response with manners.
 """
 
-COLD_START = (
-    "I couldn't find a match for that, but here's what people near you are ordering at the moment."
-)
 """FR-80. An empty retrieval used to end the turn with an apology and no
 cards; now it falls back to what the city is actually ordering around this
 hour.
@@ -127,15 +122,7 @@ class TurnState:
     restaurant_ids: list[str] = field(default_factory=list)
     dropped: int = 0
     stopped: str = ""
-    # Which tier answered, "" when the model did. Carried out of the graph
-    # so the interaction fact can split response time by tier — a cache hit
-    # counted as a generation flatters the FR-95 average into meaninglessness.
-    cache_tier: str = ""
     query_vector: Sequence[float] = ()
-    # The fence the corpus was READ under, captured before retrieval and
-    # carried to the write-back. Opaque here on purpose — the graph never
-    # looks inside it, it only refuses to let it drift.
-    fence: Any = None
 
 
 class TurnRunner(Protocol):
@@ -160,59 +147,9 @@ Retrieve = Callable[[str, Filters], Awaitable[Hydrated]]
 Stream = Callable[[Task, Sequence[Message]], AsyncIterator[TokenChunk]]
 """`ModelRouter.stream` — a task, never a model id (ADR-0030 §3)."""
 
-ExactLookup = Callable[[str, str], Awaitable[tuple[Cached | None, Any]]]
-"""(question, city) -> a previous answer to the SAME question, or None.
 
-City travels because the cache is geo-bucketed (FR-74) and the graph is the
-only thing that knows which city this turn is for. How the rest of the
-fence is resolved — the model version, the corpus epoch — is the adapter's
-business; the graph only asks."""
-
-SemanticLookup = Callable[[Sequence[float], Any], Awaitable[Cached | None]]
-"""(query vector, fence) -> a previous answer to a CLOSE ENOUGH question.
-
-The FENCE, not the city: it was resolved when the corpus was read, and
-re-resolving it mid-turn is how an answer ends up filed under a corpus it
-was not computed from."""
-
-Remember = Callable[[Any, str, Sequence[float], Cached], Awaitable[None]]
 """Write-back. Best-effort by contract: it must never fail a turn that has
 already produced a good answer."""
-
-GoesWith = Callable[[Sequence[str], str], Awaitable[list[Passage]]]
-"""(item ids, city) -> what people order alongside them (FR-78).
-
-Separate from `retrieve` because it answers a different question. Retrieval
-finds dishes that MATCH the words; this finds dishes that go with a dish,
-which no amount of semantic similarity can tell you — "naan" and "biryani"
-are not similar, they are ordered together."""
-
-Fallback = Callable[[str], Awaitable[list[Passage]]]
-"""City -> what it is ordering around now (FR-80).
-
-A `Passage` like any other, so the cold-start path and the retrieval path
-hand `ground` the same shape — one place that decides what a citation means,
-rather than two that have to agree."""
-"""Write-back. Best-effort by contract: it must never fail a turn that has
-already produced a good answer."""
-
-
-def _served(hit: Cached | None, tier: str) -> dict[str, object]:
-    """A cache hit, in the shape a settled turn has.
-
-    `stopped` stays empty and `cache_tier` carries the news instead. A hit
-    is a turn that ANSWERED — marking it stopped would fold it in with
-    refusals and no-matches in the one field FR-95 splits on, and "how many
-    questions did we answer" would fall every time the cache got better.
-    """
-    if hit is None:
-        return {}
-    return {
-        "answer": hit.answer,
-        "item_ids": list(hit.item_ids),
-        "restaurant_ids": list(hit.restaurant_ids),
-        "cache_tier": tier,
-    }
 
 
 def build_turn(
@@ -220,11 +157,6 @@ def build_turn(
     retrieve: Retrieve,
     stream: Stream,
     emit: Emit,
-    exact: ExactLookup | None = None,
-    semantic: SemanticLookup | None = None,
-    remember: Remember | None = None,
-    fallback: Fallback | None = None,
-    goes_with: GoesWith | None = None,
     limit: int = 8,
 ) -> TurnRunner:
     """Compile the turn.
@@ -242,49 +174,13 @@ def build_turn(
             return {"answer": REFUSAL, "refusal_reason": verdict.reason, "stopped": "refused"}
         return {}
 
-    async def exact_cache(state: TurnState) -> dict[str, object]:
-        if exact is None or state.history:
-            # A turn with history is a REPLY, not a question: "what about
-            # something spicier?" means nothing on its own, so answering it
-            # from a text-keyed cache would hand one conversation's context
-            # to another (ADR-0045).
-            return {}
-        hit, fence = await exact(state.question, state.city)
-        return {"fence": fence, **_served(hit, EXACT)}
-
     async def retrieve_node(state: TurnState) -> dict[str, object]:
         found = await retrieve(state.question, Filters(city=state.city))
         if found.passages:
-            candidates = found.passages[:limit]
-            if goes_with is not None and asks_for_pairing(state.question):
-                # "What goes with the biryani?" is not a similarity question
-                # — naan and biryani are not alike, they are ordered
-                # together. Without this the model is asked to invent a
-                # pairing from a candidate list that contains none (FR-78).
-                known = {p.item_id for p in candidates}
-                partners = await goes_with([p.item_id for p in candidates], state.city)
-                candidates = [*candidates, *(p for p in partners if p.item_id not in known)]
-            return {"candidates": candidates, "query_vector": found.query_vector}
-        # FR-80: never an empty response. What the city is ordering around
-        # now is a real answer to "I have no idea what you meant" — and it
-        # is answered without a model for the same reason NO_MATCH is, since
-        # the one thing an empty candidate set reliably produces is an
-        # invented dish.
-        popular = await fallback(state.city) if fallback is not None else []
-        if popular:
-            return {
-                "answer": COLD_START,
-                "item_ids": [p.item_id for p in popular],
-                "restaurant_ids": sorted({p.restaurant_id for p in popular}),
-                "candidates": popular,
-                "stopped": "cold_start",
-            }
+            return {"candidates": found.passages[:limit], "query_vector": found.query_vector}
+        # Answered WITHOUT a model, and that is the point: the one thing an
+        # empty candidate set reliably produces is an invented dish.
         return {"answer": NO_MATCH, "stopped": "no_match"}
-
-    async def semantic_cache(state: TurnState) -> dict[str, object]:
-        if semantic is None or state.history or not state.query_vector:
-            return {}
-        return _served(await semantic(state.query_vector, state.fence), SEMANTIC)
 
     async def generate(state: TurnState) -> dict[str, object]:
         # Candidate text is restaurant-authored and arrives here by
@@ -314,22 +210,6 @@ def build_turn(
         cited = {p.item_id: p.restaurant_id for p in state.candidates}
         item_ids = list(grounded.item_ids)
         restaurant_ids = sorted({cited[i] for i in grounded.item_ids})
-        if remember is not None and cacheable(
-            answer=grounded.text,
-            history=state.history,
-            stopped=state.stopped,
-            dropped=grounded.dropped,
-            item_ids=item_ids,
-        ):
-            # The rule lives in `cacheable`, not here. Inlining it is how
-            # the ungroundedness case went missing: two places to remember,
-            # and the one with the tests was not the one being run.
-            await remember(
-                state.fence,
-                state.question,
-                state.query_vector,
-                Cached(answer=grounded.text, item_ids=item_ids, restaurant_ids=restaurant_ids),
-            )
         return {
             "answer": grounded.text,
             "item_ids": item_ids,
@@ -340,38 +220,22 @@ def build_turn(
     def onwards(nxt: str) -> Callable[[TurnState], str]:
         """Every edge asks the same question — did the last node settle the
         turn? — so there is one function for it, and a new short circuit is
-        a node that sets one of these fields, not a new predicate.
-
-        Two fields because they mean different things: `stopped` is "we did
-        not answer" and `cache_tier` is "we answered without a model". Both
-        end the turn; only one of them is a non-answer.
+        a node that sets `stopped`, not a new predicate.
         """
 
         def decide(state: TurnState) -> str:
-            return END if state.stopped or state.cache_tier else nxt
+            return END if state.stopped else nxt
 
         return decide
 
     graph = StateGraph(TurnState)
     graph.add_node("guard", guard)
-    graph.add_node("exact_cache", exact_cache)
     graph.add_node("retrieve", retrieve_node)
-    graph.add_node("semantic_cache", semantic_cache)
     graph.add_node("generate", generate)
     graph.add_node("ground", ground)
     graph.add_edge(START, "guard")
-    graph.add_conditional_edges(
-        "guard", onwards("exact_cache"), {"exact_cache": "exact_cache", END: END}
-    )
-    graph.add_conditional_edges(
-        "exact_cache", onwards("retrieve"), {"retrieve": "retrieve", END: END}
-    )
-    graph.add_conditional_edges(
-        "retrieve", onwards("semantic_cache"), {"semantic_cache": "semantic_cache", END: END}
-    )
-    graph.add_conditional_edges(
-        "semantic_cache", onwards("generate"), {"generate": "generate", END: END}
-    )
+    graph.add_conditional_edges("guard", onwards("retrieve"), {"retrieve": "retrieve", END: END})
+    graph.add_conditional_edges("retrieve", onwards("generate"), {"generate": "generate", END: END})
     graph.add_edge("generate", "ground")
     graph.add_edge("ground", END)
     # No checkpointer, deliberately (ADR-0031): a half-finished turn is

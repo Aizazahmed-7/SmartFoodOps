@@ -107,3 +107,21 @@ saga owns it from there. The assistant never orchestrates a money path.
 needs true human-in-the-loop suspension across minutes; or turn concurrency contending
 measurably with the retrieval API, which would move generation to its own process before it
 moves it to a broker.
+
+## Amendment (2026-10-09) — reindex and the rewrite jobs are retired
+
+The split stands. The Celery column's workload list does not: the rolling
+reindex (FR-61) and the explanation-rewrite jobs were removed, and taste
+profiles and content drafts are what remain of batch work.
+
+An embedding-model change is now a **rebuild, not a job**: truncate the
+chunk tables, reset the `assistant.knowledge.v1` consumer group, and replay
+`catalog.changes` — which is compacted, so the latest state of every
+restaurant is still on the topic. Search degrades to its lexical leg while
+that runs.
+
+This is the better trade at this size. A rolling reindex needed two
+embedding generations coexisting behind a `model_version` predicate, a
+`knowledge_index_state` table to track progress, and a queue to drive it —
+machinery whose purpose was to avoid an outage window for an operation
+performed approximately never, on a corpus that does not grow with traffic.

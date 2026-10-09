@@ -68,11 +68,11 @@ class PostgresRetriever:
         # textual query, which is exactly what this SQL avoids.
         common["query_vector"] = "[" + ",".join(repr(float(v)) for v in vector) + "]"
 
+        # Items only. The restaurant leg was dropped deliberately: a search
+        # now matches DISHES, and a restaurant surfaces because one of its
+        # dishes did. Catalog's lexical fallback still matches names.
         items = await self._leg_pair(session, filters, items=True, common=common, limit=limit)
-        restaurants = await self._leg_pair(
-            session, filters, items=False, common=common, limit=limit
-        )
-        return Retrieved(items=items, restaurants=restaurants, query_vector=vector)
+        return Retrieved(items=items, restaurants=(), query_vector=vector)
 
     async def texts_in_order(self, candidates: Sequence[Candidate]) -> list[Passage]:
         """Ranked candidates, hydrated, RANK PRESERVED.

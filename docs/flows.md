@@ -7,35 +7,35 @@ Companion to [erd.md](erd.md): the ERD shows what is stored; this shows **how da
 Every request arrow is tagged with **how** it travels. Reply arrows are left
 untagged: they are the return leg of the tagged call above them.
 
-| Tag | Transport | What it means | Failure mode when the other side is down |
-| --- | --------- | ------------- | ---------------------------------------- |
-| `[HTTP]` | JSON over HTTP, service→service | A **question** the caller cannot proceed without: "is there stock?", "did the card authorize?". Synchronous by necessity — the saga branches on the answer. | Caller blocks up to its timeout, then the activity retries under Temporal's policy. Bounded by `forward_deadline_s` (300s) on forward steps; compensations retry forever. |
-| `[DB]` | SQL over the connection pool | Direct SQL against a database **the calling service owns**. The order worker writes `order_db` because it *is* the order service's second process — it never touches `inventory_db` or `payment_db`, which are HTTP away. | Connection checkout waits (pool 5 + 10 overflow), then `TimeoutError` → activity retry. |
-| `[KAFKA]` | Avro event on a topic | A **fact already committed**, announced to whoever cares. Fire-and-forget: the producer never learns who consumed it. At-least-once, deduped by deterministic event id. | Nothing upstream blocks. Events queue in the outbox (visible as `outbox_pending`) and publish when the broker returns. |
-| `[TEMPORAL]` | gRPC to the Temporal service | Workflow orchestration: start-with-update, activity dispatch, signals, child-workflow starts. **Not** a service call and **not** an event — the durable execution layer. | On the checkout path, so an outage is a checkout outage: `SagaUnavailable` → 503 + `Retry-After`, nothing written. The retry re-derives the same order id. |
-| `[LOCAL]` | In-process function call | Same process, no network, no serialization. | Cannot fail independently. |
-| `[REDIS]` | Pub/sub hint on a channel | A **"look again" nudge** to whoever is listening right now — never a payload, never a record. Published post-commit, fire-and-forget. | Nothing blocks, nothing is stored: a lost hint costs seconds of staleness — the FE's poll floor still exists beneath every stream. |
-| `[SSE]` | Server-sent frames on a held connection | The browser's live wire: one long HTTP response streaming `event:`/`data:` frames. Auth is a single-use ticket (FR-38) because EventSource cannot send headers. | Connection death is NORMAL (jittered lifetime ends every stream on purpose); the client re-tickets and reopens, and falls back to polling meanwhile. |
-| `[AMQP]` | Celery task message over RabbitMQ | A **job**: "do this side effect, retry it on YOUR schedule until it sticks". Carries a task name and references (an order id, an S3 key) — never data, never bytes. Acked only after the task finishes (at-least-once), so every task body is idempotent. | The enqueue is a post-commit best-effort nudge; a dead broker is counted and swallowed, and the beat sweeper re-enqueues anything owed. Jobs already queued wait in RabbitMQ until a worker returns. |
-| `[WS]` | Frames on a rider's WebSocket | The courier's two-way wire (ADR-0006): GPS pings UP (bound to the VERIFIED rider_id — a frame cannot speak for another rider), offers and revokes DOWN. JSON tonight; binary protobuf is the named encoding seam. | An accelerator, never the floor: every pushed fact is also pollable at `/v1/rider/me`, so a dead socket costs latency. GPS liveness is the 90s heartbeat TTL, not the connection. |
-| `[DDB]` | Conditional write on DynamoDB | ADR-0011's lock: "check capacity AND take the offer lock" is ONE atomic guarded UpdateItem — there is no read-then-write to race. A failed condition is an ANSWER (busy, expired, already picked up), never an error. | The lock authority is a single table — a DDB outage stalls NEW assignments (fail closed) while existing deliveries ride on. |
-| `[S3]` | Object PUT/GET by key | Bytes at rest, addressed by a deterministic key (`receipts/{order_id}.pdf`). Everything else passes the KEY around — the claim-check rule: references ride brokers, bytes ride storage. | The task retries with backoff (S3 errors are in `autoretry_for`); a re-run overwrites the same key with the same bytes, so replays are free. |
+| Tag          | Transport                               | What it means                                                                                                                                                                                                                                             | Failure mode when the other side is down                                                                                                                                                             |
+| ------------ | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[HTTP]`     | JSON over HTTP, service→service         | A **question** the caller cannot proceed without: "is there stock?", "did the card authorize?". Synchronous by necessity — the saga branches on the answer.                                                                                               | Caller blocks up to its timeout, then the activity retries under Temporal's policy. Bounded by `forward_deadline_s` (300s) on forward steps; compensations retry forever.                            |
+| `[DB]`       | SQL over the connection pool            | Direct SQL against a database **the calling service owns**. The order worker writes `order_db` because it _is_ the order service's second process — it never touches `inventory_db` or `payment_db`, which are HTTP away.                                 | Connection checkout waits (pool 5 + 10 overflow), then `TimeoutError` → activity retry.                                                                                                              |
+| `[KAFKA]`    | Avro event on a topic                   | A **fact already committed**, announced to whoever cares. Fire-and-forget: the producer never learns who consumed it. At-least-once, deduped by deterministic event id.                                                                                   | Nothing upstream blocks. Events queue in the outbox (visible as `outbox_pending`) and publish when the broker returns.                                                                               |
+| `[TEMPORAL]` | gRPC to the Temporal service            | Workflow orchestration: start-with-update, activity dispatch, signals, child-workflow starts. **Not** a service call and **not** an event — the durable execution layer.                                                                                  | On the checkout path, so an outage is a checkout outage: `SagaUnavailable` → 503 + `Retry-After`, nothing written. The retry re-derives the same order id.                                           |
+| `[LOCAL]`    | In-process function call                | Same process, no network, no serialization.                                                                                                                                                                                                               | Cannot fail independently.                                                                                                                                                                           |
+| `[REDIS]`    | Pub/sub hint on a channel               | A **"look again" nudge** to whoever is listening right now — never a payload, never a record. Published post-commit, fire-and-forget.                                                                                                                     | Nothing blocks, nothing is stored: a lost hint costs seconds of staleness — the FE's poll floor still exists beneath every stream.                                                                   |
+| `[SSE]`      | Server-sent frames on a held connection | The browser's live wire: one long HTTP response streaming `event:`/`data:` frames. Auth is a single-use ticket (FR-38) because EventSource cannot send headers.                                                                                           | Connection death is NORMAL (jittered lifetime ends every stream on purpose); the client re-tickets and reopens, and falls back to polling meanwhile.                                                 |
+| `[AMQP]`     | Celery task message over RabbitMQ       | A **job**: "do this side effect, retry it on YOUR schedule until it sticks". Carries a task name and references (an order id, an S3 key) — never data, never bytes. Acked only after the task finishes (at-least-once), so every task body is idempotent. | The enqueue is a post-commit best-effort nudge; a dead broker is counted and swallowed, and the beat sweeper re-enqueues anything owed. Jobs already queued wait in RabbitMQ until a worker returns. |
+| `[WS]`       | Frames on a rider's WebSocket           | The courier's two-way wire (ADR-0006): GPS pings UP (bound to the VERIFIED rider_id — a frame cannot speak for another rider), offers and revokes DOWN. JSON tonight; binary protobuf is the named encoding seam.                                         | An accelerator, never the floor: every pushed fact is also pollable at `/v1/rider/me`, so a dead socket costs latency. GPS liveness is the 90s heartbeat TTL, not the connection.                    |
+| `[DDB]`      | Conditional write on DynamoDB           | ADR-0011's lock: "check capacity AND take the offer lock" is ONE atomic guarded UpdateItem — there is no read-then-write to race. A failed condition is an ANSWER (busy, expired, already picked up), never an error.                                     | The lock authority is a single table — a DDB outage stalls NEW assignments (fail closed) while existing deliveries ride on.                                                                          |
+| `[S3]`       | Object PUT/GET by key                   | Bytes at rest, addressed by a deterministic key (`receipts/{order_id}.pdf`). Everything else passes the KEY around — the claim-check rule: references ride brokers, bytes ride storage.                                                                   | The task retries with backoff (S3 errors are in `autoretry_for`); a re-run overwrites the same key with the same bytes, so replays are free.                                                         |
 
-**The rule these tags reveal:** `[HTTP]` and `[TEMPORAL]` are on the critical path — a customer is waiting. `[KAFKA]` never is. `[DB]` only crosses a **process** boundary, never a **service** boundary. `[REDIS]` and `[SSE]` carry HINTS, never truth — every render still comes from a `[HTTP]`+`[DB]` read, which is what lets both fail freely. `[AMQP]` carries JOBS — the one transport whose consumer is *supposed* to act on the world, which is exactly why it is the only one with per-message retry schedules and why its facts (`delivery_log`) live in the DB, not the broker.
+**The rule these tags reveal:** `[HTTP]` and `[TEMPORAL]` are on the critical path — a customer is waiting. `[KAFKA]` never is. `[DB]` only crosses a **process** boundary, never a **service** boundary. `[REDIS]` and `[SSE]` carry HINTS, never truth — every render still comes from a `[HTTP]`+`[DB]` read, which is what lets both fail freely. `[AMQP]` carries JOBS — the one transport whose consumer is _supposed_ to act on the world, which is exactly why it is the only one with per-message retry schedules and why its facts (`delivery_log`) live in the DB, not the broker.
 
 ---
 
 ## The identity cheat-sheet — every id in the system and its formula
 
-| Id                    | Formula                                                               | Example                                  | Why deterministic / why not                                                   |
-| --------------------- | --------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------- |
-| Entity ids            | `prefix_ + uuid4().hex`                                               | `ord_42…`, `rst_9…`, `brd_9…`, `usr_1…`  | Random — entities are _created_, not derived (cutover-minted brands reuse their branch's hex: `brd_` + the `rst_` tail) |
-| Event id              | `uuid5(NS, "{aggregate_type}:{aggregate_id}:{version}:{event_type}")` | `uuid5("order:ord_42:3:OrderConfirmed")` | Deterministic — same fact, same id, always → consumer dedupe, safe replays    |
-| Notification id       | `ntf_ + uuid5(NS, "{event_id}:{recipient_type}:{recipient_id}").hex`  | `ntf_e9cd…`                              | Deterministic per (event, recipient) → redelivery collides on PK, absorbed    |
-| Money idempotency key | `"{order_id}:{op}"`                                                   | `ord_42:auth`, `ord_42:capture`          | Natural key — one auth per order, ever                                        |
+| Id                    | Formula                                                               | Example                                  | Why deterministic / why not                                                                                                                                                       |
+| --------------------- | --------------------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Entity ids            | `prefix_ + uuid4().hex`                                               | `ord_42…`, `rst_9…`, `brd_9…`, `usr_1…`  | Random — entities are _created_, not derived (cutover-minted brands reuse their branch's hex: `brd_` + the `rst_` tail)                                                           |
+| Event id              | `uuid5(NS, "{aggregate_type}:{aggregate_id}:{version}:{event_type}")` | `uuid5("order:ord_42:3:OrderConfirmed")` | Deterministic — same fact, same id, always → consumer dedupe, safe replays                                                                                                        |
+| Notification id       | `ntf_ + uuid5(NS, "{event_id}:{recipient_type}:{recipient_id}").hex`  | `ntf_e9cd…`                              | Deterministic per (event, recipient) → redelivery collides on PK, absorbed                                                                                                        |
+| Money idempotency key | `"{order_id}:{op}"`                                                   | `ord_42:auth`, `ord_42:capture`          | Natural key — one auth per order, ever                                                                                                                                            |
 | HTTP idempotency key  | client uuid, minted per **cart-body-hash**, persisted in localStorage | header `Idempotency-Key: K`              | The DERIVATION SEED, not a ledger (ADR-0024): `order_id = uuid5(sub:K)`, and the orders row is the record — same cart = same key = same order; changed cart = new key = new order |
-| Workflow ids          | `ord::{order_id}` / `dlv::{order_id}`                                 | `ord::ord_42`                            | Identity, not randomness → `REJECT_DUPLICATE` makes every re-start a no-op    |
-| Consumer dedupe       | `(consumer_group, event_id)` row, or the deterministic PK itself      | —                                        | "Have I seen this fact?" answerable only because facts have stable names      |
+| Workflow ids          | `ord::{order_id}` / `dlv::{order_id}`                                 | `ord::ord_42`                            | Identity, not randomness → `REJECT_DUPLICATE` makes every re-start a no-op                                                                                                        |
+| Consumer dedupe       | `(consumer_group, event_id)` row, or the deterministic PK itself      | —                                        | "Have I seen this fact?" answerable only because facts have stable names                                                                                                          |
 
 Only some transitions stage events, so the published stream is sparser than the status history — an order moves through more states than it announces. Versions used to number those moves (this order published at 0, 3, 8, 9); no table carries one now (ADR-0039), and per-aggregate ordering comes from the Kafka topic key.
 
@@ -420,16 +420,16 @@ sequenceDiagram
 
 Where the money-document guarantees live:
 
-| Failure | What absorbs it |
-| --- | --- |
-| OrderSettled redelivered | receipts PK conflict-ignored → `minted=False` → no second nudge |
-| Enqueue lost (broker down) | counted (`receipt_enqueue_failures_total`) + beat sweeper re-enqueues |
-| Worker killed mid-task | acks_late → RabbitMQ redelivers; render overwrites, send checks the log |
-| Mailer 5xx / unreachable | `MailerUnavailable` → autoretry, deterministic exponential backoff, max 8 |
-| Identity 5xx / unreachable | `ContactsUnavailable` → same autoretry — the lookup happens inside the retryable task on purpose |
-| Mailer 4xx (bad recipient) | `MailerRejected` → `status='parked'` takes it out of the sweeper's partial index; setting it back to `pending` is the replay lever |
-| Identity 404 (no such user) | `UnknownRecipient` → parked the same way (`no_recipient`) — a data bug a human must see |
-| Crash between send and record | the one residual: ONE duplicate email — chosen over claim-first, which turns the same crash into a receipt that never arrives |
+| Failure                       | What absorbs it                                                                                                                    |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| OrderSettled redelivered      | receipts PK conflict-ignored → `minted=False` → no second nudge                                                                    |
+| Enqueue lost (broker down)    | counted (`receipt_enqueue_failures_total`) + beat sweeper re-enqueues                                                              |
+| Worker killed mid-task        | acks_late → RabbitMQ redelivers; render overwrites, send checks the log                                                            |
+| Mailer 5xx / unreachable      | `MailerUnavailable` → autoretry, deterministic exponential backoff, max 8                                                          |
+| Identity 5xx / unreachable    | `ContactsUnavailable` → same autoretry — the lookup happens inside the retryable task on purpose                                   |
+| Mailer 4xx (bad recipient)    | `MailerRejected` → `status='parked'` takes it out of the sweeper's partial index; setting it back to `pending` is the replay lever |
+| Identity 404 (no such user)   | `UnknownRecipient` → parked the same way (`no_recipient`) — a data bug a human must see                                            |
+| Crash between send and record | the one residual: ONE duplicate email — chosen over claim-first, which turns the same crash into a receipt that never arrives      |
 
 ## 11. Dispatch — the offer cascade (FR-27..32, ADR-0011/0026)
 
@@ -510,7 +510,7 @@ sequenceDiagram
     KF->>OD: [KAFKA] brand_id in every branch payload heals legacy rows<br/>(orders, order_facts, menu_views: SET brand_id WHERE IS NULL)<br/>— the cutover storm was exactly this, replayed for 22 brands
 ```
 
-Why brands needed no placement change: a cart never pinned a version at all after ADR-0036 — it consents to the total from its live quote, and a base edit only refuses the cart if it moved *that cart's* total. (Before 0036 the cart pinned the BRANCH's version, and any base edit moved that number through the fan-out, so every in-flight cart at every branch was refused.)
+Why brands needed no placement change: a cart never pinned a version at all after ADR-0036 — it consents to the total from its live quote, and a base edit only refuses the cart if it moved _that cart's_ total. (Before 0036 the cart pinned the BRANCH's version, and any base edit moved that number through the fan-out, so every in-flight cart at every branch was refused.)
 
 The read side of the same inheritance — how `base ∪ local − overrides` is actually computed — is diagram 13.
 
@@ -579,7 +579,7 @@ matters, not the constant. Two of the nine are worth knowing:
   the **uncached money path** — every checkout pays that one.
 - **Query 9 is the tearing guard, not a read.** It re-reads only the version
   column. Merging it into the render is not possible: its whole job is to
-  observe a value *after* the other reads finished.
+  observe a value _after_ the other reads finished.
 
 Collapsing 3–8 into a single `jsonb_agg` tree query is achievable in
 PostgreSQL and was considered and declined. `db.py` must stay
@@ -609,13 +609,13 @@ flowchart TB
 
 Trace the five items through that middle box — this table is the whole feature:
 
-| item | owner | `source` | 86'd here? | `available` | lands in |
-| ---- | ----- | -------- | ---------- | ----------- | -------- |
-| itm_biryani | brd_9 | `base` | no | true | cat_rice |
-| itm_pulao | brd_9 | `base` | **yes** | **false** | cat_rice |
-| itm_lassi | brd_9 | `base` | no | true | cat_drinks |
-| itm_kebab | rst_10 | `local` | no | true | **cat_rice** |
-| itm_wrap | rst_10 | `local` | no | true | cat_local |
+| item        | owner  | `source` | 86'd here? | `available` | lands in     |
+| ----------- | ------ | -------- | ---------- | ----------- | ------------ |
+| itm_biryani | brd_9  | `base`   | no         | true        | cat_rice     |
+| itm_pulao   | brd_9  | `base`   | **yes**    | **false**   | cat_rice     |
+| itm_lassi   | brd_9  | `base`   | no         | true        | cat_drinks   |
+| itm_kebab   | rst_10 | `local`  | no         | true        | **cat_rice** |
+| itm_wrap    | rst_10 | `local`  | no         | true        | cat_local    |
 
 Three things that table makes visible:
 
@@ -628,12 +628,12 @@ Three things that table makes visible:
 `_menu_scope` is the only place that knows about inheritance, which is why
 nothing else needed a brand/branch special case:
 
-| Read | Scope | Overrides | Result |
-| ---- | ----- | --------- | ------ |
-| `GET /v1/menus/rst_10` (Airport) | `brd_9, rst_10` | `itm_pulao` | base − Pulao + Kebab + Wrap |
-| `GET /v1/menus/rst_9` (Main) | `brd_9, rst_9` | none | the plain base menu, all `source: base` |
-| `GET /v1/menus/brd_9` (the brand) | `brd_9` | skipped — no `brand_id` | the base menu the owner edits |
-| legacy pre-brands row | its own id | skipped | byte-identical to pre-ADR-0028 behaviour |
+| Read                              | Scope           | Overrides               | Result                                   |
+| --------------------------------- | --------------- | ----------------------- | ---------------------------------------- |
+| `GET /v1/menus/rst_10` (Airport)  | `brd_9, rst_10` | `itm_pulao`             | base − Pulao + Kebab + Wrap              |
+| `GET /v1/menus/rst_9` (Main)      | `brd_9, rst_9`  | none                    | the plain base menu, all `source: base`  |
+| `GET /v1/menus/brd_9` (the brand) | `brd_9`         | skipped — no `brand_id` | the base menu the owner edits            |
+| legacy pre-brands row             | its own id      | skipped                 | byte-identical to pre-ADR-0028 behaviour |
 
 Note the guard is `if restaurant.brand_id is not None`, **never** `if kind ==
 'brand'` — the parent pointer is the discriminator that matters, which is
@@ -660,7 +660,7 @@ the pricing engine already reads: `available AND id NOT IN overrides`.
 
 Diagram 2 shows `transition()` as a single arrow. This is what is inside it,
 because B5's explanations are only as truthful as the timestamps underneath
-them, and the reason those can be trusted is *where* they are written.
+them, and the reason those can be trusted is _where_ they are written.
 
 ```mermaid
 sequenceDiagram
@@ -725,7 +725,7 @@ sequenceDiagram
 
 `comment` is stored **verbatim and is never interpreted here**. It becomes
 model input in FR-92, where it is exactly the untrusted-corpus problem
-ADR-0043 names — so the defence belongs at *that* boundary, where the text
+ADR-0043 names — so the defence belongs at _that_ boundary, where the text
 meets a model, and not in a sanitiser here that would also mangle what
 someone actually wrote. (B6 found two real attacks against that corpus: a
 planted review that could surface "repeated reports of food poisoning" as a
@@ -742,7 +742,7 @@ replay of history rather than the current truth.
 ## 16. Knowledge ingestion — a menu edit becomes searchable (B1, FR-57/58/59)
 
 The whole of B1. A restaurant owner edits a dish; within 60 seconds the
-assistant can find it *by meaning*. Nothing in this path is authored — every
+assistant can find it _by meaning_. Nothing in this path is authored — every
 row it writes is derived and rebuildable.
 
 ```mermaid
@@ -782,7 +782,6 @@ sequenceDiagram
     DR->>DR: _stale() = chunks whose text differs from what is stored
     Note over DR: de-duplicated WITHIN the restaurant too: the same drink listed<br/>under two categories is two chunks and ONE vector. Keyed on a<br/>digest of the text, derived in chunk() and never stored
     DR->>EMB: embed([every stale text, in ONE batched request])
-    Note over DR,EMB: cross-restaurant vector reuse was removed deliberately — the<br/>three-dict hot path it needed cost more in readability than it<br/>saved, and it was the only thing forcing this loop to stay<br/>sequential
     Note over DR,EMB: OUTSIDE any transaction — this is seconds of network
 
     rect rgb(0,0,0)
@@ -790,8 +789,6 @@ sequenceDiagram
         DR->>VS: upsert restaurant chunk + item chunks, then reconcile<br/>(delete chunks for items no longer on the menu)
         DR->>PQ: DELETE WHERE restaurant_id=:id AND payload=:payload
         Note over PQ: GUARDED on the PAYLOAD itself. The drain spent seconds embedding<br/>with no transaction open, an unguarded delete would silently<br/>discard an edit that landed in that gap, and the index would<br/>stay wrong until the restaurant happened to change again.<br/>rowcount 0 → the row stays and the next tick picks it up
-        DR->>DR: bump the answer-cache epoch for every city it WAS in and IS in
-        Note over DR: only when something retrieval can SEE changed — an 86'd dish<br/>leaves every chunk's TEXT identical while changing results.<br/>A pass that re-confirms an unchanged menu must not cold-start<br/>the whole city's cache on a catalog heartbeat
     end
     Note over DR: KNOWLEDGE_BACKLOG_SECONDS gauge is set BEFORE this pass runs,<br/>so a pass that fails on every row still reports the backlog<br/>it could not clear (NFR-28's alarm)
 ```
@@ -801,7 +798,7 @@ sequenceDiagram
 Three reasons, in order of how much they cost to get wrong:
 
 1. **Money.** Embedding is a paid API call. ADR-0028's brand fan-out means one
-   base-menu edit stages a full-state event *per branch*; an owner fixing six
+   base-menu edit stages a full-state event _per branch_; an owner fixing six
    dishes across twelve branches produces seventy-two events in twenty
    seconds, all converging on the same final state. The debounce and the
    text comparison are what collapse that to one pass and one
@@ -816,7 +813,7 @@ Three reasons, in order of how much they cost to get wrong:
 
 `due_at` keeps the **earlier** value on conflict. A trailing (sliding)
 debounce restarts its clock on every event, so an owner editing twenty dishes
-over five minutes would be indexed *never* — each edit pushing the deadline
+over five minutes would be indexed _never_ — each edit pushing the deadline
 out — and would blow past NFR-28's 60 s budget with nothing reporting it.
 A fixed window bounds staleness at `debounce + drain time` by construction.
 
@@ -833,6 +830,419 @@ procedure**: with the rolling reindex removed, changing `embedding_model` or
 `embedding_dimensions` means truncate, reset, replay — accepting an empty
 index while it runs. It is the same property B7 leans on to populate
 `restaurant_brands` without a backfill.
+
+---
+
+## 17. Hybrid retrieval — "something light" finds a salad (B2, FR-62/63/64/65)
+
+B1 filled the index. This is the half that reads it, and the only read path
+Part A makes into the GenAI plane.
+
+**Four queries, two fusions, one embedding.** The customer's words go to two
+blind searches that fail in opposite directions, and the merge is what turns
+two partial answers into one good one.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Customer
+    participant CAT as catalog /v1/search
+    participant HS as HybridSearch
+    participant R as PostgresRetriever
+    participant EMB as Embedding provider
+    participant DB as assistant_db
+
+    C->>CAT: GET /v1/search?q=something light&city=springfield
+    CAT->>HS: search(query, city, ...)
+    alt hybrid off, OR no city
+        HS->>HS: X-Search-Path = lexical
+        HS-->>CAT: PostgresSearch — catalog's own keyword search
+        Note over HS: every retrieval is geo-scoped (FR-63), so a city-less query<br/>would have to invent a city or drop the scope. Lexical has no<br/>such constraint, so it keeps answering
+    end
+
+    HS->>R: POST /v1/internal/assistant/retrieve  (timeout 2s)
+    Note over HS,R: ADR-0029 permits this ONE call on three conditions, all<br/>enforced in code: flag-gated, timeout-bounded, falls back
+
+    R->>DB: SET pg_trgm.word_similarity_threshold = 0.35
+    Note over R,DB: per-connection IN CODE, never a server default — a fresh<br/>environment must not silently match differently from the one<br/>the threshold was measured against (ADR-0019)
+    R->>EMB: embed(["something light"]) — ONCE, for all four queries
+    R->>R: fetch = limit * LEG_OVERFETCH (4)
+
+    rect rgb(0,0,0)
+        Note over R,DB: leg pair 1 of 2 — ITEM chunks
+        R->>DB: VECTOR leg: ORDER BY embedding <=> :query_vector LIMIT fetch
+        Note over DB: <=> must match the HNSW opclass (vector_cosine_ops) or the<br/>planner ignores the index and every search silently becomes<br/>a sequential scan
+        R->>DB: LEXICAL leg: websearch_to_tsquery OR :q <% content
+        Note over DB: two matchers, one query — FTS finds the words typed,<br/>trigram finds the ones meant. ts_rank DESC puts exact<br/>matches first, so a typo never outranks its own target
+        R->>R: fuse(vector_leg, lexical_leg) → RRF
+    end
+    rect rgb(0,0,0)
+        Note over R,DB: leg pair 2 of 2 — RESTAURANT chunks, identical shape
+        R->>DB: vector leg, then lexical leg
+        R->>R: fuse(...)
+    end
+
+    R-->>HS: ranked item ids + restaurant ids. NO names, NO prices
+    HS->>DB: hydrate from CATALOG's own tables, at request time
+    Note over HS,DB: ids in, cards out. The index may be 60s stale, so the thing<br/>a customer is quoted is re-read live — not a rule to remember,<br/>but an absence: price is not in the chunk text at all (FR-60)
+    HS->>HS: X-Search-Path = hybrid
+    HS-->>C: results
+```
+
+### The two legs, and why neither is enough
+
+| Query | Vector leg | Lexical leg |
+| --- | --- | --- |
+| "something light" | finds the salad — **nothing** contains the word "light" | nothing |
+| "biriani" (typo) | embedding is nowhere near "Biryani" | trigram catches it: `word_similarity = 0.45` |
+| "Chapli Kebab" | returns *similar* kebabs, exact match maybe 3rd | exact FTS hit, rank 1 |
+
+Each is blind exactly where the other sees. That is the argument for fusing,
+and it is also why they must share their `WHERE` clause — see below.
+
+### Why merge by RANK and not by score
+
+```
+score = Σ 1/(k + rank)        k = 60
+```
+
+A cosine distance and a `ts_rank` are not on the same scale, do not have the
+same distribution, and are not even monotonic with respect to one another.
+**Any weighted sum of the two raw numbers is a number with no meaning**, and
+the weights would need re-tuning every time either leg changed.
+
+Ranks are comparable by construction. And at `k=60` the top of each list is
+worth a lot but not everything, so an item both legs rank *middling* beats
+one leg's top hit — which is the whole point: **it promotes agreement over
+confidence.**
+
+### The three details that would fail silently
+
+**`predicates()` is composed once and used by both legs.** If they could
+drift apart on scoping, one would eventually return a paused restaurant or
+another city's menu, and the fusion would launder it into the result set as
+though both legs agreed.
+
+**`CONTENT_FTS` must stay byte-identical to the expression index** in
+migration 0006. Postgres only uses an expression index when the query
+expression matches it verbatim; a mismatch degrades to a sequential scan with
+no error. A test pins the constant to the migration source.
+
+**`<=>` must match the opclass the HNSW index was built with.** Use a
+different distance operator and the planner ignores the index entirely —
+again silently, again a sequential scan.
+
+### Over-fetch, and why
+
+```python
+LEG_OVERFETCH = 4
+fetch = limit * LEG_OVERFETCH
+```
+
+Fusion needs more candidates than it returns, or it cannot do its job: the
+result both legs rank middling only exists in the merged set if both legs
+were asked deep enough to include it. Fetching exactly `limit` per leg would
+turn the fusion into "whichever leg happened to rank it first".
+
+---
+
+## 18. Worked example — "a kebab under $10" (B2, and a gap)
+
+§17 shows the machinery. This traces one concrete question through it, and
+is deliberately the example that does **not** fully work today.
+
+```mermaid
+flowchart TD
+    Q["customer types:<br/>a kebab under $10"]
+
+    Q --> PATH{which surface?}
+    PATH -->|"chat<br/>POST /v1/assistant/messages"| CHAT
+    PATH -->|"search box<br/>GET /v1/search"| SEARCH
+
+    CHAT["domain/graph/turn.py:256<br/>Filters(city=state.city)"]
+    SEARCH["catalog /v1/search<br/>q, city, cuisine, tag"]
+
+    CHAT --> GAP
+    SEARCH --> GAP
+    GAP["STRUCTURAL filters apply by default:<br/>city, open_only, available_only<br/>---<br/>no step parses 'under $10'<br/>so max_price_cents stays None"]
+
+    GAP --> P["predicates() builds the WHERE"]
+    P --> W["city = :city<br/>AND status = 'open'<br/>AND available<br/>---<br/>price_cents clause NOT emitted"]
+
+    W --> VEC["VECTOR leg<br/>embed('a kebab under $10')<br/>ORDER BY cosine distance"]
+    W --> LEX["LEXICAL leg<br/>tsquery('a kebab under 10')<br/>+ trigram"]
+
+    VEC --> V1["Seekh Kebab 1200<br/>Chapli Kebab 950<br/>Shami Kebab 800"]
+    LEX --> L1["Chapli Kebab 950<br/>Seekh Kebab 1200<br/>Kebab Roll 600"]
+
+    V1 --> F["fuse — RRF"]
+    L1 --> F
+    F --> OUT["Chapli Kebab 950 ok<br/>Seekh Kebab 1200 OVER BUDGET<br/>Shami Kebab 800 ok"]
+
+    OUT --> CARDS["cards re-priced LIVE from catalog<br/>so the PRICE shown is always correct"]
+    CARDS --> U["customer sees kebabs<br/>including ones over $10"]
+```
+
+### Structural filters versus preference filters
+
+The chat path is **not** unfiltered. `Filters` defaults `available_only` and
+`open_only` to `True`, so every chat retrieval already runs:
+
+```sql
+WHERE city = :city AND status = 'open' AND available
+```
+
+The split is deliberate, and it is the thing to say out loud in a review:
+
+- **Structural filters** — city, open, available — answer *"could this
+  customer order this at all?"* A closed kitchen or a sold-out dish is
+  unorderable whatever anyone said, so these are safety and they are **on by
+  default**, obtained by omission rather than by remembering.
+- **Preference filters** — price, tags, cuisines — answer *"is this what
+  they wanted?"* These require parsing the sentence, and that step does not
+  exist.
+
+So a customer is never offered something unorderable. They are offered
+something they did not ask for.
+
+### Where each filter actually comes from
+
+| Filter | Set by | Reaches the SQL? |
+| --- | --- | --- |
+| `city` | the chat turn / the `?city=` param | **yes** — always, FR-63 |
+| `status = 'open'` | `open_only`, default True | **yes** |
+| `available` | `available_only`, default True | **yes** |
+| `cuisines` | `?cuisine=` on `/v1/search` only | yes, from search; never from chat |
+| `tags` | `?tag=` on `/v1/search` only | yes, from search; never from chat |
+| `max_price_cents` | **nothing** | **no** |
+
+### What the generated SQL actually is
+
+With `max_price_cents=None`, `predicates()` simply never appends the clause:
+
+```sql
+-- what runs today
+WHERE city = :city AND status = 'open' AND available
+ORDER BY embedding <=> :query_vector LIMIT 40
+
+-- what would run if the budget were extracted
+WHERE city = :city AND status = 'open' AND available
+  AND price_cents <= :max_price_cents
+ORDER BY embedding <=> :query_vector LIMIT 40
+```
+
+The metadata filtering mechanism is sound and already exercised by `city`,
+`status` and `available` on every query. **The missing piece is upstream of
+it**: nobody turns "under $10" into `max_price_cents=1000`.
+
+### Why the customer is not shown a wrong price
+
+Worth separating two failures that sound similar:
+
+- **A wrong price** — impossible. Cards are re-resolved live from catalog
+  (FR-60), so whatever is displayed is correct at display time.
+- **A badly filtered list** — what actually happens. The customer asked for
+  under $10 and is shown a $12 kebab, correctly priced.
+
+This is a relevance bug, not a correctness bug. Nobody is misquoted.
+
+### Closing it
+
+`Task.CLASSIFY` and `Task.REWRITE` exist in the task vocabulary and are
+**never invoked** — the slot for this work was anticipated and left empty.
+Two ways to fill it:
+
+1. **Cheap-tier extraction.** One `CLASSIFY` call turns the question into
+   `{max_price_cents: 1000, tags: [], cuisines: []}` before retrieval. Costs
+   a model call per turn on the hot path, and the extractor can be wrong in a
+   way a `WHERE` clause then enforces confidently.
+2. **Deterministic parsing.** A regex over currency patterns. No model call,
+   no cost, and it fails visibly rather than creatively — but it only ever
+   catches the forms somebody wrote down.
+
+Neither is written. Recorded here so the gap is visible rather than assumed
+closed, because the `Filters` field existing makes it look closed.
+
+---
+
+## 19. A chat turn — question to streamed answer (B3, FR-67/68/69/70)
+
+The centrepiece. Note what owns what: the **socket owns nothing**. The turn
+is a background task, so a reader who never connects, disconnects, or
+reconnects three times changes nothing about what is being written.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Customer
+    participant API as POST /v1/assistant/messages
+    participant DB as assistant_db
+    participant T as TurnRunner (background task)
+    participant G as the graph
+    participant M as Model provider
+    participant BUS as Redis pub/sub
+    participant SSE as GET /sse/assistant/{id}
+
+    C->>API: {"question": "something light?", "city": "springfield"}
+    API->>DB: ensure_conversation(conversation_id, user_id)
+    Note over API,DB: ownership BEFORE any write — refused before a single row<br/>exists, so a probe cannot tell from a side effect that the id does
+    API->>DB: start_message(assistant row, status=STREAMING)
+    Note over DB: message_id is minted SERVER-side, fresh per request. A retried<br/>POST is therefore a SECOND turn, not an attachment to the one<br/>already running — see 'What a retry does now' below
+    API->>DB: start_message(user row, status=COMPLETE)
+    API-->>C: 202 {message_id, ticket, stream: "/sse/assistant/msg_..."}
+    Note over API,C: 202 and not 200 — the body carries an id and a ticket,<br/>never an answer. A ticket because an EventSource cannot<br/>send an Authorization header
+
+    API->>T: spawn background task
+    T->>DB: history(conversation) EXCLUDING both rows just written
+    Note over T,DB: keeping the user row in would send the question twice —<br/>once as context, once as the question — and would make every<br/>turn look like a REPLY to itself
+
+    C->>SSE: GET with ticket (and optional Last-Event-ID)
+    SSE->>DB: replay stored chunks after Last-Event-ID
+    SSE->>BUS: subscribe to the live channel
+
+    rect rgb(0,0,0)
+        Note over T,G: the graph — two short circuits before any spend
+        G->>G: guard — safety over question PLUS full history
+        alt refused
+            G-->>T: REFUSAL, stopped=refused
+        end
+        G->>G: retrieve — hybrid (that is B2, diagram 17)
+        alt nothing matched
+            G-->>T: NO_MATCH, stopped=no_match. NO model call
+        end
+        G->>M: generate — candidates as DATA, question sanitized
+        loop each token
+            M-->>G: chunk
+            G->>T: emit(text)
+            T->>T: stripper removes [item:...] markers
+            T->>DB: append_chunk(seq, payload)
+            T->>BUS: publish the same payload
+            Note over T,DB: table FIRST, bus SECOND. The window between them is the<br/>only moment a chunk exists and is unreplayable
+            BUS-->>SSE: frame
+            SSE-->>C: data: {"seq": 7, "text": "Try the "}
+        end
+        G->>G: ground — every [item:id] checked against what was retrieved
+        Note over G: an unknown id is STRIPPED and counted, it does not fail<br/>the turn. Refusing over one bad id would turn a cosmetic<br/>model error into an outage
+    end
+
+    T->>T: flush() — write the stripper residue
+    Note over T: BEFORE the message is settled. When this ran inside close()<br/>it fired after finish_message committed, so a reader could see<br/>done=true with the tail missing (found by the B3 review)
+    T->>DB: finish_message(status=COMPLETE)
+    T->>BUS: terminal frame {done: true, item_ids: [...]}
+    Note over T,BUS: published, NOT stored. A late reader learns the message is<br/>finished from its status, so persisting a terminal chunk would<br/>be a second source of truth for the same fact
+    SSE-->>C: data: {"seq": 12, "done": true, "item_ids": ["itm_a"]}
+    C->>C: render cards from item_ids, priced LIVE from catalog
+```
+
+### The two short circuits, and what each one is avoiding
+
+| Node | Short circuit | What it prevents |
+| --- | --- | --- |
+| `guard` | a safety question never reaches a model | answering a medical question at all |
+| `retrieve` | nothing matched → a fixed line | **an invented dish** — an empty candidate set is the exact prompt under which a model fills the silence |
+
+Read top to bottom, that ordering is the cost model. Everything above
+`generate` answers without paying. Both remaining circuits are about
+*correctness*, which is why they survived: neither exists to save money.
+
+### What used to be here: two cache tiers
+
+The graph had four nodes before `generate`, not two. `exact_cache` keyed a
+finished answer by question hash and ran **first**, because it needs nothing
+— no embedding, no query — so a hit collapsed the whole turn to one round
+trip. `semantic_cache` ran **after** retrieval, because its input *was*
+retrieval's query vector; in front, every miss would have embedded the
+question twice, and a cache that doubles the embedding bill is not a cache.
+Both were skipped outright when the conversation had history, because a turn
+with history is a **reply** — "what about something spicier?" means nothing
+on its own, so answering it from a text-keyed cache would hand one
+conversation's context to another.
+
+Both are gone, with the `answer_cache` and `knowledge_epochs` tables behind
+them (migration `0020`, and see `erd.md` for the fence that invalidated
+them). Every turn now calls the model. The reasoning is in the ERD: these
+were optimisations, there is no load to optimise for, and they cost more in
+explainability than they returned in latency.
+
+### What a retry does now
+
+Worth stating plainly, because this is the one place the simplification
+changed observable behaviour rather than just removing a layer.
+
+`messages.idempotency_key` was dropped with the same migration. `message_id`
+is minted server-side per request, so **a client that retries
+`POST /v1/assistant/messages` starts a second turn**: two generations, two
+bills, and two answers racing to the same screen.
+
+Nothing currently retries — the endpoint is 202 and the client follows the
+returned stream — so this is latent, not live. It is the second thing to
+reinstate after the cache, and it is cheap: accept a client key, derive
+`message_id` from it, and let `start_message`'s existing "False when the id
+already exists" return do the rest. That return value is still there and
+still tested; only the key that would feed it is missing.
+
+---
+
+## 20. Stream resume — a tunnel, and no gap (B3, FR-69, ADR-0042)
+
+The property that makes the socket disposable.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Customer
+    participant SSE as GET /sse/assistant/{id}
+    participant DB as message_chunks
+    participant BUS as Redis pub/sub
+    participant T as TurnRunner
+
+    Note over T: the turn is running regardless of whether anyone is listening
+    T->>DB: seq 1..6 written
+    T->>BUS: seq 1..6 published
+
+    C->>SSE: connect, ticket, no Last-Event-ID
+    SSE->>DB: SELECT chunks ORDER BY seq
+    SSE-->>C: replay 1..6
+    SSE->>BUS: subscribe
+    T->>BUS: seq 7
+    BUS-->>SSE: seq 7
+    SSE-->>C: seq 7
+
+    Note over C,SSE: TRAIN ENTERS TUNNEL — socket drops
+    T->>DB: seq 8, 9, 10 written
+    T->>BUS: seq 8, 9, 10 published (nobody is listening)
+
+    C->>SSE: reconnect, Last-Event-ID: 7
+    SSE->>DB: SELECT chunks WHERE seq > 7
+    SSE-->>C: replay 8, 9, 10
+    SSE->>BUS: subscribe
+    Note over SSE: no gap, and no duplicate — the reader asked for<br/>"after 7" and the table is the record of what was sent
+    T->>BUS: terminal {done: true}
+    BUS-->>SSE: terminal
+    SSE-->>C: done
+```
+
+### Why the chunk goes to the table before the bus
+
+> The window between those two calls is the only moment a chunk exists and is
+> unreplayable, and doing it the other way round would widen that window to
+> "until the write lands" — which is exactly when a reconnecting reader asks.
+
+### Why the terminal frame is published but never stored
+
+A reader arriving after the end learns the message is finished from its
+`status`, not from a row. Persisting a terminal chunk would be a **second
+source of truth for the same fact**, and two sources eventually disagree.
+
+### The bug this design still had
+
+`flush()` is separate from `close()` and runs **before** the message is
+settled. When flushing lived inside `close()`, it ran in `run_turn`'s
+`finally` — *after* `finish_message` had committed. A reader snapshotting in
+that window saw `done=true` with the tail missing, and the synthetic terminal
+frame reused the sequence number the residue was about to take: two readers,
+two meanings for one `seq`, and a tail nobody could fetch. Exactly the gap
+ADR-0042 §2 claims is impossible. Found by the B3 review.
 
 ---
 

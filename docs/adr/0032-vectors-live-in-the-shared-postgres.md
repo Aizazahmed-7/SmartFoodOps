@@ -143,3 +143,22 @@ NFR-22's 150 ms at realistic corpus size, or
 recall@k on the golden set (FR-104) that HNSW tuning cannot recover; index build or memory
 cost that disturbs the cluster's other databases; ADR-0029 §5's split trigger firing; or an
 Aurora minor version that cannot carry the pgvector features §5 depends on.
+
+## Amendment (2026-10-09) — `model_version` is gone from the schema
+
+§3's predicate design is unchanged in intent but no longer literal:
+`model_version` was dropped from both chunk tables (migration `0018`). With
+the embedding model fixed by `Settings`, every row carried the same value —
+a constant leading both primary keys and all four indexes, contributing no
+selectivity, behind a query predicate that was always true.
+
+The reasoning it encoded is still correct and still binding: **vectors from
+different models, or different dimensions, must never mix in one result
+set.** That is now enforced by replacement rather than by a predicate — see
+the amendment on ADR-0031. A dimension change remains a schema change, since
+`vector(1536)` and `vector(512)` are different column types.
+
+Everything else here stands: the shared-Postgres choice, the `VectorStore`
+port, the pinned base-matched image, per-city HNSW, and `REFRESH COLLATION
+VERSION` + `REINDEX` as the documented route (which is Postgres's own
+`REINDEX`, unrelated to the retired embedding reindex).

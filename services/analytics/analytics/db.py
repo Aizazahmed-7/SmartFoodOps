@@ -128,11 +128,6 @@ assistant_facts = sa.Table(
     # worse, which is the direction a metric must never move for free.
     sa.Column("outcome", sa.Text, nullable=False),
     sa.Column("refusal_reason", sa.Text, nullable=False, server_default="none"),
-    # "" when a model produced the answer, otherwise which cache tier served
-    # it. Without the split, "average AI response time" (FR-95) averages a
-    # 4ms exact-cache hit against a 2s generation and stops describing
-    # anything a customer experiences.
-    sa.Column("cache_tier", sa.Text, nullable=False, server_default=""),
     # What the answer CITED, not what retrieval found. A conversion credited
     # to a restaurant the customer was never shown is invented (FR-97).
     sa.Column("item_ids", _slugs(), nullable=False),

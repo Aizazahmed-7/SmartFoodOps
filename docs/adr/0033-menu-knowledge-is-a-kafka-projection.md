@@ -111,3 +111,20 @@ pipeline that costs real money per call.
 chunking change driven by recall@k; per-item chunks proving too coarse (a long menu
 description wanting its own sub-chunks); or catalog gaining real tombstones, which would make
 §6's reconciliation optional rather than load-bearing.
+
+## Amendment (2026-10-09) — `content_hash` is computed, not stored
+
+§5's rule is unchanged: a digest decides what to **embed** and never decides
+what to **write**. Only the storage went (migration `0018`).
+
+The drain now compares `content` itself, which is already on the row because
+B2's lexical leg reads it. A stored `sha256(content)` was a derived column
+that could disagree with its own source, and the consequence of disagreement
+was silent: a chunk whose text had changed but whose hash had not would keep
+a stale vector indefinitely. Comparing the text removes that failure mode
+entirely rather than defending against it.
+
+The digest still exists in memory during a pass, collapsing chunks that
+share text within one restaurant (the same drink under two categories is two
+chunks and one vector). §8's caveat — that the digest is only as good as the
+text recipe's stability — now applies to that de-duplication alone.

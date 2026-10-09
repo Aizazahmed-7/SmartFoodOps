@@ -647,6 +647,107 @@ construction* rather than by a filter someone must remember (FR-63).
 
 ---
 
+## assistant_db — conversations and the answer cache (Part B, B3)
+
+The knowledge index above is derived and rebuildable. **These are not.** A
+conversation is the only authored data the assistant owns, and NFR-32 puts a
+retention clock on it.
+
+```mermaid
+erDiagram
+    conversations {
+        text id PK "cnv_..."
+        text user_id "OPAQUE — never a name or an email (FR-73, NFR-12)"
+        text city "the retrieval scope for EVERY turn in this conversation"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    messages {
+        text id PK "msg_..."
+        text conversation_id FK "ON DELETE CASCADE"
+        text role "user | assistant"
+        text content "the ASSEMBLED answer — the durable record"
+        text status "streaming | complete | failed"
+        slugs item_ids "what the answer CITED, after grounding"
+        timestamptz created_at
+    }
+    message_chunks {
+        text message_id PK "FK, ON DELETE CASCADE"
+        int seq PK "monotonic per message — the composite PK enforces it"
+        text content "one SSE frame, verbatim"
+        timestamptz created_at
+    }
+    conversations ||--o{ messages : "CASCADE"
+    messages ||--o{ message_chunks : "CASCADE"
+```
+
+**The CASCADEs are a retention mechanism, not a convenience.** NFR-32 purges
+a conversation after 90 days, and *a retention rule that requires remembering
+to delete a second table is a rule that fails an audit rather than a test*.
+Deleting the conversation row takes its messages and their chunks with it.
+
+**`messages.content` versus `message_chunks`.** Two representations of the
+same answer, and they are not redundant: `content` is the assembled, durable
+record, and nothing downstream reconstructs a message by concatenating
+chunks. The chunks exist only to serve a reconnect (ADR-0042 §6).
+
+**`message_chunks (message_id, seq)` composite PK.** A producer that reused a
+sequence number would corrupt a reconnect silently, so the database refuses
+instead of trusting the producer.
+
+**`messages.item_ids` is stored rather than re-derived.** The `[item:...]`
+markers are stripped from `content` before anybody reads it, so the ids are
+unrecoverable from the text — a reader reconnecting after the turn finished
+would otherwise get the prose with no cards under it.
+
+**`messages.status`** is what a reconnect reads to know whether to
+replay-and-close or replay-and-follow, and it is what makes a turn that died
+mid-generation distinguishable from one still running.
+
+### What is deliberately NOT here: the answer cache
+
+B3 originally carried two more tables, `answer_cache` and `knowledge_epochs`,
+and both were **removed** (migration `0020`). They are worth a paragraph
+because "why is there no cache?" is the first question a reviewer asks, and
+the answer is not "we forgot".
+
+The cache stored a finished answer under a hash of the question. That is
+easy. The hard half is invalidation: *an answer can be falsified by a dish it
+never mentioned*. "Nothing light tonight" becomes wrong the moment a salad is
+added, and it cites nothing at all — so there is no set of keys you can
+compute and delete.
+
+The design that handled it was a **fence**. A per-city counter in
+`knowledge_epochs`, bumped by B1's drain in the **same transaction** as the
+chunk write, sat inside the cache key:
+
+```
+assistant:ans:springfield:7:a3f9c2…      ← the fence IS the key
+              ^city      ^epoch  ^question hash
+```
+
+Moving the counter made every older entry **unreachable rather than deleted**
+— one increment invalidating an unbounded number of answers in O(1), without
+knowing which ones they were. (`city` had to be *in the key* and not merely a
+filter: with `(question, model)` alone, two cities overwrote each other's row
+and then both missed on the city predicate, so the more popular a question
+was across cities, the closer its hit rate got to zero. Found in the B3
+review.)
+
+It worked. It was removed anyway, because **it is an optimisation and this
+system has no load to optimise for**. What it cost was the thing that matters
+here: the drain and the chat path became coupled through a counter, every
+turn carried a tier label into analytics, and explaining a single question
+meant explaining two tables that exist only to make the answer arrive sooner.
+Every turn now calls the model. The behaviour is identical and the flow fits
+on one page.
+
+The trade is explicit, not accidental: this is the first thing to reinstate
+under real traffic, and ADR-0045 is kept (marked superseded) so the fence
+design does not have to be rediscovered.
+
+---
+
 ## Cross-service references — ids, not FKs
 
 These lines are _conventions kept true by events and idempotent consumers_, never constraints the databases enforce:

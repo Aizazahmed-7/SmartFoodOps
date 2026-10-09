@@ -1,6 +1,6 @@
 # 0045 — The answer cache, and what it is fenced against
 
-**Status**: Accepted (2026-09-22)
+**Status**: Superseded by the amendment below (2026-10-09) — implemented, then removed. Kept because the invalidation design is the hard part and should not have to be rediscovered.
 
 ## Context
 
@@ -180,3 +180,31 @@ per-user personalisation (B4's taste profiles), which would make an answer
 cacheable for one customer and wrong for another and force the fence to
 grow a user dimension — or the tier to be switched off for personalised
 turns.
+
+## Amendment (2026-10-09) — the cache was removed, the reasoning was not
+
+Everything above shipped and worked. It was then removed in full: both
+tiers, the `answer_cache` and `knowledge_epochs` tables, the epoch bump in
+the drain's transaction, and the `cache_tier` dimension on the interaction
+fact (migrations `0020` here and analytics `0009`).
+
+**Why**, stated plainly: this ADR optimises a ceiling the system is nowhere
+near, and it was being paid for in the only currency that is actually scarce
+here — explainability. Two extra graph nodes, two tables, a counter coupling
+the ingestion path to the chat path, and a tier label threaded into
+analytics, all so an answer arrives sooner under load that does not exist.
+Every turn now calls the model.
+
+**What this costs, concretely.** §7.2 of the capacity plan moves from 300
+generations/s to 375 at the ceiling — A22's 20% floor is withdrawn, and
+NFR-24 named these tiers load-bearing, so this is a real regression against
+a documented non-functional requirement, not a free simplification. It is
+accepted because the ceiling is a Phase-3 concern and the demo is now.
+
+**What survives.** The fence is the part worth keeping: an answer can be
+falsified by a dish it never mentioned, so there is no key set you can
+compute and delete, and a per-city epoch inside the key makes stale entries
+*unreachable* in O(1) instead. Also surviving: `city` belongs in the key and
+not merely in a filter (§2), and a write under a superseded epoch is
+harmless. Reinstating this is the first scaling move, and ADR-0041's
+round-trip accounting still applies to tier 2.

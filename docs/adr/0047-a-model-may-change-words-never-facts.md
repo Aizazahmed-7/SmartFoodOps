@@ -1,6 +1,6 @@
 # 0047 — A model may change words, never facts
 
-**Status**: Accepted (2026-09-29)
+**Status**: Superseded by the amendment below (2026-10-09) — the rewrite layer was removed. The constraint it encodes still governs any future one.
 
 ## Context
 
@@ -89,3 +89,23 @@ and `fallback` (the copy could not be filled in). The customer sees the
 same words for the last two, which is why the field exists: without it a
 broken template is invisible, and nobody can tell whether a machine touched
 a stored sentence.
+
+## Amendment (2026-10-09) — the rewrite layer was removed
+
+The polish cache, `domain/polish.py`'s rejection rules, `PolishedTemplates`,
+and the warm/drain machinery in `ExplainService` are gone. `explain()` now
+resolves a `ReasonCode` and renders a static template, full stop.
+
+This changes **nothing about what a customer reads in the normal case**:
+FR-87's floor was always the deterministic resolver plus templates, and this
+ADR's own posture was that a rewrite changes how an explanation reads and
+nothing about what it says. Removing it removes a second source of wording,
+an async task set that had to be drained on shutdown, and a cache whose
+`source="model"` relabelling was the subtlest thing in B5.
+
+The rule in the title is retained as a **standing constraint on any future
+rewrite layer**: facts are decided by the resolver, a model may only restate
+them, and rejection (fall back to the template) is the response to a
+candidate that fails — never repair. The `source="fallback"` signal
+described in §2 is still live and still the only indicator that a template
+could not be filled; it must not be relabelled.

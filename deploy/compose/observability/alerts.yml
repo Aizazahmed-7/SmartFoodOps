@@ -301,39 +301,6 @@ groups:
           runbook: docs/runbooks.md#assistantsheddingcustomers
           dashboard: http://localhost:3000/d/smartfoodops-assistant
 
-      - alert: AssistantCacheHitRateCollapsed
-        # NFR-24 names the cache tiers load-bearing rather than an
-        # optimisation: provider quota is the binding constraint at the
-        # ceiling, and the hit rate is what keeps generations inside it. A
-        # collapse is a cost and capacity incident, not a slow day.
-        #
-        # The trailing `and` is load-bearing: without a volume floor, an
-        # idle window makes the numerator and denominator both zero and the
-        # ratio reads as a total collapse. An alert that fires every quiet
-        # night is an alert people learn to close.
-        #
-        # The denominator is the EXACT tier's lookups, not every lookup.
-        # The tiers are sequential — `exact_cache -> retrieve ->
-        # semantic_cache -> generate` — and both increment the same counter,
-        # so the semantic tier is only ever consulted after an exact MISS.
-        # Summing both counts one turn once or twice depending on whether
-        # the first tier hit, and the bias runs the wrong way: a healthier
-        # semantic tier adds lookups to the denominator and pushes the
-        # computed rate DOWN. 10 exact hits + 20 semantic hits over 100
-        # turns is a real 30% rate and computed as 15.8% — a page for
-        # beating the floor. One exact lookup happens per turn, so that is
-        # the denominator that means "turns".
-        expr: |
-          sum(rate(assistant_cache_total{result="hit"}[30m]))
-            / sum(rate(assistant_cache_total{tier="exact"}[30m])) < 0.2
-          and sum(rate(assistant_cache_total{tier="exact"}[30m])) > 0.025
-        for: 30m
-        labels: { severity: warn }
-        annotations:
-          summary: "assistant answer-cache hit rate below 20% for 30m (NFR-24)"
-          runbook: docs/runbooks.md#assistantcachehitratecollapsed
-          dashboard: http://localhost:3000/d/smartfoodops-assistant
-
       - alert: AssistantWorkerTargetAbsent
         # The same trap WorkerTargetAbsent documents for order-worker, and
         # the newly added scrape job has the same dns_sd shape: a dead

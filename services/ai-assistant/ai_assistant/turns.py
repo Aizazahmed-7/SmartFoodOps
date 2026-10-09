@@ -234,7 +234,6 @@ def _fact(
         # "" when a model produced it. Without this, `duration_ms` averages a
         # 4ms cache hit against a 2s generation and FR-95's "average AI
         # response time" stops describing anything.
-        "cache_tier": str(state.get("cache_tier", "")),
         # What the answer CITED, not what retrieval found: a conversion
         # credited to a restaurant the customer was never shown is invented.
         "item_ids": list(state.get("item_ids", ())),

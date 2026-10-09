@@ -441,31 +441,6 @@ async def test_the_answer_does_not_wait_for_a_model():
     release.set()
 
 
-async def test_a_polished_key_is_reported_as_model_written():
-    """So a reader of a stored explanation — or support — can tell whether
-    a machine touched the sentence."""
-    from ai_assistant.domain.render import TemplateCache
-
-    class AlreadyPolished(TemplateCache):
-        async def warm(self, reason, locale, bucket):
-            return None
-
-        def polished(self, reason, locale, bucket) -> bool:
-            return True
-
-    service = _service(
-        {
-            "/timeline": httpx.Response(200, json=_timeline_body()),
-            "/internal/deliveries": httpx.Response(404),
-            "/load": httpx.Response(404),
-        }
-    )
-    service._templates = AlreadyPolished()  # noqa: SLF001
-    explanation = await service.explain("ord_1", user_id="usr_1")
-    assert explanation is not None
-    assert explanation.source == "model"
-
-
 async def test_a_plain_template_cache_needs_no_warm_method():
     """The service must work with the bare floor — `warm` is an optional
     capability, not a contract every cache has to implement."""
@@ -479,34 +454,15 @@ async def test_a_plain_template_cache_needs_no_warm_method():
     assert await service.explain("ord_1", user_id="usr_1") is not None
 
 
-async def test_a_locale_a_customer_invented_is_not_a_new_cache_key():
-    """`locale` is a query parameter. It used to reach the rewrite cache
-    unchanged, so every distinct string was a fresh key and — with the
-    rewrite layer — a fresh model call, unbounded, for copy that was
-    English either way."""
-    from ai_assistant.domain.render import TemplateCache as _BaseCache
+def test_a_locale_a_customer_invented_collapses_to_a_supported_one():
+    """`locale` is a query parameter, so a customer can send anything. It
+    is collapsed BEFORE it is used as a template key — otherwise every
+    distinct string would be a fresh key for copy that was English either
+    way. (It used to be observable through the rewrite cache; that layer is
+    gone, so this asserts on the collapse itself.)"""
     from ai_assistant.domain.render import supported
 
-    assert supported("zz") == "en"
-    assert supported("en-GB") == supported("en_US") == supported("EN") == "en"
-
-    seen: list[str] = []
-
-    class Recording(_BaseCache):
-        async def warm(self, reason, locale, bucket):
-            seen.append(locale)
-
-    service = _service(
-        {
-            "/timeline": httpx.Response(200, json=_timeline_body()),
-            "/internal/deliveries": httpx.Response(404),
-            "/load": httpx.Response(404),
-        }
-    )
-    service._templates = Recording()  # noqa: SLF001
-    for locale in ("en", "zz", "en-GB", "xx-YY", "qqqq"):
-        await service.explain("ord_1", user_id="usr_1", locale=locale)
-    assert set(seen) == {"en"}, seen
+    assert {supported(code) for code in ("en", "zz", "en-GB", "xx-YY", "qqqq")} == {"en"}
 
 
 async def test_a_broken_template_is_never_rewritten_or_relabelled():
@@ -539,48 +495,6 @@ async def test_a_broken_template_is_never_rewritten_or_relabelled():
     assert explanation is not None
     assert explanation.source == "fallback"
     assert warmed == []
-
-
-async def test_drain_waits_for_in_flight_rewrites_then_cancels_stragglers():
-    """Shutdown used to close the shared http client and the DB engine out
-    from under live warm tasks — "Task was destroyed but it is pending!" on
-    every deploy, and every in-flight provider call aborted and swallowed."""
-    import asyncio
-
-    from ai_assistant.domain.render import TemplateCache
-
-    finished = asyncio.Event()
-
-    class Slow(TemplateCache):
-        async def warm(self, reason, locale, bucket):
-            try:
-                await asyncio.sleep(30)
-            except asyncio.CancelledError:
-                finished.set()
-                raise
-
-        def polished(self, reason, locale, bucket) -> bool:
-            return False
-
-    service = _service(
-        {
-            "/timeline": httpx.Response(200, json=_timeline_body()),
-            "/internal/deliveries": httpx.Response(404),
-            "/load": httpx.Response(404),
-        }
-    )
-    service._templates = Slow()  # noqa: SLF001
-    await service.explain("ord_1", user_id="usr_1")
-    assert service._warming  # noqa: SLF001
-
-    service._drain_timeout_s = 0.05  # noqa: SLF001
-    await service.drain()
-    assert finished.is_set()
-
-
-async def test_drain_with_nothing_in_flight_is_a_no_op():
-    service = _service({"/timeline": httpx.Response(404)})
-    await service.drain()
 
 
 @pytest.mark.parametrize(

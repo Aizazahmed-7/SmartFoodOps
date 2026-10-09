@@ -76,7 +76,6 @@ async def ask(
     body: AskIn,
     ctx: Chatter,
     request: Request,
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
     """Start a turn. **202, not 200** — the answer does not exist yet, and
     saying otherwise would make the status line a lie about what the body
@@ -94,7 +93,6 @@ async def ask(
         user_id=ctx.sub,
         city=body.city,
         question=body.question,
-        idempotency_key=idempotency_key,
     )
     if started is None:
         # Not-yours and not-found are one shape, as everywhere else in this

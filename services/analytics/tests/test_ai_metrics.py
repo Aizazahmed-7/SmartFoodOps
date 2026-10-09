@@ -32,7 +32,6 @@ def _turn(
     outcome="answered",
     items=("itm_karahi",),
     restaurants=("rst_1",),
-    tier="",
     ms=1800.0,
     at=None,
 ):
@@ -48,7 +47,6 @@ def _turn(
             "city": "islamabad",
             "outcome": outcome,
             "refusal_reason": "none" if outcome != "refused" else "off_topic",
-            "cache_tier": tier,
             "item_ids": list(items),
             "restaurant_ids": list(restaurants),
             "candidates": 8,
@@ -181,36 +179,6 @@ def test_engagement_counts_returning_users_by_conversation(client, app):
 
 
 # ── response time ──────────────────────────────────────────────────
-
-
-def test_response_time_splits_generated_from_cached(client, app):
-    """The blended mean describes neither experience: it drifts with the
-    hit rate rather than with the system getting faster."""
-    _fold(
-        app,
-        turns=[
-            _turn("m1", tier="", ms=4000.0),
-            _turn("m2", tier="", ms=2000.0),
-            _turn("m3", tier="exact", ms=10.0),
-            _turn("m4", tier="semantic", ms=30.0),
-        ],
-    )
-    timing = _ai(client)["response_time_ms"]
-    assert timing["avg"] == 1510.0
-    assert timing["avg_generated"] == 3000.0
-    assert timing["avg_cached"] == 20.0
-    assert timing["cache_hit_rate"] == 0.5
-    assert "assistant_response_seconds" in timing["percentiles"]
-
-
-def test_response_time_is_null_when_a_population_is_empty(client, app):
-    """Every turn was a cache hit: there is no generated mean to report,
-    and 0.0 would claim the model answers instantly."""
-    _fold(app, turns=[_turn("m1", tier="exact", ms=12.0)])
-    timing = _ai(client)["response_time_ms"]
-    assert timing["avg_cached"] == 12.0
-    assert timing["avg_generated"] is None
-    assert timing["cache_hit_rate"] == 1.0
 
 
 # ── recommendation acceptance ──────────────────────────────────────

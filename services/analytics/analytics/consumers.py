@@ -226,7 +226,6 @@ def assistant_values(payload: dict[str, Any], occurred_at: str) -> dict[str, Any
             "city": str(payload.get("city") or ""),
             "outcome": str(payload.get("outcome", "")),
             "refusal_reason": str(payload.get("refusal_reason", "none")),
-            "cache_tier": str(payload.get("cache_tier", "")),
             "item_ids": [str(i) for i in payload.get("item_ids") or []],
             "restaurant_ids": [str(r) for r in payload.get("restaurant_ids") or []],
             "candidates": int(payload.get("candidates") or 0),

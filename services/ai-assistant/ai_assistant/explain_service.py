@@ -19,7 +19,6 @@ render path of a customer who is already waiting for food.
 """
 
 import asyncio
-from dataclasses import replace
 from datetime import UTC, datetime
 
 from .domain.explain import resolve
@@ -50,8 +49,6 @@ class ExplainService:
         self._deliveries = deliveries
         self._load = kitchen_load
         self._templates = templates or TemplateCache()
-        self._warming: set[asyncio.Task[None]] = set()
-        self._drain_timeout_s = 5.0
 
     async def explain(
         self, order_id: str, *, user_id: str, locale: str = "en"
@@ -81,57 +78,11 @@ class ExplainService:
             load=load,
             budget=facts.budget,
         )
-        explanation = render(verdict, locale=locale, cache=self._templates)
-
-        # AFTER the answer exists, and never awaited into it. A model
-        # rewrite changes how this reads and nothing about what it says, so
-        # charging a waiting customer the latency of one would be paying for
-        # the wrong thing. The next reader in the same situation gets it.
-        warm = getattr(self._templates, "warm", None)
-        polished = getattr(self._templates, "polished", None)
-        # Not for a fallback. `source="fallback"` means the chosen copy
-        # could not be filled in, and it is the ONLY signal that a template
-        # is broken — the customer sees the same hand-off sentence a
-        # genuine UNKNOWN produces. Relabelling it "model" would erase the
-        # one thing that makes the defect findable, and rewriting copy that
-        # was never used is wasted spend.
-        if warm is not None and explanation.source != "fallback":
-            self._spawn(warm(verdict.reason, locale, explanation.bucket))
-            if polished is not None and polished(verdict.reason, locale, explanation.bucket):
-                explanation = replace(explanation, source="model")
-        return explanation
-
-    async def drain(self) -> None:
-        """Let in-flight rewrites finish, then stop.
-
-        The lifespan drains the chat plane for the same reason and this was
-        not extended to it: without this, shutdown closes the shared http
-        client and the DB engine out from under live warm tasks, and the
-        loop reports "Task was destroyed but it is pending!" on every
-        deploy. Bounded because each warm is bounded by the router's own
-        timeouts; cancelled if it is not, which `warm()` handles by giving
-        the key its attempt back.
-        """
-        if not self._warming:
-            return
-        done, pending = await asyncio.wait(set(self._warming), timeout=self._drain_timeout_s)
-        del done
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.wait(pending, timeout=2.0)
-
-    def _spawn(self, coro) -> None:
-        """Fire and forget, with the reference held.
-
-        asyncio only holds a WEAK reference to a running task, so a task
-        nobody keeps can be collected mid-await and vanish silently. The
-        set is what stops that; discarding on completion is what stops the
-        set from being a leak.
-        """
-        task = asyncio.create_task(coro)
-        self._warming.add(task)
-        task.add_done_callback(self._warming.discard)
+        # No model anywhere on this path. A deterministic resolver picks the
+        # ReasonCode and a template renders it, which is what FR-87 names the
+        # floor — the model rewrite that used to sit here was removed as
+        # optimisation, not capability.
+        return render(verdict, locale=locale, cache=self._templates)
 
     async def _kitchen(self, restaurant_id: str):
         if self._load is None:

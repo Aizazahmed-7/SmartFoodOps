@@ -117,18 +117,6 @@ async def test_every_outcome_is_recorded_including_the_bad_ones(outcome):
     assert (await _rows(sessions))[0].outcome == outcome
 
 
-async def test_the_cache_tier_is_kept_so_response_time_stays_meaningful():
-    """Without the split, "average AI response time" averages a 4ms exact
-    hit against a 2s generation and stops describing anything."""
-    projector, sessions = await _projector()
-    await projector.handle_batch(
-        [_event("msg_a", cache_tier="exact", duration_ms=3.7), _event("msg_b", duration_ms=2400.0)]
-    )
-    by_id = {row.message_id: row for row in await _rows(sessions)}
-    assert by_id["msg_a"].cache_tier == "exact"
-    assert by_id["msg_b"].cache_tier == ""
-
-
 # ── forward compatibility and bad data ─────────────────────────────
 
 

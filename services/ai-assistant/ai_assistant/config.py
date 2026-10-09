@@ -138,21 +138,17 @@ class Settings(BaseSettings):
     # retriever is not, so this is a context-cap control as much as a
     # quality one (ADR-0030 §5) — and a model given forty candidates writes
     # a worse answer than one given eight.
-    # --- Answer cache (B3, FR-74) ---------------------------------------
     # "off" disables both tiers. The unit suite and `make dev` run without
     # it so a test never has to reason about a warm cache it did not set up.
-    answer_cache: Literal["on", "off"] = "on"
     # The bound on how long a staleness the FENCE does not catch survives:
     # a prompt edit, a model swap, a grounding rule tightened. An hour is
     # short enough that nobody ships a fix and waits, long enough that a
     # popular question is answered from cache all lunchtime.
-    answer_cache_ttl_s: int = 3600
     # COSINE DISTANCE, so smaller is stricter — 0.12 is roughly "a rephrasing
     # of the same question", not "another question about food". Tuned against
     # the golden set rather than guessed: too loose and the cache answers a
     # question nobody asked, which is a correctness bug wearing a latency
     # improvement's clothes.
-    answer_cache_distance: float = 0.12
 
     # Catalog, for the live card resolution FR-60 requires. The assistant
     # holds the system identity the internal snapshot endpoint needs, which

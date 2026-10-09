@@ -38,60 +38,6 @@ class PostgresVectorStore:
             stored.update({row.id: row.content for row in rows})
         return stored
 
-    async def retrieval_state(self, *, restaurant_id: str) -> set[tuple]:
-        """Everything a RETRIEVAL predicate reads, per row.
-
-        `content_hash` deliberately excludes `available` and `status`
-        (FR-60: volatile facts are not embedded), which is right for
-        deciding what to re-embed and wrong for deciding whether the cache
-        is stale — retrieval hard-filters on both, and on `city`. A dish
-        being 86'd or a kitchen pausing changes what a query returns while
-        leaving every content hash identical, so the drain had no signal and
-        cached answers kept recommending a closed kitchen (B3 review).
-        """
-        state: set[tuple[str, str, bool, str]] = set()
-        # Only items carry `available` — a restaurant chunk is identity, not
-        # a sellable thing (ADR-0032 §5's table split), so it reports True
-        # and lets `status` and `city` do the work.
-        items = await self._s.execute(
-            sa.select(
-                item_chunks.c.id,
-                item_chunks.c.city,
-                item_chunks.c.available,
-                item_chunks.c.status,
-            ).where(
-                item_chunks.c.restaurant_id == restaurant_id,
-            )
-        )
-        state.update((r.id, r.city, bool(r.available), r.status) for r in items)
-        restaurants = await self._s.execute(
-            sa.select(
-                restaurant_chunks.c.id, restaurant_chunks.c.city, restaurant_chunks.c.status
-            ).where(
-                restaurant_chunks.c.restaurant_id == restaurant_id,
-            )
-        )
-        state.update((r.id, r.city, True, r.status) for r in restaurants)
-        return state
-
-    async def cities_for(self, *, restaurant_id: str) -> set[str]:
-        """Which cities this restaurant currently has rows in.
-
-        Read BEFORE the rewrite, so a branch whose address moves from
-        Springfield to Shelbyville bumps both: the rows move, and Springfield
-        would otherwise keep serving cached answers recommending a
-        restaurant no longer retrievable there (B3 review).
-        """
-        found: set[str] = set()
-        for table in (item_chunks, restaurant_chunks):
-            rows = await self._s.execute(
-                sa.select(table.c.city).where(
-                    table.c.restaurant_id == restaurant_id,
-                )
-            )
-            found.update(row.city for row in rows)
-        return found
-
     async def texts_for(self, *, chunk_ids: Sequence[str]) -> dict[str, tuple[str, str]]:
         """`chunk_id -> (item_id, content)` for candidates the retriever
         ranked.

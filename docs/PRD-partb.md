@@ -93,10 +93,10 @@ Priorities: **P0** = required for acceptance; **P1** = completeness; **P2** = st
 | ID | Requirement | Pri | Acceptance criteria |
 |---|---|---|---|
 | FR-57 | Menu knowledge ingested from `catalog.changes` | P0 | Consumer group `assistant.knowledge.v1`, 30 s per-restaurant debounce, dedupe mode declared `NATURAL_KEY` (chunk id) per DoD-2; duplicate-delivery and poison-message tests green |
-| FR-58 | Chunking + embedding of menu knowledge | P0 | One chunk per item (name + description + tags + category + cuisine) and one per restaurant; `content_hash` skips unchanged text so a replay embeds nothing; `model_version` stamped on every row |
+| FR-58 | Chunking + embedding of menu knowledge | P0 | One chunk per item (name + description + tags + category + cuisine) and one per restaurant; unchanged text is skipped so a replay embeds nothing — by comparing `content` directly rather than a stored `content_hash` (ADR-0033 amendment). No `model_version`: the model is fixed by `Settings` (ADR-0032 amendment) |
 | FR-59 | Index is rebuildable from the log alone | P0 | Truncate `menu_chunks`, start a fresh consumer group, and the index reconstructs from the compacted topic with no backfill script — demonstrated live |
 | FR-60 | Volatile facts are never embedded | P0 | Price, availability and open/closed are excluded from chunk text; every item the assistant names is re-resolved through Catalog's cache-bypassing snapshot endpoint before it is rendered |
-| FR-61 | Reindex on embedding-model change | P1 | A `model_version` bump drives a Celery rolling reindex; queries filter on the active version so old and new vectors never mix in one result set |
+| FR-61 | Reindex on embedding-model change | P1 | **Withdrawn (2026-10-09).** Superseded by FR-59: a model change is a rebuild — truncate the chunk tables, reset the consumer group, replay the compacted topic. The guarantee FR-61 existed to give (vectors from two models never mix in one result set) is kept by *replacement* rather than by a `model_version` predicate; the cost is that search degrades to its lexical leg for the length of the replay. ADR-0031 amendment |
 
 ### 3.2 Semantic discovery
 
@@ -119,7 +119,7 @@ Priorities: **P0** = required for acceptance; **P1** = completeness; **P2** = st
 | FR-71 | Prompt-injection resistance | P0 | Restaurant- and customer-authored text is delimited and labelled as data; the eval suite plants injection strings in menu descriptions and feedback and asserts the instruction is not followed |
 | FR-72 | Safety refusals | P0 | Allergen-safety and medical questions are refused with a hand-off, never answered from `item_tags`; declared tags may be *surfaced*, never asserted as safety |
 | FR-73 | No PII in prompts | P0 | Addresses, phone numbers, emails and full names are redacted before any provider call; user identity in a prompt is an opaque id (NFR-12 extended) |
-| FR-74 | Answer caching | P1 | Exact-match then semantic cache, both fenced by `menu_version` and geo bucket; hit ratio visible on `assistant_cache_total{tier,result}` |
+| FR-74 | Answer caching | P1 | **Built, then withdrawn (2026-10-09).** Both tiers and the epoch fence shipped and worked; all of it was removed for explainability (ADR-0045 amendment). Consequence is recorded, not hidden: NFR-24 names cache tiers load-bearing, and the ceiling in capacity-plan §7.2 moves from 300 to 375 generations/s. **First item to reinstate before that ceiling is approached** |
 
 ### 3.4 Recommendations & order support
 
@@ -208,7 +208,7 @@ against the running stack — CI never runs compose, so live proof is the standa
 | Phase | Scope | Entry criteria | Exit criteria |
 |---|---|---|---|
 | **B0 — Foundations** | ADRs 0029–0031, this PRD, service skeleton, all ports + fakes, `ModelRouter`, budget breaker, metrics, compose/Makefile/CI wiring, eval harness skeleton | Part A on `main`, green | `make up-ai` green; `/healthz`+`/readyz`+`/metrics`; an internal echo route streams tokens live from **both** providers; 100% coverage with the fake LLM and no key present |
-| **B1 — Knowledge pipeline** | Chunking, `EmbeddingPort`, pgvector schema + per-city HNSW, `assistant.knowledge.v1`, Celery reindex | B0 exit **+ ADR-0032 accepted** — it picks the pgvector route (pinned image, rebuilt volume) and the vector substrate; the obvious tag swap is a glibc downgrade the existing volume rejects (found live in B0, `docs/local-dev.md` §3). ADR-0033 (chunking + embedding projection) lands *inside* B1, with the code it describes | Live menu edit visible in `menu_chunks` inside the debounce window; **truncate the table, replay the topic, the index rebuilds identically**; duplicate-delivery + poison tests green |
+| **B1 — Knowledge pipeline** | Chunking, `EmbeddingPort`, pgvector schema + per-city HNSW, `assistant.knowledge.v1` | B0 exit **+ ADR-0032 accepted** — it picks the pgvector route (pinned image, rebuilt volume) and the vector substrate; the obvious tag swap is a glibc downgrade the existing volume rejects (found live in B0, `docs/local-dev.md` §3). ADR-0033 (chunking + embedding projection) lands *inside* B1, with the code it describes | Live menu edit visible in `menu_chunks` inside the debounce window; **truncate the table, replay the topic, the index rebuilds identically**; duplicate-delivery + poison tests green |
 | **B2 — Semantic discovery** | Hybrid retriever + RRF, internal retrieval API, Catalog `HybridSearch` adapter with lexical fallback, FE search | B1 exit | Vague-query golden set passes; retrieval p99 < 150 ms; **kill the assistant → `/v1/search` still answers** |
 | **B3 — Food Q&A + streaming** | LangGraph turn, SSE token relay, conversation store, grounding validator, guardrails, FE chat panel, first `assistant.events` | B2 exit; **ADR-0042** (stream-resume contract) and **ADR-0043** (grounding/guardrail posture) accepted before the code lands | Streamed grounded answer end-to-end; **connection killed mid-answer resumes with no gap or duplicate**; planted injection not followed; provider down → 503 and the panel degrades |
 | **B4 — Recommendations** | `order_item_facts`, taste profiles, budget/cuisine/combo recommenders, acceptance tracking, FE surfaces | B3 exit | Every recommendation exists, is available, and is priced live; acceptance rate measurable end to end |
@@ -229,7 +229,7 @@ delivering milestone. Reviewers: this is the completeness check against the Part
 | FR-58 | Chunking + embedding | ai-assistant `domain/knowledge`, `EmbeddingPort` | — | B1 |
 | FR-59 | Rebuildable index | ai-assistant consumers | `c1.catalog.changes` (compacted) | B1 |
 | FR-60 | No volatile facts embedded | ai-assistant, Catalog snapshot endpoint | — | B1 |
-| FR-61 | Model-version reindex | Celery `assistant.reindex` | — | B1 |
+| FR-61 | Model-version reindex | *withdrawn — see §3.1* | — | B1 |
 | FR-62 | Hybrid retrieval | ai-assistant `retrieval/`, `VectorStore` | — | B2 |
 | FR-63 | Geo/availability scoping | ai-assistant `retrieval/` | — | B2 |
 | FR-64 | Vague-query handling | ai-assistant `retrieval/`, eval suite | — | B2 |
@@ -242,7 +242,7 @@ delivering milestone. Reviewers: this is the completeness check against the Part
 | FR-71 | Injection resistance | ai-assistant prompt assembly, eval suite | — | B3 |
 | FR-72 | Safety refusals | ai-assistant `domain/policy` | — | B3 |
 | FR-73 | No PII in prompts | ai-assistant `domain/redaction` | — | B3 |
-| FR-74 | Answer caching | ai-assistant, Redis `assistant:*`, `answer_cache` | — | B3 |
+| FR-74 | Answer caching | *withdrawn — see §3.3* | — | B3 |
 | FR-75 | Personalised recommendations | ai-assistant, `taste_profiles` | `c1.orders.events` (`assistant.features.v1`) | B4 |
 | FR-76 | Budget recommendations | ai-assistant `retrieval/` | — | B4 |
 | FR-77 | Cuisine / combo | ai-assistant, `order_item_facts` | — | B4 |

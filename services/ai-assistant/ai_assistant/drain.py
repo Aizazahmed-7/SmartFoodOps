@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from smartfood_otel import get_logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .adapters.repo import EpochRepo, Pending, PendingRepo
+from .adapters.repo import Pending, PendingRepo
 from .adapters.vector_store import PostgresVectorStore
 from .domain.knowledge import RestaurantKnowledge, chunk
 from .domain.ports import EmbeddingPort, ItemUpsert, RestaurantUpsert
@@ -115,11 +115,6 @@ class KnowledgeDrain:
         async with self._sessions() as session:
             store = PostgresVectorStore(session)
             stored = await store.contents_for(restaurant_id=pending.restaurant_id)
-            # Read before the rewrite: what retrieval can currently see, and
-            # where. Both are compared against the new rows below to decide
-            # whether the answer cache's fence has to move.
-            was_retrievable = await store.retrieval_state(restaurant_id=pending.restaurant_id)
-            was_in = await store.cities_for(restaurant_id=pending.restaurant_id)
             stale = self._stale(knowledge, stored)
 
         # One batched call for everything whose text changed. `_stale` is
@@ -147,23 +142,6 @@ class KnowledgeDrain:
             kept = await PendingRepo(session).complete(
                 restaurant_id=pending.restaurant_id, payload=pending.payload
             )
-            # The answer cache's fence, moved in the same transaction as the
-            # chunks it fences (FR-74). Only when something ACTUALLY changed:
-            # a pass that re-confirms an unchanged menu would otherwise cold-
-            # start the whole city's cache on every catalog heartbeat.
-            #
-            # "Changed" means anything RETRIEVAL can see, not just text: an
-            # 86'd dish and a paused kitchen both leave every content hash
-            # identical while changing what a query returns.
-            now_retrievable = await PostgresVectorStore(session).retrieval_state(
-                restaurant_id=pending.restaurant_id
-            )
-            if stale or deleted or now_retrievable != was_retrievable:
-                # Every city the restaurant was in AND is now in. A branch
-                # that moves leaves the city it left holding cached answers
-                # that recommend it.
-                for city in was_in | {knowledge.restaurant.city}:
-                    await EpochRepo(session).bump(city=city, now=now)
             await session.commit()
 
         self._record(knowledge, stored, len(stale), deleted, pending, now)

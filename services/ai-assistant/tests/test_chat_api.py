@@ -18,8 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from ai_assistant.adapters.conversations import COMPLETE, FAILED, STREAMING, ConversationRepo
-from ai_assistant.chat import ChatService
+from ai_assistant.adapters.conversations import COMPLETE, STREAMING, ConversationRepo
 from ai_assistant.db import metadata
 from ai_assistant.main import create_app
 from ai_assistant.turns import channel_for, frame
@@ -153,22 +152,6 @@ async def test_a_question_is_accepted_before_the_answer_exists():
     assert body["conversation_id"].startswith("cnv_")
     assert body["stream"] == f"/sse/assistant/{body['message_id']}"
     assert body["ticket"]
-
-
-async def test_a_retry_streams_the_turn_that_is_already_running():
-    """FR-67. Two generations for one question is two provider bills and two
-    different answers — the second reader watching their text get replaced."""
-    app = make_app(FakeRealtime())
-    async with _asking(app) as client:
-        headers = {**CUSTOMER, "Idempotency-Key": "k1"}
-        first = (await client.post(ASK, json=QUESTION, headers=headers)).json()
-        retry = await client.post(
-            ASK,
-            json={**QUESTION, "conversation_id": first["conversation_id"]},
-            headers=headers,
-        )
-    assert retry.status_code == 202
-    assert retry.json()["message_id"] == first["message_id"]
 
 
 def test_asking_requires_a_customer_or_a_partner():
@@ -569,39 +552,6 @@ async def test_an_idempotency_key_cannot_reach_another_customers_answer():
             headers={**stranger, "Idempotency-Key": "k1"},
         )
     assert stolen.status_code == 404
-
-
-async def test_a_turn_in_flight_is_settled_at_shutdown():
-    """A turn killed by the loop closing leaves its row `streaming` forever:
-    every later reader snapshots `done=False`, subscribes to a channel
-    nobody will publish on, and reconnects for good — and the KPI loses one
-    answer per deploy with no way to see it in the number."""
-    import asyncio
-
-    app = make_app(FakeRealtime())
-
-    class Slow:
-        def __init__(self, emit: Any) -> None:
-            self._emit = emit
-
-        async def ainvoke(self, state: Any) -> dict[str, Any]:
-            await self._emit("thinking ")
-            await asyncio.sleep(3600)  # a generation that never returns
-            return {}  # pragma: no cover — unreachable
-
-    app.state.chat = ChatService(
-        app.state.sessions, FakeRealtime().publish, lambda emit: Slow(emit)
-    )
-    await _schema(app)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
-        started = (await client.post(ASK, json=QUESTION, headers=CUSTOMER)).json()
-        await asyncio.sleep(0.05)  # let the turn reach its sleep
-        await app.state.chat.drain(timeout_s=2.0)
-
-    async with app.state.sessions() as session:
-        settled = await ConversationRepo(session).message(started["message_id"])
-    assert settled is not None and settled.status == FAILED
 
 
 class FakeRecommender:

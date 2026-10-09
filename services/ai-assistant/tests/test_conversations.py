@@ -76,26 +76,6 @@ async def test_a_conversation_is_created_once_and_touched_after(sessions):
 # ── idempotency (FR-67) ─────────────────────────────────────────────
 
 
-async def test_a_retried_post_does_not_start_a_second_generation(sessions):
-    """The row IS the idempotency record (ADR-0024). Two generations for one
-    question is a second provider bill and two different answers."""
-    await _conversation(sessions)
-    assert await _message(sessions, "m1", role="user", idempotency_key="k1") is True
-    assert await _message(sessions, "m2", role="user", idempotency_key="k1") is False
-    async with sessions() as s:
-        count = await s.scalar(sa.select(sa.func.count()).select_from(messages))
-    assert count == 1
-
-
-async def test_the_same_key_in_another_conversation_is_a_different_message(sessions):
-    """Keys are scoped to a conversation — two customers can pick the same
-    client-generated key without colliding."""
-    await _conversation(sessions, "c1")
-    await _conversation(sessions, "c2")
-    assert await _message(sessions, "m1", "c1", role="user", idempotency_key="k1") is True
-    assert await _message(sessions, "m2", "c2", role="user", idempotency_key="k1") is True
-
-
 async def test_messages_without_a_key_never_collide(sessions):
     """Assistant messages carry no key; a unique constraint over NULLs must
     not make the second one vanish."""

@@ -161,9 +161,6 @@ class AnalyticsService:
             },
             "response_time_ms": {
                 "avg": _ms(totals["avg_ms"]),
-                "avg_generated": _ms(totals["avg_generated"]),
-                "avg_cached": _ms(totals["avg_cached"]),
-                "cache_hit_rate": _rate(totals["cached"], turns),
                 # The mean is what FR-95 asks for; the tail is what a
                 # customer feels. Prometheus already keeps the histogram,
                 # so this points at it instead of re-deriving a worse one.

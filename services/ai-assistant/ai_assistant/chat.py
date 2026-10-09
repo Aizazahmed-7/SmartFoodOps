@@ -57,16 +57,14 @@ class ChatService:
         user_id: str,
         city: str,
         question: str,
-        idempotency_key: str | None,
     ) -> str | None:
         """The message id this turn will stream on, or None when the
         conversation belongs to somebody else."""
         # One clock reading for the whole turn, and the ANSWER is stamped
-        # after the QUESTION even though its row is written first — the
-        # assistant row carries the idempotency guard, so it has to win or
-        # lose before anything else is written. `created_at` is the
-        # conversation's order, not the order rows reached the table; found
-        # live, as a history that replayed an answer before its own question.
+        # after the QUESTION even though its row is written first.
+        # `created_at` is the conversation's order, not the order rows
+        # reached the table — found live, as a history that replayed an
+        # answer before its own question.
         asked_at = _now()
         answered_at = asked_at + timedelta(microseconds=1)
         async with self._sessions() as session:
@@ -78,26 +76,14 @@ class ChatService:
                 # is written, so a probe cannot even tell from a side effect
                 # that the id exists.
                 return None
-            # The ASSISTANT row carries the key, so a retry finds the turn
-            # that is already running instead of starting a second one — two
-            # generations for one question is two bills and two answers.
-            fresh = await repo.start_message(
+            await repo.start_message(
                 message_id=message_id,
                 conversation_id=conversation_id,
                 role="assistant",
                 content="",
                 status=STREAMING,
                 now=answered_at,
-                idempotency_key=idempotency_key,
             )
-            if not fresh and idempotency_key:
-                existing = await repo.message_for_key(
-                    conversation_id=conversation_id, key=idempotency_key
-                )
-                await session.commit()
-                if existing is not None:
-                    return existing.id
-                return message_id  # pragma: no cover — refused yet absent
             asked_id = f"msg_{uuid4().hex}"
             await repo.start_message(
                 message_id=asked_id,
@@ -139,36 +125,6 @@ class ChatService:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return message_id
-
-    async def drain(self, *, timeout_s: float = 5.0) -> None:
-        """Settle every in-flight turn before the process goes away.
-
-        Without this a rolling restart strands its turns: the task is killed
-        at loop close, `finish_message` never runs, and the row stays
-        `streaming` forever — so every later reader snapshots `done=False`,
-        subscribes to a channel nobody will publish on, and reconnects for
-        good. The KPI undercounts by one answer per deploy, permanently,
-        with no way to see it in the number.
-
-        Cancellation, not a wait for completion: a generation can take
-        seconds and shutdown cannot. `run_turn` re-raises `CancelledError`,
-        so each task settles its own row through the same path a failure
-        takes.
-        """
-        if not self._tasks:
-            return
-        pending = set(self._tasks)
-        for task in pending:
-            task.cancel()
-        done, still_running = await asyncio.wait(pending, timeout=timeout_s)
-        for task in done:
-            # A cancelled task is the expected shape here; anything else
-            # raised during its own cleanup, which is worth a line because
-            # the row it was settling may not have been.
-            if not task.cancelled() and task.exception() is not None:  # pragma: no cover
-                log.warning("turn failed during shutdown", error=str(task.exception()))
-        if still_running:  # pragma: no cover — a task ignoring cancellation
-            log.warning("turns did not settle before shutdown", count=len(still_running))
 
     async def owner(self, message_id: str) -> str | None:
         async with self._sessions() as session:

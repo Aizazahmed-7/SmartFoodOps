@@ -46,7 +46,6 @@ from .domain.service import AssistantService
 from .drafts import DraftStore
 from .explain_service import ExplainService
 from .menu_facts import MenuFactsReader
-from .polish_cache import PolishedTemplates
 from .profiles import ProfileBuilder
 from .recommend import Recommender
 from .restaurant_facts import RestaurantFactsReader
@@ -94,26 +93,6 @@ def _embeddings(settings: Settings, http: httpx.AsyncClient | None) -> Embedding
     return FakeEmbeddings(dimensions=settings.embedding_dimensions)
 
 
-def _answer_cache(settings: Settings, sessions: Any, redis: Any) -> Any:
-    """Both tiers, or neither.
-
-    An exact tier without Redis is not a degraded cache, it is a lookup that
-    always misses plus a write that always fails — so the switch is one
-    switch, and `answer_cache=off` means the turn does exactly what it did
-    before FR-74 existed.
-    """
-    if settings.answer_cache == "off" or redis is None:
-        return None
-    from .adapters.answer_cache import PostgresSemanticCache, RedisExactCache  # noqa: PLC0415
-    from .cache import AnswerCache  # noqa: PLC0415
-
-    return AnswerCache(
-        sessions,
-        exact_tier=RedisExactCache(redis, ttl_s=settings.answer_cache_ttl_s),
-        semantic_tier=PostgresSemanticCache(sessions, threshold=settings.answer_cache_distance),
-    )
-
-
 def _publish(bus: Any) -> Any:
     """The turn's sink onto the hint channel.
 
@@ -135,16 +114,10 @@ def _graph_builder(app: FastAPI, settings: Settings) -> Any:
     def build(emit: Any) -> Any:  # pragma: no cover — live wiring
         from .domain.graph import build_turn
 
-        cache = app.state.answer_cache
         return build_turn(
             retrieve=_retrieve_with_text(app, settings.candidate_limit),
             stream=app.state.service.router.stream,
             emit=emit,
-            exact=cache.exact if cache else None,
-            semantic=cache.semantic if cache else None,
-            remember=cache.remember if cache else None,
-            fallback=_popular_in(app, settings.candidate_limit),
-            goes_with=_goes_with(app, settings.recommend_limit),
             limit=settings.candidate_limit,
         )
 
@@ -445,7 +418,6 @@ def create_app(
         # killed by the loop closing leaves its row `streaming` forever —
         # every later reader then snapshots `done=False` and reconnects for
         # good (found by the B3 review).
-        await app.state.chat.drain()
         for task in tasks:
             task.cancel()  # cancellation is the consumer's shutdown signal
         for task in tasks:
@@ -453,7 +425,6 @@ def create_app(
                 await task
         # Before the clients close: a warm task mid-call would otherwise
         # die against a closed pool and be swallowed as an ordinary failure.
-        await app.state.explanations.drain()
         await internal_http.aclose()
         if own_producer is not None:  # pragma: no cover — live wiring
             await own_producer.stop()  # flushes whatever the last pass sent
@@ -498,7 +469,6 @@ def create_app(
         history=settings.history_limit,
         shown=_record_answer_shown(app),
     )
-    app.state.answer_cache = _answer_cache(settings, sessions, own_redis)
     app.state.cards = CardService(sessions, CatalogClient(settings.catalog_base_url, internal_http))
     app.state.kitchen_load = InventoryClient(settings.inventory_base_url, internal_http)
     app.state.drafts = DraftStore(sessions)
@@ -518,7 +488,7 @@ def create_app(
         # NoProviderAvailable on the first (and only) attempt per key, and
         # every explanation goes on being answered from the template —
         # FR-87, arrived at by the machinery rather than by a flag.
-        templates=PolishedTemplates(TemplateCache(), router=app.state.service.router),
+        templates=TemplateCache(),
     )
     app.state.retriever = PostgresRetriever(sessions, embeddings, ef_search=settings.hnsw_ef_search)
     app.state.recommender = Recommender(sessions)

@@ -230,10 +230,8 @@ health. Verify: p95 bends back under 1.5s within one 10m window.
 **Means**: complete answers (`task="generate"` only) are breaching NFR-21's
 6s p95. `explain` is excluded deliberately — it is templated and fast, and
 averaging the two lets the fast path hide the slow one.
-**Check**: the cache hit-rate panel first. A hit answers in milliseconds, so
-a hit-rate collapse raises this number without anything being slower — the
-two alerts fire together and the cache one is the cause. Then the failover
-panel: a sustained failover means every answer pays a retry before it starts.
+**Check**: the failover panel — a sustained failover means every answer
+pays a retry before it starts.
 **Fix**: cache-driven → **AssistantCacheHitRateCollapsed**; provider-driven →
 **AssistantProviderFailoversSustained**. Verify: p95 under 6s.
 
@@ -311,23 +309,6 @@ loop is responsible.
 raise the budget deliberately or accept the shed and confirm customers are
 landing on the non-AI answer rather than a blank screen (NFR-29). Verify:
 refusals stop, or the reason narrows to per-user.
-
-## AssistantCacheHitRateCollapsed
-
-**Means**: the answer cache is serving under 20% of lookups. NFR-24 names the
-cache tiers **load-bearing rather than an optimisation** — at the ceiling,
-provider quota is the binding constraint and the hit rate is what keeps
-generation volume inside it. So this is a cost and capacity incident, not a
-slow day, and it will drag **AssistantAnswerLatencyBreach** with it.
-**Check**: both tiers on the panel — `exact` collapsing alone suggests
-question text changed shape (a new entry point, a client appending something
-per-request); `semantic` collapsing too suggests the embedding path or the
-index behind it; a recent deploy that changed the cache key, or a model
-change followed by a rebuild — the epoch and `model_version` in the fence
-both move, so every prior entry stops matching by design.
-**Fix**: if a key change caused it the cache is cold and will refill — confirm
-the rate is climbing rather than flat. A genuinely broken tier is a code fix;
-until then watch quota. Verify: hit rate climbing back over 20%.
 
 ## AssistantWorkerTargetAbsent
 
